@@ -7,6 +7,7 @@ import functools
 from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+from tradingagents.agents.trader.magpie import render_magpie_signal_summary
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -24,6 +25,7 @@ def create_trader(llm):
         company_name = state["company_of_interest"]
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
+        magpie_signal = render_magpie_signal_summary(state.get("magpie_signal"))
 
         messages = [
             {
@@ -31,7 +33,9 @@ def create_trader(llm):
                 "content": (
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan."
+                    "Anchor your reasoning in the analysts' reports, the research plan, and the "
+                    "deterministic Magpie strategy signal when it is available. If the Magpie signal "
+                    "is unavailable or disabled, say so briefly and rely on the rest of the evidence."
                     + get_language_instruction()
                 ),
             },
@@ -43,6 +47,7 @@ def create_trader(llm):
                     f"insights from current technical market trends, macroeconomic indicators, and "
                     f"social media sentiment. Use this plan as a foundation for evaluating your next "
                     f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                    f"Magpie Strategy Signal:\n{magpie_signal}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },

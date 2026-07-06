@@ -9,6 +9,8 @@ run produces the same on-disk report tree a CLI run does.
 from datetime import datetime
 from pathlib import Path
 
+from tradingagents.agents.trader.magpie import render_magpie_signal_summary
+
 
 def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path."""
@@ -61,11 +63,21 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
             sections.append(f"## II. Research Team Decision\n\n{content}")
 
     # 3. Trading
-    if final_state.get("trader_investment_plan"):
+    if final_state.get("trader_investment_plan") or final_state.get("magpie_signal"):
         trading_dir = save_path / "3_trading"
         trading_dir.mkdir(exist_ok=True)
-        (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"], encoding="utf-8")
-        sections.append(f"## III. Trading Team Plan\n\n### Trader\n{final_state['trader_investment_plan']}")
+        trading_parts = []
+        if final_state.get("magpie_signal"):
+            magpie_summary = render_magpie_signal_summary(final_state["magpie_signal"])
+            (trading_dir / "magpie.md").write_text(magpie_summary, encoding="utf-8")
+            trading_parts.append(("Magpie Strategy", magpie_summary))
+        if final_state.get("trader_investment_plan"):
+            (trading_dir / "trader.md").write_text(final_state["trader_investment_plan"], encoding="utf-8")
+            trading_parts.append(("Trader", final_state["trader_investment_plan"]))
+        sections.append(
+            "## III. Trading Team Plan\n\n"
+            + "\n\n".join(f"### {name}\n{text}" for name, text in trading_parts)
+        )
 
     # 4. Risk Management
     if final_state.get("risk_debate_state"):

@@ -19,11 +19,19 @@ from .errors import (
 )
 from .fred import get_macro_data as get_fred_macro_data
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .schwab import get_indicator as get_schwab_indicator
+from .schwab import get_intraday_stock as get_schwab_intraday_stock
+from .schwab import get_implied_move_data as get_schwab_implied_move_data
+from .schwab import get_market_internals as get_schwab_market_internals
+from .schwab import get_stock as get_schwab_stock
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
     get_fundamentals as get_yfinance_fundamentals,
     get_income_statement as get_yfinance_income_statement,
+    get_YFin_intraday_data_online,
+    get_implied_move_data as get_yfinance_implied_move_data,
+    get_market_internals as get_yfinance_market_internals,
     get_insider_transactions as get_yfinance_insider_transactions,
     get_stock_stats_indicators_window,
     get_YFin_data_online,
@@ -37,7 +45,8 @@ TOOLS_CATEGORIES = {
     "core_stock_apis": {
         "description": "OHLCV stock price data",
         "tools": [
-            "get_stock_data"
+            "get_stock_data",
+            "get_intraday_stock_data",
         ]
     },
     "technical_indicators": {
@@ -45,6 +54,18 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_indicators"
         ]
+    },
+    "market_internals": {
+        "description": "Intraday market internals such as $ADD, $TICK, and $VOLD",
+        "tools": [
+            "get_market_internals",
+        ],
+    },
+    "implied_move_data": {
+        "description": "Options/IV-derived implied move bounds for intraday strategy factors",
+        "tools": [
+            "get_implied_move_data",
+        ],
     },
     "fundamental_data": {
         "description": "Company fundamentals",
@@ -82,6 +103,7 @@ VENDOR_LIST = [
     "fred",
     "polymarket",
     "alpha_vantage",
+    "schwab",
 ]
 
 # Optional enrichment categories. These add macro/event context to the news
@@ -97,11 +119,25 @@ VENDOR_METHODS = {
     "get_stock_data": {
         "alpha_vantage": get_alpha_vantage_stock,
         "yfinance": get_YFin_data_online,
+        "schwab": get_schwab_stock,
+    },
+    "get_intraday_stock_data": {
+        "yfinance": get_YFin_intraday_data_online,
+        "schwab": get_schwab_intraday_stock,
     },
     # technical_indicators
     "get_indicators": {
         "alpha_vantage": get_alpha_vantage_indicator,
         "yfinance": get_stock_stats_indicators_window,
+        "schwab": get_schwab_indicator,
+    },
+    "get_market_internals": {
+        "yfinance": get_yfinance_market_internals,
+        "schwab": get_schwab_market_internals,
+    },
+    "get_implied_move_data": {
+        "schwab": get_schwab_implied_move_data,
+        "yfinance": get_yfinance_implied_move_data,
     },
     # fundamental_data
     "get_fundamentals": {

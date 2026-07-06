@@ -11,6 +11,7 @@ from tradingagents.agents import (
     create_bull_researcher,
     create_conservative_debator,
     create_fundamentals_analyst,
+    create_magpie_signal_node,
     create_market_analyst,
     create_msg_delete,
     create_neutral_debator,
@@ -83,6 +84,7 @@ class GraphSetup:
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
         bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
         research_manager_node = create_research_manager(self.deep_thinking_llm)
+        magpie_node = create_magpie_signal_node()
         trader_node = create_trader(self.quick_thinking_llm)
 
         # Create risk analysis nodes
@@ -104,6 +106,7 @@ class GraphSetup:
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)
         workflow.add_node("Research Manager", research_manager_node)
+        workflow.add_node("Magpie", magpie_node)
         workflow.add_node("Trader", trader_node)
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
         workflow.add_node("Neutral Analyst", neutral_analyst)
@@ -141,7 +144,8 @@ class GraphSetup:
                 self.conditional_logic.should_continue_debate,
                 DEBATE_PATH_MAP,
             )
-        workflow.add_edge("Research Manager", "Trader")
+        workflow.add_edge("Research Manager", "Magpie")
+        workflow.add_edge("Magpie", "Trader")
         workflow.add_edge("Trader", "Aggressive Analyst")
         # All three risk edges share the complete RISK_ANALYSIS_PATH_MAP (#1088).
         for risk_node in ("Aggressive Analyst", "Conservative Analyst", "Neutral Analyst"):

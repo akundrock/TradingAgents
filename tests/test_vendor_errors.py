@@ -23,6 +23,10 @@ from tradingagents.dataflows.errors import (
     VendorRateLimitError,
 )
 from tradingagents.dataflows.fred import FredNotConfiguredError
+from tradingagents.dataflows.schwab import (
+    SchwabNotConfiguredError,
+    SchwabRateLimitError,
+)
 
 
 @pytest.mark.unit
@@ -39,8 +43,11 @@ class HierarchyTests(unittest.TestCase):
         self.assertTrue(issubclass(AlphaVantageRateLimitError, VendorRateLimitError))
         self.assertTrue(issubclass(AlphaVantageNotConfiguredError, VendorNotConfiguredError))
         self.assertTrue(issubclass(FredNotConfiguredError, VendorNotConfiguredError))
+        self.assertTrue(issubclass(SchwabRateLimitError, VendorRateLimitError))
+        self.assertTrue(issubclass(SchwabNotConfiguredError, VendorNotConfiguredError))
         # ... and therefore still ValueErrors
         self.assertTrue(issubclass(FredNotConfiguredError, ValueError))
+        self.assertTrue(issubclass(SchwabNotConfiguredError, ValueError))
 
     def test_symbol_utils_reexports_no_market_data_error(self):
         from tradingagents.dataflows.symbol_utils import (

@@ -48,6 +48,16 @@ class Propagator:
                     "count": 0,
                 }
             ),
+            "magpie_signal": {
+                "strategy": "Alpha-Zone-Pro (Magpie)",
+                "status": "disabled",
+                "direction": "Unavailable",
+                "confidence": "Not evaluated",
+                "reasoning": "Magpie is disabled in configuration.",
+                "long_score": 0,
+                "short_score": 0,
+                "factors": [],
+            },
             "risk_debate_state": RiskDebateState(
                 {
                     "aggressive_history": "",

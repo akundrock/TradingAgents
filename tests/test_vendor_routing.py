@@ -89,6 +89,20 @@ class VendorRoutingTests(unittest.TestCase):
             interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
         self.assertIn("bogus_vendor", str(ctx.exception))
 
+    def test_explicit_schwab_vendor_is_used(self):
+        set_config({"data_vendors": {"core_stock_apis": "schwab"}})
+        schwab = mock.Mock(side_effect=_returns("SCHWAB_DATA"))
+        with self._route({"schwab": schwab, "yfinance": _returns("YF_DATA")}):
+            result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
+        self.assertEqual(result, "SCHWAB_DATA")
+        schwab.assert_called_once()
+
+    def test_schwab_can_fallback_to_yfinance(self):
+        set_config({"data_vendors": {"core_stock_apis": "schwab,yfinance"}})
+        with self._route({"schwab": _no_data, "yfinance": _returns("YF_DATA")}):
+            result = interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
+        self.assertEqual(result, "YF_DATA")
+
     def test_default_sentinel_uses_all_vendors(self):
         # No explicit choice ("default") keeps the resilient full-chain behavior.
         set_config({"data_vendors": {"core_stock_apis": "default"}})
@@ -117,6 +131,62 @@ class VendorRoutingTests(unittest.TestCase):
         with self._route({"yfinance": _raises(ValueError("boom"))}), \
                 self.assertRaises(ValueError):
             interface.route_to_vendor("get_stock_data", "AAPL", "2026-01-01", "2026-01-10")
+
+    def test_market_internals_explicit_vendor(self):
+        set_config({"data_vendors": {"market_internals": "yfinance"}})
+        with self._route_method("get_market_internals", {"yfinance": lambda *a, **k: "INTERNALS"}):
+            result = interface.route_to_vendor(
+                "get_market_internals",
+                "2026-07-01 09:30:00",
+                "2026-07-01 16:00:00",
+                "5m",
+            )
+        self.assertEqual(result, "INTERNALS")
+
+    def test_market_internals_fallback_chain(self):
+        set_config({"data_vendors": {"market_internals": "schwab,yfinance"}})
+        with self._route_method(
+            "get_market_internals",
+            {
+                "schwab": _no_data,
+                "yfinance": lambda *a, **k: "INTERNALS_YF",
+            },
+        ):
+            result = interface.route_to_vendor(
+                "get_market_internals",
+                "2026-07-01 09:30:00",
+                "2026-07-01 16:00:00",
+                "5m",
+            )
+        self.assertEqual(result, "INTERNALS_YF")
+
+    def test_implied_move_explicit_vendor(self):
+        set_config({"data_vendors": {"implied_move_data": "schwab"}})
+        with self._route_method("get_implied_move_data", {"schwab": lambda *a, **k: "IMPLIED_DATA"}):
+            result = interface.route_to_vendor(
+                "get_implied_move_data",
+                "AAPL",
+                "2026-07-01",
+                "2026-07-01 10:30:00",
+            )
+        self.assertEqual(result, "IMPLIED_DATA")
+
+    def test_implied_move_fallback_chain(self):
+        set_config({"data_vendors": {"implied_move_data": "yfinance,schwab"}})
+        with self._route_method(
+            "get_implied_move_data",
+            {
+                "yfinance": _no_data,
+                "schwab": lambda *a, **k: "IMPLIED_SCHWAB",
+            },
+        ):
+            result = interface.route_to_vendor(
+                "get_implied_move_data",
+                "AAPL",
+                "2026-07-01",
+                "2026-07-01 10:30:00",
+            )
+        self.assertEqual(result, "IMPLIED_SCHWAB")
 
 
 if __name__ == "__main__":

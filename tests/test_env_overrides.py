@@ -127,3 +127,43 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("true", True),
+        ("false", False),
+    ],
+)
+def test_magpie_bool_override(monkeypatch, raw, expected):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MAGPIE_ENABLED=raw)
+    assert dc.DEFAULT_CONFIG["magpie_enabled"] is expected
+
+
+def test_magpie_intraday_overrides(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MAGPIE_INTRADAY_INTERVAL="5m",
+        TRADINGAGENTS_MAGPIE_INTRADAY_LOOKBACK_MINUTES="480",
+    )
+    assert dc.DEFAULT_CONFIG["magpie_intraday_interval"] == "5m"
+    assert dc.DEFAULT_CONFIG["magpie_intraday_lookback_minutes"] == 480
+
+
+def test_magpie_session_overrides(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MAGPIE_SESSION_MODE="extended",
+        TRADINGAGENTS_MAGPIE_TIMEZONE="UTC",
+    )
+    assert dc.DEFAULT_CONFIG["magpie_session_mode"] == "extended"
+    assert dc.DEFAULT_CONFIG["magpie_timezone"] == "UTC"
+
+
+def test_magpie_implied_move_lock_override(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME="10:35",
+    )
+    assert dc.DEFAULT_CONFIG["magpie_implied_move_lock_time"] == "10:35"

@@ -1,4 +1,5 @@
 from datetime import datetime
+from io import StringIO
 from typing import Annotated
 
 import pandas as pd
@@ -68,6 +69,138 @@ def get_YFin_data_online(
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
     return header + csv_string
+
+
+def get_YFin_intraday_data_online(
+    symbol: Annotated[str, "ticker symbol of the company"],
+    start_datetime: Annotated[str, "Start datetime in yyyy-mm-dd HH:MM:SS format"],
+    end_datetime: Annotated[str, "End datetime in yyyy-mm-dd HH:MM:SS format"],
+    interval: Annotated[str, "Intraday interval such as 1m, 5m, 15m, 30m"] = "5m",
+):
+    """Return intraday OHLCV data in CSV text form for deterministic strategy logic."""
+    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+    if end_dt <= start_dt:
+        raise ValueError("end_datetime must be after start_datetime")
+
+    canonical = normalize_symbol(symbol)
+    ticker = yf.Ticker(canonical)
+    data = yf_retry(
+        lambda: ticker.history(
+            start=start_dt,
+            end=end_dt,
+            interval=interval,
+            auto_adjust=True,
+            prepost=True,
+        )
+    )
+
+    if data.empty:
+        raise NoMarketDataError(
+            symbol,
+            canonical,
+            f"no intraday rows between {start_datetime} and {end_datetime} at {interval}",
+        )
+
+    if data.index.tz is not None:
+        data.index = data.index.tz_localize(None)
+
+    numeric_columns = ["Open", "High", "Low", "Close", "Adj Close"]
+    for col in numeric_columns:
+        if col in data.columns:
+            data[col] = data[col].round(4)
+
+    csv_string = data.to_csv()
+    label = canonical if canonical == symbol.upper() else f"{canonical} (from {symbol})"
+    header = (
+        f"# Intraday stock data for {label} from {start_datetime} to {end_datetime} "
+        f"at interval {interval}\n"
+    )
+    header += f"# Total records: {len(data)}\n"
+    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    return header + csv_string
+
+
+def _load_single_internal_series(symbol_candidates: list[str], start_dt: datetime, end_dt: datetime, interval: str):
+    for sym in symbol_candidates:
+        try:
+            ticker = yf.Ticker(sym)
+            series = yf_retry(
+                lambda: ticker.history(
+                    start=start_dt,
+                    end=end_dt,
+                    interval=interval,
+                    auto_adjust=False,
+                    prepost=True,
+                )
+            )
+            if not series.empty and "Close" in series.columns:
+                if series.index.tz is not None:
+                    series.index = series.index.tz_localize(None)
+                out = pd.DataFrame({"Date": series.index, "value": series["Close"].astype(float)})
+                return out.reset_index(drop=True)
+        except Exception:
+            continue
+    return pd.DataFrame(columns=["Date", "value"])
+
+
+def get_market_internals(
+    start_datetime: Annotated[str, "Start datetime in yyyy-mm-dd HH:MM:SS format"],
+    end_datetime: Annotated[str, "End datetime in yyyy-mm-dd HH:MM:SS format"],
+    interval: Annotated[str, "Intraday interval such as 1m, 5m, 15m, 30m"] = "5m",
+):
+    """Return market internals ($ADD, $TICK, $VOLD) as aligned intraday CSV."""
+    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+    if end_dt <= start_dt:
+        raise ValueError("end_datetime must be after start_datetime")
+
+    series_map = {
+        "$ADD": ["$ADD", "^ADD", "ADD"],
+        "$TICK": ["$TICK", "^TICK", "TICK"],
+        "$VOLD": ["$VOLD", "^VOLD", "VOLD"],
+    }
+    merged = None
+    for label, candidates in series_map.items():
+        s = _load_single_internal_series(candidates, start_dt, end_dt, interval)
+        if s.empty:
+            continue
+        s = s.rename(columns={"value": label})
+        merged = s if merged is None else merged.merge(s, on="Date", how="outer")
+
+    if merged is None or merged.empty:
+        raise NoMarketDataError(
+            "MARKET_INTERNALS",
+            "MARKET_INTERNALS",
+            "no market internals rows returned by yfinance",
+        )
+
+    merged = merged.sort_values("Date")
+    for col in ["$ADD", "$TICK", "$VOLD"]:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+
+    csv_string = merged.to_csv(index=False)
+    header = (
+        f"# Market internals from {start_datetime} to {end_datetime} at interval {interval}\n"
+        f"# Total records: {len(merged)}\n"
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    )
+    return header + csv_string
+
+
+def get_implied_move_data(
+    symbol: Annotated[str, "ticker symbol of the company"],
+    trade_date: Annotated[str, "Trading date in yyyy-mm-dd format"],
+    as_of_datetime: Annotated[str, "As-of datetime in yyyy-mm-dd HH:MM:SS format"],
+):
+    """YFinance adapter does not currently provide stable IV/options chain parity for Magpie."""
+    canonical = normalize_symbol(symbol)
+    raise NoMarketDataError(
+        symbol,
+        canonical,
+        "yfinance implied-move source is not implemented for Magpie parity",
+    )
 
 def get_stock_stats_indicators_window(
     symbol: Annotated[str, "ticker symbol of the company"],

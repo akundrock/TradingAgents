@@ -25,6 +25,17 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    # Schwab/TOS market data configuration.
+    "TRADINGAGENTS_SCHWAB_CLIENT_ID":        "schwab_client_id",
+    "TRADINGAGENTS_SCHWAB_CLIENT_SECRET":    "schwab_client_secret",
+    "TRADINGAGENTS_SCHWAB_TOKENS_PATH":      "schwab_tokens_path",
+    "TRADINGAGENTS_SCHWAB_REDIRECT_URI":     "schwab_redirect_uri",
+    "TRADINGAGENTS_MAGPIE_ENABLED":          "magpie_enabled",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_INTERVAL": "magpie_intraday_interval",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_LOOKBACK_MINUTES": "magpie_intraday_lookback_minutes",
+    "TRADINGAGENTS_MAGPIE_SESSION_MODE":     "magpie_session_mode",
+    "TRADINGAGENTS_MAGPIE_TIMEZONE":         "magpie_timezone",
+    "TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME": "magpie_implied_move_lock_time",
 }
 
 
@@ -131,8 +142,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # routed to vendors you didn't choose. For ordered fallback, list several,
     # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
+        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance, schwab
+        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance, schwab
+        "market_internals": "yfinance",      # Options: yfinance, schwab
+        "implied_move_data": "schwab",       # Options: schwab, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
@@ -142,6 +155,24 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default
     },
+    # Schwab/TOS credentials and token cache location (used when vendor is
+    # configured as "schwab" for OHLC and indicators).
+    "schwab_client_id": None,
+    "schwab_client_secret": None,
+    "schwab_tokens_path": None,
+    "schwab_redirect_uri": None,
+    # Deterministic Alpha-Zone-Pro strategy integration. The current phase only
+    # wires the graph/state seam; the full engine arrives with intraday and
+    # market-internals data support.
+    "magpie_enabled": False,
+    "magpie_min_confirmations": 3,
+    "magpie_transition_only": True,
+    "magpie_require_direction_flip": True,
+    "magpie_intraday_interval": "5m",
+    "magpie_intraday_lookback_minutes": 390,
+    "magpie_session_mode": "rth",  # Options: rth, extended
+    "magpie_timezone": "America/New_York",
+    "magpie_implied_move_lock_time": "10:30",
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection

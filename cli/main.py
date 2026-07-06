@@ -41,6 +41,13 @@ from cli.utils import (
     select_shallow_thinking_agent,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows.schwab import (
+    _tokens_path,
+    bootstrap_tokens_from_redirect,
+    get_authorization_url,
+    get_schwab_credentials,
+    get_schwab_redirect_uri,
+)
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
@@ -1286,6 +1293,45 @@ def analyze(
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     run_analysis(checkpoint=checkpoint)
+
+
+@app.command("schwab-auth")
+def schwab_auth(
+    redirect_url: str | None = typer.Option(
+        None,
+        "--redirect-url",
+        help="Full Schwab redirect URL (or raw auth code) to exchange for tokens.",
+    ),
+):
+    """Bootstrap Schwab OAuth tokens and save them to the configured token path."""
+    try:
+        client_id, _ = get_schwab_credentials()
+    except Exception as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    redirect_uri = get_schwab_redirect_uri()
+    auth_url = get_authorization_url(client_id, redirect_uri=redirect_uri)
+
+    console.print("[bold cyan]Schwab OAuth Bootstrap[/bold cyan]")
+    console.print(f"1. Open this URL and authorize the app:\n{auth_url}")
+    console.print(f"2. Ensure your Schwab app redirect URI is: {redirect_uri}")
+
+    supplied = redirect_url
+    if not supplied:
+        supplied = typer.prompt("3. Paste the full redirect URL (or raw code)").strip()
+
+    try:
+        tokens = bootstrap_tokens_from_redirect(supplied, redirect_uri=redirect_uri)
+    except Exception as exc:
+        console.print(f"[red]Token bootstrap failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    token_file = _tokens_path()
+    expires_in = tokens.get("expires_in")
+    console.print(f"[green]Saved Schwab tokens to:[/green] {token_file}")
+    if expires_in:
+        console.print(f"[green]Access token expires in:[/green] {expires_in} seconds")
 
 
 if __name__ == "__main__":

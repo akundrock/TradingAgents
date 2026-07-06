@@ -131,6 +131,18 @@ def _make_trader_state():
     return {
         "company_of_interest": "NVDA",
         "investment_plan": "**Recommendation**: Buy\n**Rationale**: ...\n**Strategic Actions**: ...",
+        "magpie_signal": {
+            "strategy": "Alpha-Zone-Pro (Magpie)",
+            "status": "computed",
+            "direction": "Buy",
+            "confidence": "Premium",
+            "reasoning": "Confluence reached the buy threshold.",
+            "long_score": 6,
+            "short_score": 1,
+            "factors": [
+                {"name": "momentum", "signal": "bullish", "value": "cross up"},
+            ],
+        },
     }
 
 
@@ -199,6 +211,15 @@ class TestTraderAgent:
         # The investment plan is in the user message of the captured prompt.
         prompt = captured["prompt"]
         assert any("Proposed Investment Plan" in m["content"] for m in prompt)
+
+    def test_prompt_includes_magpie_summary(self):
+        captured = {}
+        llm = _structured_trader_llm(captured)
+        trader = create_trader(llm)
+        trader(_make_trader_state())
+        prompt = captured["prompt"]
+        assert any("Magpie Strategy Signal" in m["content"] for m in prompt)
+        assert any("**Direction**: Buy" in m["content"] for m in prompt)
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain_response = (
