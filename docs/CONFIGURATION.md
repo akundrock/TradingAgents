@@ -419,6 +419,27 @@ tradingagents  # Fully configured, no interaction
 | `output_language` | str | `"en"` | `TRADINGAGENTS_OUTPUT_LANGUAGE` | Output language (i18n): en, zh, ja, de, es, fr, pt, ru, ko |
 | `benchmark_ticker` | str | `"SPY"` | `TRADINGAGENTS_BENCHMARK_TICKER` | Benchmark for risk-adjusted metrics |
 
+### Magpie Intraday Controls
+
+| Parameter | Type | Default | Env Var | Description |
+|-----------|------|---------|---------|-------------|
+| `magpie_intraday_loop_enabled` | bool | `False` | `TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_ENABLED` | Enable recurring intraday analysis loop (RTH-guarded) |
+| `magpie_intraday_loop_interval_minutes` | int | `5` | `TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_INTERVAL_MINUTES` | Sleep interval between loop cycles |
+| `magpie_intraday_loop_max_cycles` | int | `12` | `TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_MAX_CYCLES` | Maximum loop cycles in one run |
+| `magpie_intraday_fast_path_enabled` | bool | `False` | `TRADINGAGENTS_MAGPIE_INTRADAY_FAST_PATH_ENABLED` | Use full graph on cycle 1 and Magpie+Trader-only cycles afterward |
+
+CLI overrides (when explicitly passed) take precedence over environment values:
+
+- `--intraday/--no-intraday`
+- `--intraday-interval-minutes`
+- `--intraday-max-cycles`
+- `--intraday-fast-path/--no-intraday-fast-path`
+
+Related Magpie signal fields exposed in state/reporting:
+
+- `invalidation_level`: deterministic invalidation reference from latest bar structure.
+- `signal_ttl_minutes`: signal time-to-live, defaulting to one intraday bar interval.
+
 ### Data Vendor API Keys
 
 | Parameter | Type | Default | Env Var | Notes |

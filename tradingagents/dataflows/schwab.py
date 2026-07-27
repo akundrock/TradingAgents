@@ -561,12 +561,87 @@ def get_market_internals(
     end_datetime: str,
     interval: str = "5m",
 ) -> str:
-    """Schwab market internals are not currently supported by this adapter."""
-    raise NoMarketDataError(
-        "MARKET_INTERNALS",
-        "MARKET_INTERNALS",
-        "Schwab adapter does not provide $ADD/$TICK/$VOLD internals",
+    """Return market internals ($ADD/$TICK/$VOLD) from Schwab/TOS symbols.
+
+    Uses direct TOS-compatible symbols ($ADD, $TICK, $VOLD).
+    """
+    freq_map = {
+        "1m": ("minute", 1),
+        "5m": ("minute", 5),
+        "10m": ("minute", 10),
+        "15m": ("minute", 15),
+        "30m": ("minute", 30),
+    }
+    if interval not in freq_map:
+        raise ValueError(f"Unsupported intraday interval: {interval}")
+
+    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+    if end_dt <= start_dt:
+        raise ValueError("end_datetime must be after start_datetime")
+
+    frequency_type, frequency = freq_map[interval]
+
+    def _fetch_internal_series(symbol_candidates: list[str]) -> pd.DataFrame:
+        for sym in symbol_candidates:
+            try:
+                candles = _fetch_price_history_range(
+                    symbol=sym,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    frequency_type=frequency_type,
+                    frequency=frequency,
+                )
+                data = _candles_to_df(candles, sym, end_dt.strftime("%Y-%m-%d"))
+                data = data[
+                    (data["Date"] >= pd.to_datetime(start_datetime))
+                    & (data["Date"] <= pd.to_datetime(end_datetime))
+                ]
+                if data.empty:
+                    continue
+                out = data[["Date", "Close"]].copy()
+                out["Close"] = pd.to_numeric(out["Close"], errors="coerce")
+                out = out.dropna(subset=["Close"]).rename(columns={"Close": "value"})
+                if not out.empty:
+                    return out.reset_index(drop=True)
+            except NoMarketDataError:
+                continue
+        return pd.DataFrame(columns=["Date", "value"])
+
+    add_df = _fetch_internal_series(["$ADD", "$ADSPD", "ADD", "ADSPD"])
+    tick_df = _fetch_internal_series(["$TICK", "$TIKSP", "TICK", "TIKSP"])
+    vold_df = _fetch_internal_series(["$VOLD", "$VOLDSP", "VOLD", "VOLDSP"])
+
+    merged = None
+    if not add_df.empty:
+        merged = add_df.rename(columns={"value": "$ADD"})
+    if not tick_df.empty:
+        tick = tick_df.rename(columns={"value": "$TICK"})
+        merged = tick if merged is None else merged.merge(tick, on="Date", how="outer")
+
+    if not vold_df.empty:
+        vold = vold_df.rename(columns={"value": "$VOLD"})
+        merged = vold if merged is None else merged.merge(vold, on="Date", how="outer")
+
+    if merged is None or merged.empty:
+        raise NoMarketDataError(
+            "MARKET_INTERNALS",
+            "MARKET_INTERNALS",
+            "Schwab/TOS internals unavailable for $ADD/$TICK/$VOLD symbols",
+        )
+
+    merged = merged.sort_values("Date").reset_index(drop=True)
+    for col in ["$ADD", "$TICK", "$VOLD"]:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+
+    csv_string = merged.to_csv(index=False)
+    header = (
+        f"# Market internals from {start_datetime} to {end_datetime} at interval {interval}\n"
+        f"# Total records: {len(merged)}\n"
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     )
+    return header + csv_string
 
 
 def get_indicator(symbol: str, indicator: str, curr_date: str, look_back_days: int) -> str:

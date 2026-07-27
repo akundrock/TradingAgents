@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -56,3 +56,55 @@ def test_get_indicator_uses_schwab_ohlcv(monkeypatch):
     out = schwab.get_indicator("AAPL", "close_10_ema", "2026-05-20", 3)
     assert "close_10_ema values from 2026-05-17 to 2026-05-20" in out
     assert "2026-05-20:" in out
+
+
+@pytest.mark.unit
+def test_get_market_internals_fetches_direct_vold_symbol(monkeypatch):
+    def _candle(ts: str, close: float) -> dict:
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+        ms = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return {
+            "datetime": ms,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "volume": 1,
+        }
+
+    internal_data = {
+        "$ADD": [_candle("2026-07-01 09:30:00", 300.0), _candle("2026-07-01 09:35:00", 250.0)],
+        "$TICK": [_candle("2026-07-01 09:30:00", 1100.0), _candle("2026-07-01 09:35:00", 900.0)],
+        "$VOLD": [_candle("2026-07-01 09:30:00", 800000.0), _candle("2026-07-01 09:35:00", 600000.0)],
+    }
+
+    def fake_fetch(symbol, *args, **kwargs):
+        if symbol in internal_data:
+            return internal_data[symbol]
+        raise schwab.NoMarketDataError(symbol, symbol, "missing")
+
+    monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_fetch)
+
+    out = schwab.get_market_internals(
+        "2026-07-01 09:30:00",
+        "2026-07-01 09:35:00",
+        "5m",
+    )
+    assert "# Market internals" in out
+    assert "$ADD" in out and "$TICK" in out and "$VOLD" in out
+    assert "800000.0" in out
+
+
+@pytest.mark.unit
+def test_get_market_internals_raises_when_all_symbols_missing(monkeypatch):
+    def fake_fetch(*args, **kwargs):
+        raise schwab.NoMarketDataError("MARKET_INTERNALS", "MARKET_INTERNALS", "missing")
+
+    monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_fetch)
+
+    with pytest.raises(schwab.NoMarketDataError):
+        schwab.get_market_internals(
+            "2026-07-01 09:30:00",
+            "2026-07-01 09:35:00",
+            "5m",
+        )

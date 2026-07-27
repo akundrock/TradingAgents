@@ -18,6 +18,8 @@ class MagpieSignalState(TypedDict):
     reasoning: Annotated[str, "Short explanation of the Magpie result"]
     long_score: Annotated[int, "Long-side confluence score"]
     short_score: Annotated[int, "Short-side confluence score"]
+    invalidation_level: Annotated[float | None, "Deterministic invalidation reference level"]
+    signal_ttl_minutes: Annotated[int, "Signal time-to-live in minutes"]
     factors: Annotated[list[MagpieFactorState], "Per-factor contributions"]
 
 

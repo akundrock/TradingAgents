@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+Intraday Magpie operations update: recurring RTH loop mode, hybrid fast-path
+cycles, session-aware transition persistence, Schwab-first price routing,
+direct Schwab/TOS internals retrieval, and per-cycle confidence diagnostics.
+
+### Added
+
+- **Intraday loop controls in the CLI.** Added `--intraday`,
+  `--intraday-interval-minutes`, and `--intraday-max-cycles` with matching
+  `TRADINGAGENTS_MAGPIE_INTRADAY_*` environment overrides.
+- **Hybrid intraday fast path.** Added `--intraday-fast-path` so cycle 1 runs
+  the full graph and cycles 2+ run Magpie plus Trader for lower-latency
+  updates.
+- **Cycle-level diagnostics artifact.** Intraday runs now append
+  `intraday_cycle_signals.csv` and print a terminal summary of cycles where
+  Magpie confidence is `No signal`.
+- **Execution-ready Magpie fields.** Magpie now outputs
+  `invalidation_level` and `signal_ttl_minutes`, and includes them in the
+  rendered Magpie report.
+
+### Changed
+
+- **Schwab-first defaults for price paths.** `core_stock_apis`,
+  `technical_indicators`, and `market_internals` default to `schwab`.
+- **Schwab market internals retrieval.** The Schwab adapter now attempts direct
+  TOS-compatible internals symbols (`$ADD`, `$TICK`, `$VOLD`) over the
+  requested interval.
+
+### Fixed
+
+- **Noisy internals probing output.** Suppressed yfinance stdout/stderr probe
+  noise during internals symbol fallback probing to avoid confusing console
+  output during fast intraday cycles.
+
 ## [0.3.1] — 2026-07-05
 
 Correctness and stability patch: data look-ahead, graph-router crash-safety,

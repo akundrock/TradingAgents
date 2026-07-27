@@ -39,6 +39,8 @@ def test_build_default_magpie_signal_has_factor_placeholders_when_enabled():
     signal = build_default_magpie_signal(enabled=True)
     assert signal["status"] == "unavailable"
     assert len(signal["factors"]) == 7
+    assert signal["invalidation_level"] is None
+    assert signal["signal_ttl_minutes"] == 0
 
 
 @pytest.mark.unit
@@ -49,6 +51,9 @@ def test_score_magpie_factors_emits_buy_for_fresh_long_confluence():
             "vwap": True,
             "hammer_pattern": True,
             "$ADD": True,
+            "_latest_high": 101.0,
+            "_latest_low": 99.5,
+            "_latest_close": 100.2,
         },
         min_confirmations=3,
         transition_only=True,
@@ -60,6 +65,8 @@ def test_score_magpie_factors_emits_buy_for_fresh_long_confluence():
     assert signal["short_score"] == 0
     assert signal["fresh_long"] is True
     assert signal["confidence"] == "Marginal"
+    assert signal["invalidation_level"] == 99.5
+    assert signal["signal_ttl_minutes"] == 5
 
 
 @pytest.mark.unit
@@ -90,6 +97,9 @@ def test_score_magpie_factors_emits_sell_for_fresh_short_confluence():
             "inverse_hammer_pattern": True,
             "$ADD_short": True,
             "$TICK_short": True,
+            "_latest_high": 101.2,
+            "_latest_low": 99.2,
+            "_latest_close": 100.0,
         },
         min_confirmations=3,
         transition_only=True,
@@ -100,6 +110,7 @@ def test_score_magpie_factors_emits_sell_for_fresh_short_confluence():
     assert signal["short_score"] == 6
     assert signal["confidence"] == "Premium"
     assert signal["fresh_short"] is True
+    assert signal["invalidation_level"] == 101.2
 
 
 @pytest.mark.unit
@@ -131,11 +142,13 @@ def test_magpie_node_uses_supplied_factor_inputs_when_enabled():
                 "momentum": True,
                 "vwap": True,
                 "implied_move": True,
+                "_latest_close": 102.5,
             }
         }
     )
     assert out["magpie_signal"]["status"] == "computed"
     assert out["magpie_signal"]["direction"] == "Buy"
+    assert out["magpie_signal"]["signal_ttl_minutes"] == 5
 
 
 @pytest.mark.unit
@@ -189,7 +202,7 @@ def test_build_magpie_factor_inputs_from_intraday_produces_boolean_flags():
         "$VOLD_short",
     }
     assert required.issubset(set(factors.keys()))
-    assert all(isinstance(v, bool) for v in factors.values())
+    assert all(isinstance(factors[name], bool) for name in required)
 
 
 @pytest.mark.unit
@@ -234,8 +247,29 @@ def test_magpie_node_fetches_intraday_when_inputs_absent(monkeypatch):
     out = node({"company_of_interest": "AAPL", "trade_date": "2026-07-01"})
     assert out["magpie_signal"]["status"] == "computed"
     assert out["magpie_signal"]["direction"] in {"Buy", "Hold", "Sell"}
+    assert out["magpie_signal"]["signal_ttl_minutes"] == 5
     implied = [f for f in out["magpie_signal"]["factors"] if f["name"] == "implied_move"][0]
     assert implied["signal"] == "bullish"
+
+
+@pytest.mark.unit
+def test_render_magpie_signal_summary_includes_execution_fields():
+    rendered = render_magpie_signal_summary(
+        {
+            "strategy": "Alpha-Zone-Pro (Magpie)",
+            "status": "computed",
+            "direction": "Buy",
+            "confidence": "Marginal",
+            "long_score": 3,
+            "short_score": 1,
+            "invalidation_level": 499.12,
+            "signal_ttl_minutes": 5,
+            "reasoning": "test",
+            "factors": [],
+        }
+    )
+    assert "**Invalidation Level**: 499.12" in rendered
+    assert "**Signal TTL (minutes)**: 5" in rendered
 
 
 @pytest.mark.unit

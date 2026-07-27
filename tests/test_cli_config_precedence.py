@@ -61,9 +61,74 @@ def test_checkpoint_none_preserves_env_default():
     assert cfg["checkpoint_enabled"] is True  # not clobbered back to False
 
 
+def test_intraday_flags_override_run_config():
+    cfg = m._build_run_config(
+        SELECTIONS,
+        checkpoint=None,
+        intraday=True,
+        intraday_interval_minutes=3,
+        intraday_max_cycles=7,
+        intraday_fast_path=True,
+    )
+    assert cfg["magpie_intraday_loop_enabled"] is True
+    assert cfg["magpie_intraday_loop_interval_minutes"] == 3
+    assert cfg["magpie_intraday_loop_max_cycles"] == 7
+    assert cfg["magpie_intraday_fast_path_enabled"] is True
+
+
 @pytest.mark.parametrize("flag", [True, False])
 def test_checkpoint_flag_overrides_env(flag):
     patched = dict(m.DEFAULT_CONFIG, checkpoint_enabled=not flag)
     with mock.patch.object(m, "DEFAULT_CONFIG", patched):
         cfg = m._build_run_config(SELECTIONS, checkpoint=flag)
     assert cfg["checkpoint_enabled"] is flag
+
+
+@pytest.mark.parametrize(
+    "direction,expected",
+    [("Buy", 1), ("Sell", -1), ("Hold", 0), ("Unavailable", 0)],
+)
+def test_direction_to_int(direction, expected):
+    assert m._direction_to_int(direction) == expected
+
+
+def test_seed_and_update_magpie_session_state_roundtrip():
+    init_state = {}
+    session_state = {
+        "trade_date": "2026-07-06",
+        "magpie_previous_direction": 1,
+        "magpie_previous_long_entry": True,
+        "magpie_previous_short_entry": False,
+    }
+    m._seed_magpie_session_state(init_state, session_state)
+    assert init_state["magpie_previous_direction"] == 1
+    assert init_state["magpie_previous_long_entry"] is True
+    assert init_state["magpie_previous_short_entry"] is False
+
+    final_state = {
+        "magpie_signal": {
+            "direction": "Sell",
+            "long_entry": False,
+            "short_entry": True,
+        }
+    }
+    m._update_magpie_session_state(session_state, final_state, "2026-07-06")
+    assert session_state["magpie_previous_direction"] == -1
+    assert session_state["magpie_previous_long_entry"] is False
+    assert session_state["magpie_previous_short_entry"] is True
+
+
+def test_update_magpie_session_state_resets_on_trade_date_change():
+    session_state = {
+        "trade_date": "2026-07-05",
+        "magpie_previous_direction": 1,
+        "magpie_previous_long_entry": True,
+        "magpie_previous_short_entry": False,
+    }
+    m._update_magpie_session_state(
+        session_state,
+        {"magpie_signal": {"direction": "Hold", "long_entry": False, "short_entry": False}},
+        "2026-07-06",
+    )
+    assert session_state["trade_date"] == "2026-07-06"
+    assert session_state["magpie_previous_direction"] == 0

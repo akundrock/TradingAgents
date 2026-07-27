@@ -138,6 +138,18 @@ When an agent calls a tool, the router:
 
 ### Vendor Implementations
 
+### Current price-routing defaults
+
+The default vendor routing is Schwab-first for price-centric categories:
+
+- `core_stock_apis`: `schwab`
+- `technical_indicators`: `schwab`
+- `market_internals`: `schwab`
+- `implied_move_data`: `schwab`
+
+This keeps intraday OHLCV, indicators, internals, and implied-move context in
+one source family and reduces cross-vendor drift in fast intraday workflows.
+
 #### 1. Yahoo Finance (yfinance)
 
 **Location**: `tradingagents/dataflows/y_finance.py`
@@ -292,6 +304,30 @@ TRADINGAGENTS_STOCKTWITS_API_KEY=...  # Optional (public API available)
 **Limitations**:
 - Retail-focused (less institutional data)
 - API rate limiting
+
+#### 7. Schwab
+
+**Location**: `tradingagents/dataflows/schwab.py`
+
+**Coverage**:
+- OHLCV retrieval for intraday and daily windows
+- Indicator derivation from Schwab OHLCV
+- Implied-move context from options chain
+- Market internals retrieval attempts for `$ADD`, `$TICK`, and `$VOLD`
+
+**Configuration**:
+```bash
+TRADINGAGENTS_SCHWAB_CLIENT_ID=...      # Required
+TRADINGAGENTS_SCHWAB_CLIENT_SECRET=...  # Required
+TRADINGAGENTS_SCHWAB_TOKENS_PATH=...    # Optional override
+TRADINGAGENTS_SCHWAB_REDIRECT_URI=...   # Optional override
+```
+
+**Notes**:
+- If internals symbols are unavailable for current account entitlements, the
+    adapter raises `NoMarketDataError` for that internals call.
+- Intraday loops can still proceed according to configured fallback chains, but
+    signal quality can degrade when internals data is missing.
 
 ### Adding a New Data Vendor: Schwab TOS Example
 

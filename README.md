@@ -177,6 +177,37 @@ python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
 
+### Intraday Magpie loop (RTH)
+
+For intraday monitoring workflows (for example SPY day-trading research),
+you can run repeated analysis cycles during regular US equity session hours
+(RTH) and optionally switch to a fast path after cycle 1.
+
+```bash
+tradingagents analyze \
+  --intraday \
+  --intraday-interval-minutes 5 \
+  --intraday-max-cycles 12 \
+  --intraday-fast-path
+```
+
+Behavior:
+
+- RTH guard: loop mode skips outside 09:30-16:00 ET and stops if session closes.
+- Cycle 1 executes the full graph.
+- With `--intraday-fast-path`, cycles 2+ execute Magpie plus Trader only.
+- Each cycle appends one row to `reports/intraday_cycle_signals.csv`.
+- At loop end, the CLI prints cycle labels where confidence was `No signal`.
+
+Equivalent environment variables:
+
+```bash
+TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_ENABLED=true
+TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_INTERVAL_MINUTES=5
+TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_MAX_CYCLES=12
+TRADINGAGENTS_MAGPIE_INTRADAY_FAST_PATH_ENABLED=true
+```
+
 ### Markets and tickers
 
 TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.
@@ -256,6 +287,10 @@ Override the path with `TRADINGAGENTS_MEMORY_LOG_PATH`.
 Checkpoint resume is opt-in via `--checkpoint`. When enabled, LangGraph saves state after each node so a crashed or interrupted run resumes from the last successful step instead of starting over. On a resume run you will see `Resuming from step N for <TICKER> on <date>` in the logs; on a new run you will see `Starting fresh`. Checkpoints are cleared automatically on successful completion.
 
 Per-ticker SQLite databases live at `~/.tradingagents/cache/checkpoints/<TICKER>.db` (override the base with `TRADINGAGENTS_CACHE_DIR`). Use `--clear-checkpoints` to reset all of them before a run.
+
+Magpie intraday cycles also preserve transition gating state in-process for the
+current run, so transition-only entries are carried across loop iterations and
+reset automatically when the trade date changes.
 
 ```bash
 tradingagents analyze --checkpoint           # enable for this run

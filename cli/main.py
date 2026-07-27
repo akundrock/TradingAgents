@@ -1,9 +1,11 @@
 import datetime
+import csv
 import os
 import time
 from collections import deque
 from functools import wraps
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import typer
 from rich import box
@@ -41,6 +43,8 @@ from cli.utils import (
     select_shallow_thinking_agent,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.agents.trader.magpie import create_magpie_signal_node, render_magpie_signal_summary
+from tradingagents.agents.trader.trader import create_trader
 from tradingagents.dataflows.schwab import (
     _tokens_path,
     bootstrap_tokens_from_redirect,
@@ -965,7 +969,62 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
-def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
+
+def _is_rth_session_open(timezone_name: str = "America/New_York", now: datetime.datetime | None = None) -> tuple[bool, str]:
+    """Return whether current local time is inside the regular US equity session."""
+    tz = ZoneInfo(timezone_name)
+    local_now = (now or datetime.datetime.now(tz)).astimezone(tz)
+    if local_now.weekday() >= 5:
+        return False, "outside_session: weekend"
+    open_dt = local_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    close_dt = local_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if local_now < open_dt:
+        return False, "outside_session: pre-open"
+    if local_now >= close_dt:
+        return False, "outside_session: post-close"
+    return True, ""
+
+
+def _direction_to_int(direction: str) -> int:
+    normalized = str(direction or "").strip().lower()
+    if normalized == "buy":
+        return 1
+    if normalized == "sell":
+        return -1
+    return 0
+
+
+def _seed_magpie_session_state(init_state: dict, session_state: dict | None) -> None:
+    """Seed initial graph state with prior-cycle Magpie transition state."""
+    if not session_state:
+        return
+    init_state["magpie_previous_direction"] = int(session_state.get("magpie_previous_direction", 0) or 0)
+    init_state["magpie_previous_long_entry"] = bool(session_state.get("magpie_previous_long_entry", False))
+    init_state["magpie_previous_short_entry"] = bool(session_state.get("magpie_previous_short_entry", False))
+
+
+def _update_magpie_session_state(session_state: dict | None, final_state: dict, trade_date: str) -> None:
+    """Persist Magpie transition state from the latest cycle for next-cycle gating."""
+    if session_state is None:
+        return
+    if session_state.get("trade_date") != trade_date:
+        session_state.clear()
+        session_state["trade_date"] = trade_date
+
+    signal = final_state.get("magpie_signal") or {}
+    session_state["magpie_previous_direction"] = _direction_to_int(signal.get("direction", ""))
+    session_state["magpie_previous_long_entry"] = bool(signal.get("long_entry", False))
+    session_state["magpie_previous_short_entry"] = bool(signal.get("short_entry", False))
+
+
+def _build_run_config(
+    selections: dict,
+    checkpoint: bool | None,
+    intraday: bool | None = None,
+    intraday_interval_minutes: int | None = None,
+    intraday_max_cycles: int | None = None,
+    intraday_fast_path: bool | None = None,
+) -> dict:
     """Assemble the run config from interactive selections, honoring env precedence.
 
     Round counts and checkpoint follow "explicit env/flag wins": an env-applied
@@ -988,6 +1047,14 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
     config["anthropic_effort"] = selections.get("anthropic_effort")
     config["output_language"] = selections.get("output_language", "English")
+    if intraday is not None:
+        config["magpie_intraday_loop_enabled"] = bool(intraday)
+    if intraday_interval_minutes is not None:
+        config["magpie_intraday_loop_interval_minutes"] = max(1, int(intraday_interval_minutes))
+    if intraday_max_cycles is not None:
+        config["magpie_intraday_loop_max_cycles"] = max(1, int(intraday_max_cycles))
+    if intraday_fast_path is not None:
+        config["magpie_intraday_fast_path_enabled"] = bool(intraday_fast_path)
     # --checkpoint/--no-checkpoint overrides only when explicitly given; omitting
     # the flag preserves TRADINGAGENTS_CHECKPOINT_ENABLED / the default (#976).
     if checkpoint is not None:
@@ -995,11 +1062,161 @@ def _build_run_config(selections: dict, checkpoint: bool | None) -> dict:
     return config
 
 
-def run_analysis(checkpoint: bool | None = None):
-    # First get all user selections
-    selections = get_user_selections()
+def _append_intraday_cycle_signal_log(config: dict, selections: dict, run_label: str, magpie_signal: dict) -> None:
+    """Append a single intraday cycle Magpie signal snapshot to a CSV log."""
+    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    report_dir = results_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    log_path = report_dir / "intraday_cycle_signals.csv"
 
-    config = _build_run_config(selections, checkpoint)
+    row = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "cycle": run_label,
+        "status": magpie_signal.get("status", "unknown"),
+        "direction": magpie_signal.get("direction", "Unavailable"),
+        "confidence": magpie_signal.get("confidence", "Not evaluated"),
+        "long_score": magpie_signal.get("long_score", 0),
+        "short_score": magpie_signal.get("short_score", 0),
+        "reasoning": magpie_signal.get("reasoning", ""),
+    }
+
+    write_header = not log_path.exists()
+    with log_path.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "timestamp",
+                "cycle",
+                "status",
+                "direction",
+                "confidence",
+                "long_score",
+                "short_score",
+                "reasoning",
+            ],
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def run_analysis(
+    checkpoint: bool | None = None,
+    intraday: bool | None = None,
+    intraday_interval_minutes: int | None = None,
+    intraday_max_cycles: int | None = None,
+    intraday_fast_path: bool | None = None,
+    *,
+    selections: dict | None = None,
+    prompt_post_analysis: bool = True,
+    run_label: str | None = None,
+    session_magpie_state: dict | None = None,
+    baseline_state: dict | None = None,
+    fast_path: bool = False,
+):
+    # First get all user selections unless they were already collected.
+    if selections is None:
+        selections = get_user_selections()
+
+    config = _build_run_config(
+        selections,
+        checkpoint,
+        intraday=intraday,
+        intraday_interval_minutes=intraday_interval_minutes,
+        intraday_max_cycles=intraday_max_cycles,
+        intraday_fast_path=intraday_fast_path,
+    )
+
+    if fast_path:
+        return _run_fast_intraday_cycle(
+            selections=selections,
+            config=config,
+            baseline_state=baseline_state or {},
+            run_label=run_label,
+            session_magpie_state=session_magpie_state,
+        )
+
+    if config.get("magpie_intraday_loop_enabled", False):
+        timezone_name = str(config.get("magpie_timezone", "America/New_York"))
+        is_open, reason = _is_rth_session_open(timezone_name=timezone_name)
+        if not is_open:
+            console.print(
+                f"[yellow]Intraday mode skipped:[/yellow] {reason} ({timezone_name})"
+            )
+            return
+
+        max_cycles = max(1, int(config.get("magpie_intraday_loop_max_cycles", 12)))
+        interval_minutes = max(1, int(config.get("magpie_intraday_loop_interval_minutes", 5)))
+        fast_path_enabled = bool(config.get("magpie_intraday_fast_path_enabled", False))
+        console.print(
+            "[bold cyan]Starting intraday loop:[/bold cyan] "
+            f"{max_cycles} cycle(s), {interval_minutes} minute interval"
+            + (" [fast path after cycle 1]" if fast_path_enabled else "")
+        )
+        magpie_session_state = {
+            "trade_date": selections["analysis_date"],
+            "magpie_previous_direction": 0,
+            "magpie_previous_long_entry": False,
+            "magpie_previous_short_entry": False,
+        }
+        for idx in range(max_cycles):
+            is_open, reason = _is_rth_session_open(timezone_name=timezone_name)
+            if not is_open:
+                console.print(
+                    f"[yellow]Stopping intraday loop:[/yellow] {reason} ({timezone_name})"
+                )
+                break
+
+            cycle_label = f"intraday cycle {idx + 1}/{max_cycles}"
+            if idx == 0 or not fast_path_enabled:
+                baseline_state = run_analysis(
+                    checkpoint=checkpoint,
+                    intraday=False,
+                    selections=selections,
+                    prompt_post_analysis=False,
+                    run_label=cycle_label,
+                    session_magpie_state=magpie_session_state,
+                )
+            else:
+                baseline_state = run_analysis(
+                    checkpoint=checkpoint,
+                    intraday=False,
+                    selections=selections,
+                    prompt_post_analysis=False,
+                    run_label=cycle_label,
+                    session_magpie_state=magpie_session_state,
+                    baseline_state=baseline_state,
+                    fast_path=True,
+                )
+
+            magpie_signal = (baseline_state or {}).get("magpie_signal", {})
+            _append_intraday_cycle_signal_log(
+                config,
+                selections,
+                cycle_label,
+                magpie_signal,
+            )
+
+            if idx < max_cycles - 1:
+                time.sleep(interval_minutes * 60)
+
+        log_path = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"] / "reports" / "intraday_cycle_signals.csv"
+        if log_path.exists():
+            no_signal_cycles: list[str] = []
+            with log_path.open("r", encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    if str(row.get("confidence", "")).strip().lower() == "no signal":
+                        no_signal_cycles.append(str(row.get("cycle", "")))
+            if no_signal_cycles:
+                console.print(
+                    "[yellow]No-confidence cycles:[/yellow] " + ", ".join(no_signal_cycles)
+                )
+                console.print(f"[dim]See cycle log:[/dim] {log_path}")
+            else:
+                console.print(f"[green]No 'No signal' cycles found.[/green] {log_path}")
+
+        console.print("[bold green]Intraday loop complete.[/bold green]")
+        return baseline_state
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
@@ -1100,7 +1317,9 @@ def run_analysis(checkpoint: bool | None = None):
 
         # Create spinner text
         spinner_text = (
-            f"Analyzing {selections['ticker']} on {selections['analysis_date']}..."
+            f"Analyzing {selections['ticker']} on {selections['analysis_date']}"
+            + (f" ({run_label})" if run_label else "")
+            + "..."
         )
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
@@ -1117,6 +1336,7 @@ def run_analysis(checkpoint: bool | None = None):
             asset_type=selections["asset_type"],
             instrument_context=instrument_context,
         )
+        _seed_magpie_session_state(init_agent_state, session_magpie_state)
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)
         args = graph.propagator.get_graph_args(callbacks=[stats_handler])
@@ -1231,13 +1451,20 @@ def run_analysis(checkpoint: bool | None = None):
         for chunk in trace:
             final_state.update(chunk)
 
+        _update_magpie_session_state(
+            session_magpie_state,
+            final_state,
+            selections["analysis_date"],
+        )
+
         # Update all agent statuses to completed
         for agent in message_buffer.agent_status:
             message_buffer.update_agent_status(agent, "completed")
 
-        message_buffer.add_message(
-            "System", f"Completed analysis for {selections['analysis_date']}"
-        )
+        completed_text = f"Completed analysis for {selections['analysis_date']}"
+        if run_label:
+            completed_text = f"{completed_text} ({run_label})"
+        message_buffer.add_message("System", completed_text)
         message_buffer.add_message("System", analyst_wall_time_tracker.format_summary())
 
         # Update final report sections
@@ -1248,30 +1475,114 @@ def run_analysis(checkpoint: bool | None = None):
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
     # Post-analysis prompts (outside Live context for clean interaction)
-    console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
-    console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
+    if prompt_post_analysis:
+        console.print("\n[bold cyan]Analysis Complete![/bold cyan]\n")
+        console.print(f"[dim]{analyst_wall_time_tracker.format_summary()}[/dim]")
 
-    # Prompt to save report
-    save_choice = typer.prompt("Save report?", default="Y").strip().upper()
-    if save_choice in ("Y", "YES", ""):
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
-        save_path_str = typer.prompt(
-            "Save path (press Enter for default)",
-            default=str(default_path)
-        ).strip()
-        save_path = Path(save_path_str)
-        try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
-            console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
-            console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
-        except Exception as e:
-            console.print(f"[red]Error saving report: {e}[/red]")
+        # Prompt to save report
+        save_choice = typer.prompt("Save report?", default="Y").strip().upper()
+        if save_choice in ("Y", "YES", ""):
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            default_path = Path.cwd() / "reports" / f"{selections['ticker']}_{timestamp}"
+            save_path_str = typer.prompt(
+                "Save path (press Enter for default)",
+                default=str(default_path)
+            ).strip()
+            save_path = Path(save_path_str)
+            try:
+                report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+                console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
+                console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            except Exception as e:
+                console.print(f"[red]Error saving report: {e}[/red]")
 
-    # Prompt to display full report
-    display_choice = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper()
-    if display_choice in ("Y", "YES", ""):
-        display_complete_report(final_state)
+        # Prompt to display full report
+        display_choice = typer.prompt("\nDisplay full report on screen?", default="Y").strip().upper()
+        if display_choice in ("Y", "YES", ""):
+            display_complete_report(final_state)
+
+    return final_state
+
+
+def _run_fast_intraday_cycle(
+    *,
+    selections: dict,
+    config: dict,
+    baseline_state: dict,
+    run_label: str | None,
+    session_magpie_state: dict | None,
+) -> dict:
+    """Run a fast intraday cycle: deterministic Magpie + Trader only."""
+    selected_set = {analyst.value for analyst in selections["analysts"]}
+    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+    graph = TradingAgentsGraph(
+        selected_analyst_keys,
+        config=config,
+        debug=False,
+        callbacks=[],
+    )
+
+    instrument_context = baseline_state.get("instrument_context") or graph.resolve_instrument_context(
+        selections["ticker"], selections["asset_type"]
+    )
+    working_state = {
+        "company_of_interest": selections["ticker"],
+        "asset_type": selections["asset_type"],
+        "trade_date": selections["analysis_date"],
+        "instrument_context": instrument_context,
+        "investment_plan": baseline_state.get("investment_plan", ""),
+    }
+    _seed_magpie_session_state(working_state, session_magpie_state)
+
+    magpie_out = create_magpie_signal_node()(working_state)
+    working_state.update(magpie_out)
+
+    trader_out = create_trader(graph.quick_thinking_llm)(working_state)
+    working_state.update(trader_out)
+
+    final_state = dict(baseline_state)
+    final_state.update(
+        {
+            "company_of_interest": selections["ticker"],
+            "asset_type": selections["asset_type"],
+            "trade_date": selections["analysis_date"],
+            "instrument_context": instrument_context,
+            "investment_plan": working_state.get("investment_plan", baseline_state.get("investment_plan", "")),
+            "magpie_signal": working_state.get("magpie_signal", {}),
+            "trader_investment_plan": working_state.get("trader_investment_plan", ""),
+        }
+    )
+
+    _update_magpie_session_state(
+        session_magpie_state,
+        final_state,
+        selections["analysis_date"],
+    )
+
+    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    report_dir = results_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if final_state.get("magpie_signal"):
+        (report_dir / "magpie.md").write_text(
+            render_magpie_signal_summary(final_state["magpie_signal"]),
+            encoding="utf-8",
+        )
+    if final_state.get("trader_investment_plan"):
+        (report_dir / "trader_investment_plan.md").write_text(
+            final_state["trader_investment_plan"],
+            encoding="utf-8",
+        )
+
+    magpie = final_state.get("magpie_signal") or {}
+    console.print(
+        "[cyan]Fast cycle[/cyan]"
+        + (f" ({run_label})" if run_label else "")
+        + ": "
+        + f"direction={magpie.get('direction', 'Unavailable')}, "
+        + f"confidence={magpie.get('confidence', 'n/a')}, "
+        + f"long={magpie.get('long_score', 0)}, short={magpie.get('short_score', 0)}"
+    )
+    return final_state
 
 
 @app.command()
@@ -1281,6 +1592,28 @@ def analyze(
         "--checkpoint/--no-checkpoint",
         help="Enable/disable checkpoint-resume (save state after each node so a "
         "crashed run can resume). Omit to honor TRADINGAGENTS_CHECKPOINT_ENABLED.",
+    ),
+    intraday: bool | None = typer.Option(
+        None,
+        "--intraday/--no-intraday",
+        help="Enable/disable intraday loop mode. Omit to honor TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_ENABLED.",
+    ),
+    intraday_interval_minutes: int | None = typer.Option(
+        None,
+        "--intraday-interval-minutes",
+        min=1,
+        help="Intraday loop polling interval in minutes. Omit to honor TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_INTERVAL_MINUTES.",
+    ),
+    intraday_max_cycles: int | None = typer.Option(
+        None,
+        "--intraday-max-cycles",
+        min=1,
+        help="Maximum cycles for intraday loop mode. Omit to honor TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_MAX_CYCLES.",
+    ),
+    intraday_fast_path: bool | None = typer.Option(
+        None,
+        "--intraday-fast-path/--no-intraday-fast-path",
+        help="Use full graph on cycle 1 then Magpie+Trader-only fast cycles. Omit to honor TRADINGAGENTS_MAGPIE_INTRADAY_FAST_PATH_ENABLED.",
     ),
     clear_checkpoints: bool = typer.Option(
         False,
@@ -1292,7 +1625,13 @@ def analyze(
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
-    run_analysis(checkpoint=checkpoint)
+    run_analysis(
+        checkpoint=checkpoint,
+        intraday=intraday,
+        intraday_interval_minutes=intraday_interval_minutes,
+        intraday_max_cycles=intraday_max_cycles,
+        intraday_fast_path=intraday_fast_path,
+    )
 
 
 @app.command("schwab-auth")

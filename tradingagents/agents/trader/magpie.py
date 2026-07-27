@@ -174,6 +174,9 @@ def build_magpie_factor_inputs_from_intraday(data: pd.DataFrame) -> dict | None:
         "$ADD_short": False,
         "$TICK_short": False,
         "$VOLD_short": False,
+        "_latest_close": float(close.iloc[-1]),
+        "_latest_high": float(df["High"].iloc[-1]),
+        "_latest_low": float(df["Low"].iloc[-1]),
     }
 
 
@@ -328,6 +331,7 @@ def score_magpie_factors(
     previous_direction: int = 0,
     previous_long_entry: bool = False,
     previous_short_entry: bool = False,
+    signal_ttl_minutes: int = 5,
 ) -> dict:
     """Aggregate AZP-style factor booleans into a deterministic signal summary.
 
@@ -420,6 +424,17 @@ def score_magpie_factors(
         for name, active in short_hits.items()
     ]
 
+    latest_close = pd.to_numeric(factor_inputs.get("_latest_close"), errors="coerce")
+    latest_high = pd.to_numeric(factor_inputs.get("_latest_high"), errors="coerce")
+    latest_low = pd.to_numeric(factor_inputs.get("_latest_low"), errors="coerce")
+    invalidation_level = None
+    if direction == "Buy" and pd.notna(latest_low):
+        invalidation_level = round(float(latest_low), 4)
+    elif direction == "Sell" and pd.notna(latest_high):
+        invalidation_level = round(float(latest_high), 4)
+    elif pd.notna(latest_close):
+        invalidation_level = round(float(latest_close), 4)
+
     return {
         "strategy": "Alpha-Zone-Pro (Magpie)",
         "status": "computed",
@@ -428,6 +443,8 @@ def score_magpie_factors(
         "reasoning": reasoning,
         "long_score": long_score,
         "short_score": short_score,
+        "invalidation_level": invalidation_level,
+        "signal_ttl_minutes": max(1, int(signal_ttl_minutes)),
         "factors": factors,
         "long_entry": long_entry,
         "short_entry": short_entry,
@@ -448,6 +465,8 @@ def build_default_magpie_signal(enabled: bool) -> dict:
             "reasoning": "Magpie is disabled in configuration.",
             "long_score": 0,
             "short_score": 0,
+            "invalidation_level": None,
+            "signal_ttl_minutes": 0,
             "factors": [],
         }
 
@@ -463,6 +482,8 @@ def build_default_magpie_signal(enabled: bool) -> dict:
         ),
         "long_score": 0,
         "short_score": 0,
+        "invalidation_level": None,
+        "signal_ttl_minutes": 0,
         "factors": [
             {
                 "name": factor,
@@ -483,6 +504,8 @@ def render_magpie_signal_summary(signal: dict | None) -> str:
         f"**Confidence**: {signal.get('confidence', 'Not evaluated')}",
         f"**Long Score**: {signal.get('long_score', 0)}",
         f"**Short Score**: {signal.get('short_score', 0)}",
+        f"**Invalidation Level**: {signal.get('invalidation_level', 'n/a')}",
+        f"**Signal TTL (minutes)**: {signal.get('signal_ttl_minutes', 0)}",
         f"**Reasoning**: {signal.get('reasoning', '')}",
     ]
     factors = signal.get("factors") or []
@@ -513,6 +536,13 @@ def create_magpie_signal_node():
             previous_direction = int(state.get("magpie_previous_direction", 0) or 0)
             previous_long_entry = bool(state.get("magpie_previous_long_entry", False))
             previous_short_entry = bool(state.get("magpie_previous_short_entry", False))
+            interval = str(config.get("magpie_intraday_interval", "5m"))
+            ttl_minutes = 5
+            if interval.endswith("m"):
+                try:
+                    ttl_minutes = int(interval[:-1])
+                except ValueError:
+                    ttl_minutes = 5
             return {
                 "magpie_signal": score_magpie_factors(
                     factor_inputs,
@@ -522,6 +552,7 @@ def create_magpie_signal_node():
                     previous_direction=previous_direction,
                     previous_long_entry=previous_long_entry,
                     previous_short_entry=previous_short_entry,
+                    signal_ttl_minutes=ttl_minutes,
                 )
             }
 

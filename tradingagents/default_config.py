@@ -36,6 +36,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAGPIE_SESSION_MODE":     "magpie_session_mode",
     "TRADINGAGENTS_MAGPIE_TIMEZONE":         "magpie_timezone",
     "TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME": "magpie_implied_move_lock_time",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_ENABLED": "magpie_intraday_loop_enabled",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_INTERVAL_MINUTES": "magpie_intraday_loop_interval_minutes",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_MAX_CYCLES": "magpie_intraday_loop_max_cycles",
+    "TRADINGAGENTS_MAGPIE_INTRADAY_FAST_PATH_ENABLED": "magpie_intraday_fast_path_enabled",
 }
 
 
@@ -142,9 +146,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # routed to vendors you didn't choose. For ordered fallback, list several,
     # e.g. "yfinance,alpha_vantage". "default" uses all available vendors.
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance, schwab
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance, schwab
-        "market_internals": "yfinance",      # Options: yfinance, schwab
+        "core_stock_apis": "schwab",         # Options: alpha_vantage, yfinance, schwab
+        "technical_indicators": "schwab",    # Options: alpha_vantage, yfinance, schwab
+        "market_internals": "schwab",        # Options: yfinance, schwab
         "implied_move_data": "schwab",       # Options: schwab, yfinance
         "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
@@ -173,6 +177,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "magpie_session_mode": "rth",  # Options: rth, extended
     "magpie_timezone": "America/New_York",
     "magpie_implied_move_lock_time": "10:30",
+    "magpie_intraday_loop_enabled": False,
+    "magpie_intraday_loop_interval_minutes": 5,
+    "magpie_intraday_loop_max_cycles": 12,
+    "magpie_intraday_fast_path_enabled": False,
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection

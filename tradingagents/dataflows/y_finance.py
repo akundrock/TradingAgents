@@ -1,3 +1,5 @@
+import contextlib
+import io
 from datetime import datetime
 from io import StringIO
 from typing import Annotated
@@ -125,15 +127,20 @@ def _load_single_internal_series(symbol_candidates: list[str], start_dt: datetim
     for sym in symbol_candidates:
         try:
             ticker = yf.Ticker(sym)
-            series = yf_retry(
-                lambda: ticker.history(
-                    start=start_dt,
-                    end=end_dt,
-                    interval=interval,
-                    auto_adjust=False,
-                    prepost=True,
+            # yfinance emits noisy "possibly delisted" lines directly to
+            # stdout/stderr for many invalid symbols. Internals probing tries
+            # multiple candidates by design, so suppress that console noise and
+            # rely on structured fallback behavior instead.
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                series = yf_retry(
+                    lambda: ticker.history(
+                        start=start_dt,
+                        end=end_dt,
+                        interval=interval,
+                        auto_adjust=False,
+                        prepost=True,
+                    )
                 )
-            )
             if not series.empty and "Close" in series.columns:
                 if series.index.tz is not None:
                     series.index = series.index.tz_localize(None)

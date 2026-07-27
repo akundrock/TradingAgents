@@ -167,3 +167,23 @@ def test_magpie_implied_move_lock_override(monkeypatch):
         TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME="10:35",
     )
     assert dc.DEFAULT_CONFIG["magpie_implied_move_lock_time"] == "10:35"
+
+
+def test_magpie_intraday_loop_overrides(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_ENABLED="true",
+        TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_INTERVAL_MINUTES="3",
+        TRADINGAGENTS_MAGPIE_INTRADAY_LOOP_MAX_CYCLES="7",
+    )
+    assert dc.DEFAULT_CONFIG["magpie_intraday_loop_enabled"] is True
+    assert dc.DEFAULT_CONFIG["magpie_intraday_loop_interval_minutes"] == 3
+    assert dc.DEFAULT_CONFIG["magpie_intraday_loop_max_cycles"] == 7
+
+
+def test_magpie_intraday_fast_path_override(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MAGPIE_INTRADAY_FAST_PATH_ENABLED="true",
+    )
+    assert dc.DEFAULT_CONFIG["magpie_intraday_fast_path_enabled"] is True
