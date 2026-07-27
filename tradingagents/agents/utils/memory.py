@@ -48,6 +48,51 @@ class TradingMemoryLog:
         with open(self._log_path, "a", encoding="utf-8") as f:
             f.write(entry)
 
+    def has_import_fingerprint(self, fingerprint: str) -> bool:
+        """Return True if the log already contains the import fingerprint marker."""
+        if not self._log_path or not self._log_path.exists() or not fingerprint:
+            return False
+        marker = f"IMPORT_FINGERPRINT: {fingerprint}"
+        text = self._log_path.read_text(encoding="utf-8")
+        return marker in text
+
+    def append_imported_resolved_entry(
+        self,
+        *,
+        ticker: str,
+        trade_date: str,
+        rating: str,
+        raw_return: float,
+        reflection: str,
+        decision_summary: str,
+        technical_summary: str,
+        import_fingerprint: str,
+    ) -> bool:
+        """Append a resolved entry produced by execution-history import.
+
+        Returns False when the fingerprint already exists (idempotent no-op).
+        """
+        if not self._log_path:
+            return False
+        if self.has_import_fingerprint(import_fingerprint):
+            return False
+
+        tag = f"[{trade_date} | {ticker} | {rating} | {raw_return:+.1%} | n/a | imported]"
+        entry = (
+            f"{tag}\n\n"
+            f"DECISION:\n"
+            f"{decision_summary}\n\n"
+            f"TECHNICAL_MEMORY:\n"
+            f"{technical_summary}\n\n"
+            f"IMPORT_FINGERPRINT: {import_fingerprint}\n\n"
+            f"REFLECTION:\n"
+            f"{reflection}"
+            f"{self._SEPARATOR}"
+        )
+        with open(self._log_path, "a", encoding="utf-8") as f:
+            f.write(entry)
+        return True
+
     # --- Read path (Phase A) ---
 
     def load_entries(self) -> list[dict]:

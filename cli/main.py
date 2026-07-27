@@ -1,4 +1,5 @@
 import datetime
+import logging
 import os
 import time
 from collections import deque
@@ -47,6 +48,13 @@ from tradingagents.dataflows.schwab import (
     get_authorization_url,
     get_schwab_credentials,
     get_schwab_redirect_uri,
+)
+from tradingagents.dataflows.trade_journal import (
+    fundamentals_context_for_trade,
+    parse_schwab_order_history_csv,
+    reconstruct_round_trip_trades,
+    render_trade_decision_summary,
+    technical_context_for_trade,
 )
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
@@ -1293,6 +1301,174 @@ def analyze(
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     run_analysis(checkpoint=checkpoint)
+
+
+@app.command("import-journal")
+def import_journal(
+    csv_path: Path = typer.Option(
+        Path("mes-order-history.csv"),
+        "--csv-path",
+        help="Path to Schwab order-history CSV export.",
+    ),
+    start_date: str | None = typer.Option(
+        None,
+        "--start-date",
+        help="Optional inclusive start date (YYYY-MM-DD).",
+    ),
+    end_date: str | None = typer.Option(
+        None,
+        "--end-date",
+        help="Optional inclusive end date (YYYY-MM-DD).",
+    ),
+    csv_timezone: str | None = typer.Option(
+        None,
+        "--csv-timezone",
+        help="Optional timezone for naive CSV fill timestamps (for example: America/Denver).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Compute trade reflections without writing to the memory log.",
+    ),
+    contract_multiplier: float = typer.Option(
+        5.0,
+        "--contract-multiplier",
+        help="Dollar multiplier per index point for PnL calculation (MES default 5).",
+    ),
+    max_trades: int | None = typer.Option(
+        None,
+        "--max-trades",
+        help="Optional cap on number of closed trades to process (in time order).",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Enable detailed technical-context logging and per-trade diagnostics.",
+    ),
+):
+    """Import execution history and append reflection-ready resolved journal entries."""
+    if verbose:
+        logging.basicConfig(level=logging.INFO, force=True)
+        logging.getLogger("tradingagents.dataflows.trade_journal").setLevel(logging.INFO)
+
+    if not csv_path.exists():
+        console.print(f"[red]CSV file not found:[/red] {csv_path}")
+        raise typer.Exit(code=1)
+
+    config = DEFAULT_CONFIG.copy()
+
+    try:
+        fills = parse_schwab_order_history_csv(
+            csv_path=csv_path,
+            start_date=start_date,
+            end_date=end_date,
+            csv_timezone=csv_timezone,
+        )
+    except Exception as exc:
+        console.print(f"[red]Could not parse CSV:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if not fills:
+        console.print("[yellow]No filled rows found for the requested date range.[/yellow]")
+        return
+
+    trades, open_remainders = reconstruct_round_trip_trades(
+        fills,
+        contract_multiplier=contract_multiplier,
+    )
+
+    if not trades:
+        console.print("[yellow]No closed round-trip trades found; nothing to reflect.[/yellow]")
+        if open_remainders:
+            console.print(f"[yellow]Open trade remainders:[/yellow] {len(open_remainders)}")
+        return
+
+    graph = None
+    if not dry_run:
+        graph = TradingAgentsGraph(
+            selected_analysts=("market", "news", "fundamentals"),
+            config=config,
+            debug=False,
+        )
+
+    written = 0
+    skipped_existing = 0
+    technical_snapshots = 0
+
+    if max_trades is not None and max_trades > 0:
+        trades = trades[:max_trades]
+
+    console.print(
+        f"[cyan]Processing {len(trades)} closed trades from {csv_path}"
+        f" (dry-run={dry_run})...[/cyan]"
+    )
+
+    for trade in trades:
+        technical_ctx = technical_context_for_trade(trade)
+        if technical_ctx.get("entry", {}).get("source") != "none":
+            technical_snapshots += 1
+
+        if verbose:
+            entry_info = technical_ctx.get("entry", {})
+            exit_info = technical_ctx.get("exit", {})
+            console.print(
+                "[dim]"
+                f"trade={trade['ticker']} opened={trade['opened_at'].strftime('%Y-%m-%d %H:%M:%S')} "
+                f"entry_source={entry_info.get('source')} exit_source={exit_info.get('source')} "
+                f"entry_tags={','.join(entry_info.get('tags', [])) or 'none'} "
+                f"exit_tags={','.join(exit_info.get('tags', [])) or 'none'}"
+                "[/dim]"
+            )
+            for diag in entry_info.get("diagnostics", []):
+                console.print(f"  entry_diag: {diag}", style="dim", markup=False)
+            for diag in exit_info.get("diagnostics", []):
+                console.print(f"  exit_diag: {diag}", style="dim", markup=False)
+
+        if dry_run:
+            fundamentals_ctx = "Dry run: fundamentals lookup skipped."
+        else:
+            fundamentals_ctx = fundamentals_context_for_trade(trade, config)
+        decision_summary = render_trade_decision_summary(trade, technical_ctx)
+        reflection = "Dry run: reflection generation skipped."
+        if not dry_run:
+            reflection = graph.reflector.reflect_on_imported_trade(
+                decision_summary=decision_summary,
+                realized_dollars=trade["realized_dollars"],
+                realized_return=trade["realized_return"],
+                technical_memory=technical_ctx.get("memory_summary", ""),
+                technical_tags=technical_ctx.get("memory_tags", []),
+                fundamentals_context=fundamentals_ctx,
+            )
+
+        rating = "Buy" if trade["realized_dollars"] >= 0 else "Sell"
+        if dry_run:
+            continue
+
+        inserted = graph.memory_log.append_imported_resolved_entry(
+            ticker=trade["ticker"],
+            trade_date=trade["trade_date"],
+            rating=rating,
+            raw_return=trade["realized_return"],
+            reflection=reflection,
+            decision_summary=decision_summary,
+            technical_summary=technical_ctx.get("memory_summary", ""),
+            import_fingerprint=trade["import_fingerprint"],
+        )
+        if inserted:
+            written += 1
+        else:
+            skipped_existing += 1
+
+    console.print("[bold green]Import complete.[/bold green]")
+    console.print(f"- Filled rows parsed: {len(fills)}")
+    console.print(f"- Closed trades reconstructed: {len(trades)}")
+    console.print(f"- Open remainders skipped: {len(open_remainders)}")
+    console.print(f"- Technical snapshots captured: {technical_snapshots}")
+    if dry_run:
+        console.print("- Journal writes: 0 (dry-run)")
+    else:
+        console.print(f"- Journal entries written: {written}")
+        console.print(f"- Existing entries skipped (idempotent): {skipped_existing}")
 
 
 @app.command("schwab-auth")

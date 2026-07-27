@@ -1,0 +1,849 @@
+openapi: 3.0.3
+info:
+  title: Charles Schwab Market Data API
+  description: |
+    Market Data API for Schwab Trader API - Individual. Provides real-time and historical market data for stocks, ETFs, and futures.
+    
+    This specification documents the endpoints used by TradingAgents for price history, option chains, and derived market analytics.
+  version: 1.0.0
+  contact:
+    name: Charles Schwab Developer Support
+    url: https://developer.schwab.com/
+  license:
+    name: Charles Schwab Developer Terms
+    url: https://developer.schwab.com/
+
+servers:
+  - url: https://api.schwabapi.com
+    description: Schwab Production API Server
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Market Data
+    description: Endpoints for fetching historical and real-time market data
+  - name: Options
+    description: Endpoints for options data including chains and quotes
+  - name: Authentication
+    description: OAuth2 token management endpoints
+
+paths:
+  /marketdata/v1/pricehistory:
+    get:
+      tags:
+        - Market Data
+      summary: Get Price History
+      description: |
+        Retrieves OHLCV (Open, High, Low, Close, Volume) price history for a symbol.
+        Supports both daily and intraday frequencies.
+        
+        Use cases:
+        - Daily historical prices for technical analysis
+        - Intraday minute/5-minute bars for day trading strategies
+        - Extended hours data (pre-market and after-hours)
+        
+        Symbol formats:
+        - Stocks/ETFs: `SPY`, `NVDA`, `QQQ`
+        - Futures: `/MES` (Micro E-mini S&P 500), `/ESZ6` (E-mini S&P 500)
+        - Forex: `EUR/USD` (subject to broker support)
+      operationId: getPriceHistory
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: SPY
+          description: |
+            Market symbol to fetch. Examples:
+            - Stock: `NVDA`, `AAPL`, `SPY`
+            - Futures: `/MES`, `/ESZ6`, `/NQH7`
+            - Normalized to uppercase; broker-native futures notation (starting with `/`) preserved as-is
+        - name: startDate
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            example: 1716200000000
+          description: |
+            Start date/time as Unix timestamp in milliseconds (ms since epoch, UTC).
+            Determines the beginning of the price history range.
+            Example: 2024-05-20 00:00:00 UTC = 1716192000000 ms
+        - name: endDate
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            example: 1716804000000
+          description: |
+            End date/time as Unix timestamp in milliseconds (ms since epoch, UTC).
+            Determines the end of the price history range.
+            Example: 2024-05-27 00:00:00 UTC = 1716796800000 ms
+        - name: frequencyType
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - minute
+              - daily
+            default: daily
+            example: daily
+          description: |
+            Type of frequency for the candles.
+            - `minute`: Intraday minute-based candles
+            - `daily`: Daily candles (default)
+        - name: frequency
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+            example: 5
+          description: |
+            Bar/candle interval.
+            - For `frequencyType: minute`: 1, 5, 10, 15, 30 (minutes)
+            - For `frequencyType: daily`: 1 (day)
+            Example: `frequency: 5` with `frequencyType: minute` returns 5-minute bars
+        - name: needExtendedHoursData
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+            example: true
+          description: |
+            Include pre-market (4:00 AM - 9:30 AM ET) and after-hours (4:00 PM - 8:00 PM ET) data.
+            - `true`: Include extended hours candles (default for TradingAgents)
+            - `false`: Regular market hours only (9:30 AM - 4:00 PM ET)
+      responses:
+        '200':
+          description: Successful price history retrieval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceHistoryResponse'
+              examples:
+                daily_response:
+                  summary: Daily price history response
+                  value:
+                    empty: false
+                    candles:
+                      - datetime: 1716192000000
+                        open: 417.85
+                        high: 419.92
+                        low: 417.50
+                        close: 419.75
+                        volume: 45230000
+                      - datetime: 1716278400000
+                        open: 420.10
+                        high: 422.00
+                        low: 419.80
+                        close: 421.50
+                        volume: 38100000
+                intraday_response:
+                  summary: 5-minute intraday price history response
+                  value:
+                    empty: false
+                    candles:
+                      - datetime: 1716192600000
+                        open: 418.00
+                        high: 418.50
+                        low: 417.80
+                        close: 418.25
+                        volume: 145000
+                      - datetime: 1716192900000
+                        open: 418.30
+                        high: 418.90
+                        low: 418.10
+                        close: 418.75
+                        volume: 128000
+        '400':
+          description: Bad request (invalid parameters)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                message: Invalid symbol format
+                code: INVALID_SYMBOL
+        '401':
+          description: Unauthorized (access token expired or invalid)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                message: Unauthorized - Access token expired
+                code: UNAUTHORIZED
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                message: Too many requests - rate limited
+                code: RATE_LIMIT_EXCEEDED
+        '5XX':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /marketdata/v1/chains:
+    get:
+      tags:
+        - Options
+      summary: Get Option Chains
+      description: |
+        Retrieves option chain data including calls, puts, and underlying quote information.
+        Used to calculate implied volatility (IV) for implied move analysis.
+        
+        Typical use case: Fetch ATM (at-the-money) IV and option prices to compute expected
+        price movement bounds for intraday trading strategies (e.g., Magpie signal analysis).
+      operationId: getOptionChains
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: SPY
+          description: |
+            Underlying symbol for the option chain.
+            Examples: `SPY`, `QQQ`, `IWM`, `NVDA`
+        - name: contractType
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - CALL
+              - PUT
+              - ALL
+            default: ALL
+            example: ALL
+          description: |
+            Filter by contract type.
+            - `CALL`: Call options only
+            - `PUT`: Put options only
+            - `ALL`: Both calls and puts (default)
+        - name: strategy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - SINGLE
+              - ANALYTICAL
+              - COVERED
+              - VERTICAL
+              - COLLAR
+              - STRANGLE
+              - STRADDLE
+              - BUTTERFLY
+              - CONDOR
+              - DIAGONAL
+              - CALENDAR
+              - SPREAD
+              - BACKRATIO
+            default: SINGLE
+            example: SINGLE
+          description: |
+            Strategy type. Use `SINGLE` for standard single-leg option analysis.
+            Other strategies are for complex multi-leg spreads.
+        - name: strikeCount
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 10
+            example: 8
+          description: |
+            Number of strikes to return on each side of the underlying price.
+            Example: `strikeCount: 8` returns 8 calls and 8 puts (16 total) around the current price.
+            Recommended: 5-15 for IV calculation
+        - name: includeUnderlyingQuote
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - 'TRUE'
+              - 'FALSE'
+            default: 'FALSE'
+            example: 'TRUE'
+          description: |
+            Include the current underlying stock/ETF quote in the response.
+            - `TRUE`: Include underlying bid/ask and last price
+            - `FALSE`: Option chain only (default)
+        - name: fromDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+            example: '2024-05-20'
+          description: |
+            Start date for expiration filter (YYYY-MM-DD format).
+            Return expirations on or after this date.
+        - name: toDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+            example: '2024-06-03'
+          description: |
+            End date for expiration filter (YYYY-MM-DD format).
+            Return expirations on or before this date.
+      responses:
+        '200':
+          description: Successful option chain retrieval
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptionChainResponse'
+              examples:
+                basic_response:
+                  summary: Basic option chain response with calls and puts
+                  value:
+                    status: SUCCESS
+                    callExpDateMap:
+                      '2024-05-31:1':
+                        '420':
+                          - symbol: SPY 053124C00420000
+                            bid: 2.15
+                            ask: 2.25
+                            last: 2.20
+                            volume: 45000
+                            openInterest: 120000
+                            volatility: 18.5
+                            theta: -0.05
+                            delta: 0.65
+                            gamma: 0.012
+                            vega: 0.08
+                    putExpDateMap:
+                      '2024-05-31:1':
+                        '420':
+                          - symbol: SPY 053124P00420000
+                            bid: 1.85
+                            ask: 1.95
+                            last: 1.90
+                            volume: 32000
+                            openInterest: 95000
+                            volatility: 17.8
+                            theta: -0.04
+                            delta: -0.35
+                            gamma: 0.011
+                            vega: 0.08
+                    underlyingQuote:
+                      symbol: SPY
+                      bid: 422.50
+                      ask: 422.55
+                      last: 422.52
+        '400':
+          description: Bad request (invalid parameters or symbol)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized (access token expired or invalid)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '5XX':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/oauth/authorize:
+    get:
+      tags:
+        - Authentication
+      summary: OAuth2 Authorization Endpoint
+      description: |
+        Redirect users to this endpoint to initiate the OAuth2 authorization flow.
+        User approves access, and Schwab redirects back with an authorization code.
+      operationId: authorize
+      security: []
+      parameters:
+        - name: response_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum:
+              - code
+            example: code
+          description: Must be `code` for authorization code flow
+        - name: client_id
+          in: query
+          required: true
+          schema:
+            type: string
+            example: 'YOUR_CLIENT_ID'
+          description: Your application's client ID (registered with Schwab)
+        - name: redirect_uri
+          in: query
+          required: true
+          schema:
+            type: string
+            example: 'https://127.0.0.1'
+          description: |
+            URI where Schwab redirects after user authorization.
+            Must be registered with your app in Schwab Developer Portal.
+      responses:
+        '302':
+          description: Redirect to login/approval page
+        '400':
+          description: Invalid request parameters
+
+  /v1/oauth/token:
+    post:
+      tags:
+        - Authentication
+      summary: OAuth2 Token Endpoint
+      description: |
+        Exchange authorization code for access tokens, or refresh an expired access token.
+        Used internally by TradingAgents to obtain and maintain authentication.
+      operationId: getToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/TokenExchangeRequest'
+                - $ref: '#/components/schemas/TokenRefreshRequest'
+            examples:
+              code_exchange:
+                summary: Exchange authorization code for tokens
+                value:
+                  grant_type: authorization_code
+                  code: 'AUTH_CODE_FROM_REDIRECT'
+                  redirect_uri: 'https://127.0.0.1'
+              token_refresh:
+                summary: Refresh an access token
+                value:
+                  grant_type: refresh_token
+                  refresh_token: 'YOUR_REFRESH_TOKEN'
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            format: byte
+            example: 'Basic base64(client_id:client_secret)'
+          description: |
+            HTTP Basic Authentication header with base64-encoded `client_id:client_secret`.
+            Format: `Authorization: Basic {base64(client_id:client_secret)}`
+      responses:
+        '200':
+          description: Successful token response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+              example:
+                access_token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+                refresh_token: 'refresh_token_string_here'
+                expires_in: 1800
+                token_type: Bearer
+                scope: PlaceTrades AccountAccess MoveMoney
+        '400':
+          description: Invalid request (bad code, expired code, invalid credentials)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: invalid_grant
+                error_description: 'Authorization code expired'
+        '401':
+          description: Invalid client credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        OAuth2 Bearer Token (JWT format).
+        Obtain via the `/v1/oauth/token` endpoint.
+        Include in request header: `Authorization: Bearer {access_token}`
+
+  schemas:
+    Candle:
+      type: object
+      required:
+        - datetime
+        - open
+        - high
+        - low
+        - close
+        - volume
+      properties:
+        datetime:
+          type: integer
+          format: int64
+          description: Unix timestamp in milliseconds (UTC)
+          example: 1716192000000
+        open:
+          type: number
+          format: double
+          description: Opening price
+          example: 417.85
+        high:
+          type: number
+          format: double
+          description: High price for the period
+          example: 419.92
+        low:
+          type: number
+          format: double
+          description: Low price for the period
+          example: 417.50
+        close:
+          type: number
+          format: double
+          description: Closing price
+          example: 419.75
+        volume:
+          type: integer
+          format: int64
+          description: Trading volume in shares
+          example: 45230000
+
+    PriceHistoryResponse:
+      type: object
+      required:
+        - empty
+        - candles
+      properties:
+        empty:
+          type: boolean
+          description: Whether the response contains no candles (true if no data available)
+          example: false
+        candles:
+          type: array
+          description: Array of OHLCV candles
+          items:
+            $ref: '#/components/schemas/Candle'
+          example:
+            - datetime: 1716192000000
+              open: 417.85
+              high: 419.92
+              low: 417.50
+              close: 419.75
+              volume: 45230000
+
+    OptionContract:
+      type: object
+      required:
+        - symbol
+        - bid
+        - ask
+        - last
+        - volume
+        - volatility
+      properties:
+        symbol:
+          type: string
+          description: Option symbol (standardized format)
+          example: SPY 053124C00420000
+        bid:
+          type: number
+          format: double
+          description: Bid price
+          example: 2.15
+        ask:
+          type: number
+          format: double
+          description: Ask price
+          example: 2.25
+        last:
+          type: number
+          format: double
+          description: Last traded price
+          example: 2.20
+        volume:
+          type: integer
+          format: int64
+          description: Trading volume
+          example: 45000
+        openInterest:
+          type: integer
+          format: int64
+          description: Open interest (number of open contracts)
+          example: 120000
+        volatility:
+          type: number
+          format: double
+          description: Implied volatility as a percentage (e.g., 18.5 = 18.5%)
+          example: 18.5
+        theta:
+          type: number
+          format: double
+          description: Theta decay (change in option value per day)
+          example: -0.05
+        delta:
+          type: number
+          format: double
+          description: Delta sensitivity (price change per $1 move in underlying)
+          example: 0.65
+        gamma:
+          type: number
+          format: double
+          description: Gamma (rate of delta change)
+          example: 0.012
+        vega:
+          type: number
+          format: double
+          description: Vega sensitivity (change per 1% change in volatility)
+          example: 0.08
+
+    UnderlyingQuote:
+      type: object
+      properties:
+        symbol:
+          type: string
+          description: Underlying stock symbol
+          example: SPY
+        bid:
+          type: number
+          format: double
+          description: Current bid price
+          example: 422.50
+        ask:
+          type: number
+          format: double
+          description: Current ask price
+          example: 422.55
+        last:
+          type: number
+          format: double
+          description: Last traded price
+          example: 422.52
+
+    OptionChainResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          enum:
+            - SUCCESS
+            - FAILED
+          description: Status of the request
+          example: SUCCESS
+        callExpDateMap:
+          type: object
+          description: |
+            Nested map of call options grouped by expiration date and strike price.
+            Structure: { "YYYY-MM-DD:daysToExpiration": { "strikePrice": [ OptionContract, ... ] } }
+          example:
+            '2024-05-31:1':
+              '420':
+                - symbol: SPY 053124C00420000
+                  bid: 2.15
+                  ask: 2.25
+                  last: 2.20
+                  volume: 45000
+                  volatility: 18.5
+        putExpDateMap:
+          type: object
+          description: |
+            Nested map of put options grouped by expiration date and strike price.
+            Structure: { "YYYY-MM-DD:daysToExpiration": { "strikePrice": [ OptionContract, ... ] } }
+          example:
+            '2024-05-31:1':
+              '420':
+                - symbol: SPY 053124P00420000
+                  bid: 1.85
+                  ask: 1.95
+                  last: 1.90
+                  volume: 32000
+                  volatility: 17.8
+        underlyingQuote:
+          $ref: '#/components/schemas/UnderlyingQuote'
+
+    TokenResponse:
+      type: object
+      required:
+        - access_token
+        - refresh_token
+        - expires_in
+        - token_type
+      properties:
+        access_token:
+          type: string
+          description: JWT access token for API requests
+          example: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+        refresh_token:
+          type: string
+          description: Long-lived token for refreshing access tokens
+          example: 'refresh_token_value'
+        expires_in:
+          type: integer
+          description: Seconds until access token expires (typically 1800 = 30 minutes)
+          example: 1800
+        token_type:
+          type: string
+          enum:
+            - Bearer
+          description: Token type (always Bearer)
+          example: Bearer
+        scope:
+          type: string
+          description: Space-separated list of granted scopes
+          example: 'PlaceTrades AccountAccess MoveMoney'
+
+    TokenExchangeRequest:
+      type: object
+      required:
+        - grant_type
+        - code
+        - redirect_uri
+      properties:
+        grant_type:
+          type: string
+          enum:
+            - authorization_code
+          description: Must be 'authorization_code'
+          example: authorization_code
+        code:
+          type: string
+          description: Authorization code from redirect
+          example: 'AUTH_CODE_FROM_REDIRECT'
+        redirect_uri:
+          type: string
+          description: Must match the redirect_uri used in authorize request
+          example: 'https://127.0.0.1'
+
+    TokenRefreshRequest:
+      type: object
+      required:
+        - grant_type
+        - refresh_token
+      properties:
+        grant_type:
+          type: string
+          enum:
+            - refresh_token
+          description: Must be 'refresh_token'
+          example: refresh_token
+        refresh_token:
+          type: string
+          description: Refresh token from previous token response
+          example: 'YOUR_REFRESH_TOKEN'
+
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Human-readable error message
+          example: 'Invalid symbol format'
+        code:
+          type: string
+          description: Machine-readable error code
+          example: 'INVALID_SYMBOL'
+        error:
+          type: string
+          description: OAuth2 error code (for token endpoint)
+          example: 'invalid_grant'
+        error_description:
+          type: string
+          description: OAuth2 error description
+          example: 'Authorization code expired'
+
+x-tradingagents-notes:
+  description: |
+    Integration notes for TradingAgents framework.
+  price_history_usage: |
+    1. Daily candles for technical indicators:
+       - frequencyType: daily, frequency: 1
+       - Supports 50 SMA, 200 SMA, EMA, MACD, RSI, Bollinger Bands, ATR, VWMA, MFI
+    
+    2. Intraday minute bars for day trading:
+       - frequencyType: minute, frequency: 1, 5, 10, 15, 30
+       - Use 5-minute bars for most strategies
+       - Includes extended hours data for pre-market/after-hours analysis
+    
+    3. Futures support:
+       - Symbol format: /MES (Micro E-mini S&P), /ESZ6, /NQ, /YM
+       - Same endpoint as stocks; supply futures symbol in request
+  
+  option_chains_usage: |
+    Primary use case: Implied move calculation for intraday trading context.
+    
+    1. Fetch ATM IV:
+       - Call get_implied_move_data() which queries this endpoint
+       - Extracts nearest ATM IV from callExpDateMap
+       - Computes expected price move bounds
+    
+    2. Parameters:
+       - contractType: ALL (always use; filter client-side if needed)
+       - strategy: SINGLE (for standard analysis)
+       - strikeCount: 8 (balance detail vs. API load)
+       - includeUnderlyingQuote: TRUE (include current price for context)
+  
+  authentication_flow: |
+    1. First run: User calls `tradingagents schwab-auth`
+       - Redirects to /v1/oauth/authorize
+       - User approves app
+       - Redirect to https://127.0.0.1with code in query string
+       - Exchange code for tokens via /v1/oauth/token
+       - Store access_token and refresh_token in ~/.tradingagents/cache/schwab_tokens.json
+    
+    2. Subsequent requests: Automatic token refresh
+       - Check token expiration
+       - If expired, POST to /v1/oauth/token with refresh_token (grant_type: refresh_token)
+       - Update cached tokens
+       - Retry request with new access_token
+    
+    3. Token headers:
+       - Authorization: Bearer {access_token} (for API requests)
+       - Authorization: Basic {base64(client_id:client_secret)} (for token endpoint)
+  
+  rate_limiting: |
+    - Schwab enforces per-minute rate limits (typical: 5000 requests/minute for market data)
+    - On 429 response, exponential backoff and retry
+    - TradingAgents handles this in _authenticated_get() and _fetch_price_history()
+  
+  error_handling: |
+    - 400: Invalid parameters or symbol not found (no retry)
+    - 401: Expired access token (refresh and retry)
+    - 429: Rate limited (exponential backoff)
+    - 5XX: Server error (exponential backoff)
+  
+  timestamp_format: |
+    - All timestamps in requests: Unix milliseconds (ms since epoch, UTC)
+    - Example: 2024-05-20 00:00:00 UTC = 1716192000000 ms
+    - Use: int(datetime.timestamp() * 1000) in Python

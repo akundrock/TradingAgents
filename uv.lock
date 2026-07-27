@@ -3179,6 +3179,11 @@ dev = [
     { name = "ruff" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "backtrader", specifier = ">=1.9.78.123" },
@@ -3209,6 +3214,9 @@ requires-dist = [
     { name = "yfinance", specifier = ">=1.4.1" },
 ]
 provides-extras = ["dev", "bedrock"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.1.1" }]
 
 [[package]]
 name = "typer"
