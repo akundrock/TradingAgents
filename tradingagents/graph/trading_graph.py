@@ -28,9 +28,12 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
 )
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.rating import parse_rating
 from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.stockstats_utils import load_ohlcv
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.intraday.session import DailyBiasReport
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.reporting import write_report_tree
 
@@ -60,6 +63,29 @@ def _coerce_max_retries(value):
     if n < 0:
         raise ValueError(f"llm_max_retries must be >= 0, got {n}")
     return n
+
+
+def _rating_to_bias_direction(rating: str) -> str:
+    if rating in ("Buy", "Overweight"):
+        return "bullish"
+    if rating in ("Sell", "Underweight"):
+        return "bearish"
+    return "neutral"
+
+
+def _compute_key_levels(symbol: str, trade_date: str) -> dict[str, float]:
+    try:
+        daily = load_ohlcv(symbol, trade_date)
+        if len(daily) < 2:
+            return {}
+        prior = daily.iloc[-2]
+        return {
+            "support": float(prior["Low"]),
+            "resistance": float(prior["High"]),
+            "pivot": float(prior["Close"]),
+        }
+    except Exception:
+        return {}
 
 
 class TradingAgentsGraph:
@@ -359,6 +385,28 @@ class TradingAgentsGraph:
             f"asset={asset_type}",
         ])
 
+    def propagate_daily_bias(self, symbol: str, trade_date: str) -> DailyBiasReport:
+        """Run analysts + researcher debate and return a cached daily bias report."""
+        final_state, _ = self._run_graph(
+            symbol,
+            trade_date,
+            asset_type="stock",
+            stop_after_research=True,
+        )
+        investment_plan = str(final_state.get("investment_plan", ""))
+        rating = parse_rating(investment_plan)
+        direction = _rating_to_bias_direction(rating)
+        key_levels = _compute_key_levels(symbol, trade_date)
+
+        return DailyBiasReport(
+            symbol=symbol,
+            trade_date=trade_date,
+            direction=direction,
+            key_levels=key_levels,
+            summary=investment_plan,
+            computed_at=datetime.now(),
+        )
+
     def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.
 
@@ -416,7 +464,14 @@ class TradingAgentsGraph:
             )
         return write_report_tree(final_state, ticker, save_path)
 
-    def _run_graph(self, company_name, trade_date, asset_type: str = "stock"):
+    def _run_graph(
+        self,
+        company_name,
+        trade_date,
+        asset_type: str = "stock",
+        *,
+        stop_after_research: bool = False,
+    ):
         """Execute the graph and write the resulting state to disk and memory log."""
         # Initialize state — inject memory log context for PM and the
         # deterministically resolved instrument identity for all agents.
@@ -429,6 +484,7 @@ class TradingAgentsGraph:
             past_context=past_context,
             instrument_context=instrument_context,
         )
+        init_agent_state["stop_after_research"] = stop_after_research
         args = self.propagator.get_graph_args()
 
         # Inject thread_id so same ticker+date+graph-shape resumes; a different
@@ -463,21 +519,26 @@ class TradingAgentsGraph:
         self.curr_state = final_state
 
         # Log state to disk.
-        self._log_state(trade_date, final_state)
+        if not stop_after_research:
+            self._log_state(trade_date, final_state)
 
         # Store decision for deferred reflection on the next same-ticker run.
-        self.memory_log.store_decision(
-            ticker=company_name,
-            trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
-        )
+        if not stop_after_research:
+            self.memory_log.store_decision(
+                ticker=company_name,
+                trade_date=trade_date,
+                final_trade_decision=final_state["final_trade_decision"],
+            )
 
         # Clear checkpoint on successful completion to avoid stale state.
-        if self.config.get("checkpoint_enabled"):
+        if self.config.get("checkpoint_enabled") and not stop_after_research:
             clear_checkpoint(
                 self.config["data_cache_dir"], company_name, str(trade_date),
                 self._run_signature(asset_type),
             )
+
+        if stop_after_research:
+            return final_state, ""
 
         return final_state, self.process_signal(final_state["final_trade_decision"])
 

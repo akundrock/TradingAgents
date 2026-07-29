@@ -76,6 +76,8 @@ class Propagator:
             "fundamentals_report": "",
             "sentiment_report": "",
             "news_report": "",
+            "stop_after_research": False,
+            "intraday_context": None,
         }
 
     def get_graph_args(self, callbacks: list | None = None) -> dict[str, Any]:

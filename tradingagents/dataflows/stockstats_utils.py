@@ -192,6 +192,79 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     return data
 
 
+_INTRADAY_INDICATORS = (
+    "close_10_ema",
+    "close_20_sma",
+    "rsi",
+    "macd",
+    "macds",
+    "macdh",
+    "atr",
+    "boll",
+    "boll_ub",
+    "boll_lb",
+    "vwma",
+)
+
+
+def compute_intraday_vwap(df: pd.DataFrame) -> pd.Series:
+    """Cumulative VWAP from session start.
+
+    typical_price = (high + low + close) / 3
+    vwap = cumsum(typical_price * volume) / cumsum(volume)
+    """
+    cleaned = _clean_dataframe(df.copy())
+    typical = (cleaned["High"] + cleaned["Low"] + cleaned["Close"]) / 3.0
+    volume = cleaned["Volume"].replace(0, pd.NA).ffill().fillna(1.0)
+    return (typical * volume).cumsum() / volume.cumsum()
+
+
+def _unwrap_indicators_frame(sdf: pd.DataFrame) -> pd.DataFrame:
+    """Return a plain DataFrame with canonical OHLCV column names.
+
+    ``stockstats.wrap()`` lowercases price columns; downstream intraday code
+    (Magpie, strategies) expects ``Open``/``High``/``Low``/``Close``/``Volume``.
+    """
+    try:
+        from stockstats import StockDataFrame, unwrap
+    except ImportError:
+        return sdf.copy()
+
+    out = unwrap(sdf).copy() if isinstance(sdf, StockDataFrame) else sdf.copy()
+    rename = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume",
+    }
+    cols = {lower: upper for lower, upper in rename.items() if lower in out.columns}
+    if cols:
+        out = out.rename(columns=cols)
+    return out
+
+
+def compute_tf_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply stockstats indicators and VWAP to a single OHLCV DataFrame."""
+    cleaned = _clean_dataframe(df.copy())
+    if cleaned.empty:
+        return cleaned
+
+    wrapped = wrap(cleaned)
+    for indicator in _INTRADAY_INDICATORS:
+        _ = wrapped[indicator]
+
+    wrapped["vwap"] = compute_intraday_vwap(cleaned)
+    return _unwrap_indicators_frame(wrapped)
+
+
+def compute_mtf_indicators(
+    candle_dfs: dict[int, pd.DataFrame],
+) -> dict[int, pd.DataFrame]:
+    """Compute a standard intraday indicator set for each timeframe DataFrame."""
+    return {tf: compute_tf_indicators(df) for tf, df in candle_dfs.items()}
+
+
 def filter_financials_by_date(data: pd.DataFrame, curr_date: str) -> pd.DataFrame:
     """Drop financial statement columns (fiscal period timestamps) after curr_date.
 

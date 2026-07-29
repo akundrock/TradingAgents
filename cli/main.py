@@ -35,6 +35,7 @@ from cli.utils import (
     get_ticker,
     prompt_openai_compatible_url,
     resolve_backend_url,
+    resolve_premarket_analysts,
     select_analysts,
     select_deep_thinking_agent,
     select_llm_provider,
@@ -42,6 +43,7 @@ from cli.utils import (
     select_shallow_thinking_agent,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.logging_config import configure_logging
 from tradingagents.dataflows.schwab import (
     _tokens_path,
     bootstrap_tokens_from_redirect,
@@ -56,6 +58,7 @@ from tradingagents.dataflows.trade_journal import (
     render_trade_decision_summary,
     technical_context_for_trade,
 )
+from tradingagents.intraday.scanner import WatchlistScanner
 from tradingagents.graph.analyst_execution import (
     AnalystWallTimeTracker,
     build_analyst_execution_plan,
@@ -72,6 +75,35 @@ app = typer.Typer(
     help="TradingAgents CLI: Multi-Agents LLM Financial Trading Framework",
     add_completion=True,  # Enable shell completion
 )
+
+
+def _expand_watchlist(values: list[str]) -> list[str]:
+    """Expand CLI watchlist tokens into individual symbols.
+
+    Supports comma- or space-separated values inside each ``--watchlist`` occurrence,
+    e.g. ``--watchlist NVDA,AAPL`` or ``--watchlist "NVDA AAPL SPY"``.
+    """
+    symbols: list[str] = []
+    for value in values:
+        symbols.extend(part.strip() for part in value.replace(",", " ").split() if part.strip())
+    return [symbol.upper() for symbol in symbols]
+
+
+def _resolve_intraday_watchlist(
+    symbols: list[str] | None,
+    watchlist: list[str],
+) -> list[str]:
+    resolved = _expand_watchlist(watchlist)
+    if symbols:
+        resolved.extend(symbol.upper() for symbol in symbols)
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for symbol in resolved:
+        if symbol not in seen:
+            seen.add(symbol)
+            unique.append(symbol)
+    return unique
 
 
 # Create a deque to store recent messages with a maximum length
@@ -1508,6 +1540,153 @@ def schwab_auth(
     console.print(f"[green]Saved Schwab tokens to:[/green] {token_file}")
     if expires_in:
         console.print(f"[green]Access token expires in:[/green] {expires_in} seconds")
+
+
+@app.command()
+def intraday(
+    symbols: list[str] | None = typer.Argument(
+        None,
+        metavar="SYMBOL...",
+        help="Watchlist symbols as positional args, e.g. tradingagents intraday NVDA AAPL SPY --dry-run",
+    ),
+    watchlist: list[str] = typer.Option(
+        [],
+        "--watchlist",
+        help=(
+            "Symbols to monitor. Use comma-separated (NVDA,AAPL), repeated flags "
+            "(--watchlist NVDA --watchlist AAPL), or quoted (--watchlist \"NVDA AAPL\")."
+        ),
+    ),
+    strategy: str = typer.Option(
+        "base_momentum",
+        "--strategy",
+        help="Intraday strategy registry key.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Evaluate gates but skip the LLM pipeline.",
+    ),
+    no_premarket: bool = typer.Option(
+        False,
+        "--no-premarket",
+        help="Skip daily bias setup (use neutral bias).",
+    ),
+    no_restore_premarket: bool = typer.Option(
+        False,
+        "--no-restore-premarket",
+        help="Ignore cached pre-market bias; run LLM setup for all symbols (still writes cache).",
+    ),
+    force_premarket: bool = typer.Option(
+        False,
+        "--force-premarket",
+        help="Re-run pre-market LLM setup for all symbols even when cache exists.",
+    ),
+    analysts: list[str] = typer.Option(
+        [],
+        "--analysts",
+        help=(
+            "Analysts for pre-market daily bias: market, social, news, fundamentals. "
+            "Comma-separated or repeated flags. Omit social to skip Sentiment/Reddit."
+        ),
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        help="Enable INFO-level logging for scanner and dataflow activity.",
+    ),
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Log level override: DEBUG, INFO, WARNING, or ERROR.",
+    ),
+    output_dir: str | None = typer.Option(
+        None,
+        "--output-dir",
+        help="Override signal log directory.",
+    ),
+):
+    """Run the intraday watchlist scanner on live Schwab data."""
+    from tradingagents.dataflows.config import set_config
+
+    resolved_level = configure_logging(log_level or ("INFO" if verbose else None))
+
+    config = dict(DEFAULT_CONFIG)
+    config["intraday_enabled"] = True
+    config["magpie_enabled"] = True
+    config["intraday_strategy"] = strategy
+    resolved_watchlist = _resolve_intraday_watchlist(symbols, watchlist)
+    if resolved_watchlist:
+        config["watchlist"] = resolved_watchlist
+    if output_dir:
+        config["intraday_output_dir"] = output_dir
+
+    if not config.get("watchlist"):
+        console.print(
+            "[red]Watchlist is empty.[/red]\n"
+            "Examples:\n"
+            "  tradingagents intraday NVDA AAPL SPY --dry-run\n"
+            "  tradingagents intraday --watchlist NVDA,AAPL,SPY --dry-run\n"
+            "  tradingagents intraday --watchlist NVDA --watchlist AAPL --dry-run"
+        )
+        raise typer.Exit(code=1)
+
+    premarket_analysts: list[str] | None = None
+    if not no_premarket:
+        try:
+            premarket_analysts = resolve_premarket_analysts(
+                cli_analysts=analysts,
+                config=config,
+            )
+        except ValueError as exc:
+            console.print(f"[red]Invalid analyst selection:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+    set_config(config)
+
+    symbols_display = ", ".join(config["watchlist"])
+    table = Table(title="Intraday Scanner")
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("Watchlist", symbols_display)
+    table.add_row("Strategy", strategy)
+    table.add_row("Dry run", str(dry_run))
+    table.add_row("Log level", resolved_level)
+    table.add_row(
+        "Pre-market bias",
+        "skipped" if no_premarket else "enabled",
+    )
+    if premarket_analysts is not None:
+        table.add_row("Premarket analysts", ", ".join(premarket_analysts))
+        restore_enabled = bool(config.get("intraday_restore_premarket_bias", True))
+        if no_restore_premarket:
+            restore_enabled = False
+        if force_premarket:
+            restore_label = "disabled (force)"
+        elif restore_enabled:
+            restore_label = "enabled"
+        else:
+            restore_label = "disabled"
+        table.add_row("Premarket restore", restore_label)
+    console.print(table)
+
+    if no_restore_premarket:
+        config["intraday_restore_premarket_bias"] = False
+
+    graph = TradingAgentsGraph(
+        selected_analysts=tuple(premarket_analysts or DEFAULT_CONFIG["intraday_premarket_analysts"]),
+        config=config,
+        debug=False,
+    )
+    scanner = WatchlistScanner(
+        config,
+        graph,
+        dry_run=dry_run,
+        skip_premarket=no_premarket,
+        restore_premarket=bool(config.get("intraday_restore_premarket_bias", True)),
+        force_premarket=force_premarket,
+    )
+    scanner.run()
 
 
 if __name__ == "__main__":

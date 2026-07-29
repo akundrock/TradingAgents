@@ -36,6 +36,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAGPIE_SESSION_MODE":     "magpie_session_mode",
     "TRADINGAGENTS_MAGPIE_TIMEZONE":         "magpie_timezone",
     "TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME": "magpie_implied_move_lock_time",
+    "TRADINGAGENTS_LOG_LEVEL":                  "log_level",
+    "TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS": "intraday_premarket_analysts",
+    "TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS": "intraday_restore_premarket_bias",
 }
 
 
@@ -59,6 +62,11 @@ def _coerce(value: str, reference):
         raise ValueError(
             f"expected a boolean ({'/'.join(_BOOL_TRUE + _BOOL_FALSE)}), got {value!r}"
         )
+    if isinstance(reference, list):
+        parts = [part.strip() for part in value.replace(",", " ").split() if part.strip()]
+        if reference and isinstance(reference[0], int):
+            return [int(part) for part in parts]
+        return parts
     if isinstance(reference, int) and not isinstance(reference, bool):
         return int(value)
     if isinstance(reference, float):
@@ -117,6 +125,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "English",
+    # Logging level name for configure_logging() (DEBUG | INFO | WARNING | ERROR)
+    "log_level": "WARNING",
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
@@ -173,6 +183,24 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "magpie_session_mode": "rth",  # Options: rth, extended
     "magpie_timezone": "America/New_York",
     "magpie_implied_move_lock_time": "10:30",
+    # Intraday watchlist scanning
+    "intraday_enabled": False,
+    "watchlist": [],
+    "intraday_scan_interval_minutes": 5,
+    "intraday_bar_close_delay_seconds": 15,
+    "intraday_premarket_setup_time": "09:00",
+    "intraday_session_start": "09:30",
+    "intraday_session_end": "16:00",
+    "intraday_timezone": "America/New_York",
+    "intraday_mtf_timeframes": [5, 30],
+    "intraday_strategy": "base_momentum",
+    "intraday_require_daily_bias_alignment": True,
+    "intraday_output_dir": os.path.join(_TRADINGAGENTS_HOME, "intraday"),
+    "intraday_max_concurrent_symbols": 5,
+    "intraday_signal_cooldown_bars": 3,
+    # Analyst wire keys for pre-market daily bias (market, social, news, fundamentals)
+    "intraday_premarket_analysts": ["market", "social", "news", "fundamentals"],
+    "intraday_restore_premarket_bias": True,
     # Benchmark for alpha calculation in the reflection layer.
     # ``benchmark_ticker`` (when set) overrides the suffix map for all
     # tickers; leave it None to use ``benchmark_map`` for auto-detection

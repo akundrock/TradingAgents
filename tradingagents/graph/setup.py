@@ -144,7 +144,11 @@ class GraphSetup:
                 self.conditional_logic.should_continue_debate,
                 DEBATE_PATH_MAP,
             )
-        workflow.add_edge("Research Manager", "Magpie")
+        workflow.add_conditional_edges(
+            "Research Manager",
+            self.conditional_logic.should_continue_after_research,
+            {"Magpie": "Magpie", "__end__": END},
+        )
         workflow.add_edge("Magpie", "Trader")
         workflow.add_edge("Trader", "Aggressive Analyst")
         # All three risk edges share the complete RISK_ANALYSIS_PATH_MAP (#1088).

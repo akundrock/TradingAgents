@@ -71,3 +71,9 @@ class ConditionalLogic:
         if state["risk_debate_state"]["latest_speaker"].startswith("Conservative"):
             return "Neutral Analyst"
         return "Aggressive Analyst"
+
+    def should_continue_after_research(self, state: AgentState) -> str:
+        """Route to END when running daily-bias-only propagation."""
+        if state.get("stop_after_research"):
+            return "__end__"
+        return "Magpie"

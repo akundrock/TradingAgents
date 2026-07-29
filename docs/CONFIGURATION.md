@@ -419,6 +419,21 @@ tradingagents  # Fully configured, no interaction
 | `output_language` | str | `"en"` | `TRADINGAGENTS_OUTPUT_LANGUAGE` | Output language (i18n): en, zh, ja, de, es, fr, pt, ru, ko |
 | `benchmark_ticker` | str | `"SPY"` | `TRADINGAGENTS_BENCHMARK_TICKER` | Benchmark for risk-adjusted metrics |
 
+### Logging
+
+| Parameter | Type | Default | Env Var | Description |
+|-----------|------|---------|---------|-------------|
+| `log_level` | str | `"WARNING"` | `TRADINGAGENTS_LOG_LEVEL` | Global log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+### Intraday
+
+| Parameter | Type | Default | Env Var | Description |
+|-----------|------|---------|---------|-------------|
+| `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | Strategy evaluated on each bar close |
+| `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: require 30-min trend to align with daily bias |
+| `intraday_premarket_analysts` | list[str] | `market,social,news,fundamentals` | `TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS` | Analyst wire keys for pre-market daily bias. Omit `social` to skip Sentiment/Reddit. |
+| `intraday_restore_premarket_bias` | bool | `True` | `TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS` | Restore cached pre-market bias from `{intraday_output_dir}/{date}/premarket_bias.json` on scanner restart |
+
 ### Data Vendor API Keys
 
 | Parameter | Type | Default | Env Var | Notes |

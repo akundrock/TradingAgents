@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import questionary
@@ -6,6 +7,7 @@ from dotenv import find_dotenv, set_key
 from rich.console import Console
 
 from cli.models import AnalystType, AssetType
+from tradingagents.graph.analyst_execution import build_analyst_execution_plan
 from tradingagents.llm_clients.api_key_env import get_api_key_env
 from tradingagents.llm_clients.model_catalog import get_model_options
 
@@ -19,6 +21,62 @@ ANALYST_ORDER = [
     ("News Analyst", AnalystType.NEWS),
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
 ]
+
+_DEFAULT_PREMARKET_ANALYSTS = [analyst.value for _, analyst in ANALYST_ORDER]
+
+
+def expand_analyst_keys(values: list[str]) -> list[str]:
+    """Expand CLI/env analyst tokens into individual wire keys."""
+    keys: list[str] = []
+    for value in values:
+        keys.extend(
+            part.strip().lower()
+            for part in str(value).replace(",", " ").split()
+            if part.strip()
+        )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+def normalize_analyst_order(keys: list[str]) -> list[str]:
+    """Order analyst keys to match ANALYST_ORDER while preserving selection."""
+    order = [analyst.value for _, analyst in ANALYST_ORDER]
+    selected = set(keys)
+    return [key for key in order if key in selected]
+
+
+def resolve_premarket_analysts(
+    *,
+    cli_analysts: list[str],
+    config: dict,
+    interactive: bool | None = None,
+) -> list[str]:
+    """Resolve pre-market analyst selection for intraday bias setup.
+
+    Priority: CLI ``--analysts`` > ``TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS``
+    env > interactive checkbox (TTY) > config default.
+    """
+    if cli_analysts:
+        keys = expand_analyst_keys(cli_analysts)
+    elif os.environ.get("TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS"):
+        keys = expand_analyst_keys([os.environ["TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS"]])
+    elif interactive if interactive is not None else sys.stdin.isatty():
+        selected = select_analysts(AssetType.STOCK)
+        keys = [analyst.value for analyst in selected]
+    else:
+        keys = expand_analyst_keys(
+            list(config.get("intraday_premarket_analysts") or _DEFAULT_PREMARKET_ANALYSTS)
+        )
+
+    if not keys:
+        raise ValueError("at least one analyst must be selected for pre-market setup")
+    build_analyst_execution_plan(keys)
+    return normalize_analyst_order(keys)
 
 CRYPTO_SUFFIXES = ("-USD", "-USDT", "-USDC", "-BTC", "-ETH")
 

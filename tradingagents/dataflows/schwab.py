@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
@@ -554,6 +555,73 @@ def get_intraday_stock(
     header += f"# Total records: {len(data)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     return header + csv_string
+
+
+_INTRADAY_MINUTE_FREQ_MAP: dict[int, tuple[str, int]] = {
+    1: ("minute", 1),
+    5: ("minute", 5),
+    10: ("minute", 10),
+    15: ("minute", 15),
+    30: ("minute", 30),
+}
+
+
+def get_candles_multi_timeframe(
+    symbol: str,
+    session_start: datetime,
+    as_of: datetime,
+    timeframes: list[int] | None = None,
+) -> dict[int, pd.DataFrame]:
+    """Fetch intraday candles for multiple timeframes in parallel.
+
+    Returns a dict keyed by interval in minutes, e.g. ``{5: df_5min, 30: df_30min}``.
+    Each DataFrame has columns: Date, Open, High, Low, Close, Volume.
+    """
+    if as_of <= session_start:
+        raise ValueError("as_of must be after session_start")
+
+    tfs = timeframes if timeframes is not None else [5, 30]
+    unsupported = [tf for tf in tfs if tf not in _INTRADAY_MINUTE_FREQ_MAP]
+    if unsupported:
+        raise ValueError(
+            f"Unsupported intraday timeframes: {unsupported}. "
+            f"Supported: {sorted(_INTRADAY_MINUTE_FREQ_MAP)}"
+        )
+
+    curr_date = as_of.strftime("%Y-%m-%d")
+    canonical = _normalize_symbol(symbol)
+
+    def _fetch_tf(minutes: int) -> tuple[int, pd.DataFrame]:
+        frequency_type, frequency = _INTRADAY_MINUTE_FREQ_MAP[minutes]
+        candles = _fetch_price_history_range(
+            symbol=symbol,
+            start_dt=session_start,
+            end_dt=as_of,
+            frequency_type=frequency_type,
+            frequency=frequency,
+        )
+        if not candles:
+            return minutes, pd.DataFrame()
+        data = _candles_to_df(candles, symbol, curr_date)
+        mask = (data["Date"] >= pd.to_datetime(session_start)) & (
+            data["Date"] <= pd.to_datetime(as_of)
+        )
+        return minutes, data.loc[mask].copy()
+
+    result: dict[int, pd.DataFrame] = {}
+    with ThreadPoolExecutor(max_workers=len(tfs)) as executor:
+        futures = {executor.submit(_fetch_tf, tf): tf for tf in tfs}
+        for future in as_completed(futures):
+            minutes, df = future.result()
+            if df.empty:
+                raise NoMarketDataError(
+                    symbol,
+                    canonical,
+                    f"no intraday rows between {session_start} and {as_of} at {minutes}m",
+                )
+            result[minutes] = df
+
+    return result
 
 
 def get_market_internals(

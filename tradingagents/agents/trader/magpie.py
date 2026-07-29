@@ -438,6 +438,30 @@ def score_magpie_factors(
     }
 
 
+def compute_magpie_from_candles(
+    data: pd.DataFrame,
+    config: Mapping[str, object] | None = None,
+    *,
+    previous_direction: int = 0,
+    previous_long_entry: bool = False,
+    previous_short_entry: bool = False,
+) -> dict | None:
+    """Score Magpie factors from a pre-fetched intraday OHLCV DataFrame."""
+    cfg = config or get_config()
+    factors = build_magpie_factor_inputs_from_intraday(data)
+    if factors is None:
+        return None
+    return score_magpie_factors(
+        factors,
+        min_confirmations=int(cfg.get("magpie_min_confirmations", 3)),
+        transition_only=bool(cfg.get("magpie_transition_only", True)),
+        require_direction_flip=bool(cfg.get("magpie_require_direction_flip", True)),
+        previous_direction=previous_direction,
+        previous_long_entry=previous_long_entry,
+        previous_short_entry=previous_short_entry,
+    )
+
+
 def build_default_magpie_signal(enabled: bool) -> dict:
     if not enabled:
         return {
