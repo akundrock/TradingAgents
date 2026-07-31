@@ -429,7 +429,15 @@ tradingagents  # Fully configured, no interaction
 
 | Parameter | Type | Default | Env Var | Description |
 |-----------|------|---------|---------|-------------|
-| `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | Strategy evaluated on each bar close |
+| `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | Strategy evaluated on each bar close (`base_momentum`, `pro_trader_dashboard`) |
+| `intraday_mtf_timeframes` | list[int] | `[5, 30]` | — | Schwab-fetchable candle intervals (minutes). `pro_trader_dashboard` auto-adds 15/30 and derives 60m locally. |
+| `pro_trader_benchmark` | str | `SPY` | — | Benchmark symbol for RRS (pro_trader_dashboard) |
+| `pro_trader_entry_mode` | str | `wick_touch` | — | ORB entry: `wick_touch` or `close_above` |
+| `pro_trader_min_rs_timeframes` | int | `4` | — | Min aligned RRS timeframes for setup pass |
+| `pro_trader_require_sector_alignment` | bool | `True` | — | Require sector power-index alignment |
+| `pro_trader_require_relative_volume` | bool | `True` | — | Require 5m relative volume > 1 |
+| `pro_trader_require_daily_rrs` | bool | `True` | — | Require daily RRS direction filter |
+| `pro_trader_key_level_atr_buffer` | float | `0.5` | — | ATR buffer when filtering near daily key levels |
 | `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: require 30-min trend to align with daily bias |
 | `intraday_premarket_analysts` | list[str] | `market,social,news,fundamentals` | `TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS` | Analyst wire keys for pre-market daily bias. Omit `social` to skip Sentiment/Reddit. |
 | `intraday_restore_premarket_bias` | bool | `True` | `TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS` | Restore cached pre-market bias from `{intraday_output_dir}/{date}/premarket_bias.json` on scanner restart |

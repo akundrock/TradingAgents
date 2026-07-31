@@ -557,6 +557,10 @@ def get_intraday_stock(
     return header + csv_string
 
 
+# Schwab pricehistory supports minute frequencies 1, 5, 10, 15, 30 only.
+# Hourly (60m) bars must be derived locally via resample_ohlcv().
+SCHWAB_INTRADAY_MINUTES: frozenset[int] = frozenset({1, 5, 10, 15, 30})
+
 _INTRADAY_MINUTE_FREQ_MAP: dict[int, tuple[str, int]] = {
     1: ("minute", 1),
     5: ("minute", 5),
@@ -593,13 +597,20 @@ def get_candles_multi_timeframe(
 
     def _fetch_tf(minutes: int) -> tuple[int, pd.DataFrame]:
         frequency_type, frequency = _INTRADAY_MINUTE_FREQ_MAP[minutes]
-        candles = _fetch_price_history_range(
-            symbol=symbol,
-            start_dt=session_start,
-            end_dt=as_of,
-            frequency_type=frequency_type,
-            frequency=frequency,
-        )
+        try:
+            candles = _fetch_price_history_range(
+                symbol=symbol,
+                start_dt=session_start,
+                end_dt=as_of,
+                frequency_type=frequency_type,
+                frequency=frequency,
+            )
+        except NoMarketDataError as exc:
+            raise NoMarketDataError(
+                symbol,
+                canonical,
+                f"{exc.detail} at {minutes}m",
+            ) from exc
         if not candles:
             return minutes, pd.DataFrame()
         data = _candles_to_df(candles, symbol, curr_date)
@@ -612,7 +623,17 @@ def get_candles_multi_timeframe(
     with ThreadPoolExecutor(max_workers=len(tfs)) as executor:
         futures = {executor.submit(_fetch_tf, tf): tf for tf in tfs}
         for future in as_completed(futures):
-            minutes, df = future.result()
+            tf = futures[future]
+            try:
+                minutes, df = future.result()
+            except NoMarketDataError:
+                raise
+            except Exception as exc:
+                raise NoMarketDataError(
+                    symbol,
+                    canonical,
+                    f"{exc} at {tf}m",
+                ) from exc
             if df.empty:
                 raise NoMarketDataError(
                     symbol,
