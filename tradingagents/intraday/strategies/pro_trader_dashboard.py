@@ -274,3 +274,35 @@ class ProTraderDashboardStrategy:
         met = [name for name, ok in checks.items() if ok]
         missing = [name for name, ok in checks.items() if not ok]
         return met, missing
+
+    def indicator_snapshot(
+        self,
+        symbol: str,
+        mtf: MTFValidationResult,
+        daily_bias: DailyBiasReport,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, float | str]:
+        ctx = self._build_context(symbol, mtf, daily_bias, config)
+        return indicator_snapshot_from_context(ctx)
+
+
+def indicator_snapshot_from_context(ctx: ProTraderContext) -> dict[str, float | str]:
+    snapshot: dict[str, float | str] = {
+        "supertrend": "long" if ctx.supertrend.is_long else "short",
+        "relative_volume_5m": round(ctx.relative_volume_5m, 2),
+        "symbol_power": round(ctx.symbol_power, 2),
+        "sector_power": round(ctx.sector_power, 2),
+        "rs_aligned_long": count_aligned_rrs(ctx.rrs_by_tf, "long"),
+        "rs_aligned_short": count_aligned_rrs(ctx.rrs_by_tf, "short"),
+    }
+    if ctx.sector_etf:
+        snapshot["sector_etf"] = ctx.sector_etf
+    if ctx.opening_range is not None:
+        or_state = ctx.opening_range
+        snapshot["orb_bullish"] = str(or_state.bullish_orb)
+        snapshot["orb_bearish"] = str(or_state.bearish_orb)
+        if or_state.opening_range_high is not None:
+            snapshot["or_high"] = round(or_state.opening_range_high, 2)
+        if or_state.opening_range_low is not None:
+            snapshot["or_low"] = round(or_state.opening_range_low, 2)
+    return snapshot

@@ -185,6 +185,22 @@ tradingagents intraday SPY --no-restore-premarket
 # TRADINGAGENTS_LOG_LEVEL=INFO
 ```
 
+### Live dashboard (Rich TUI)
+
+When stdout is a TTY, `tradingagents intraday` enables a live terminal dashboard by default (same Rich `Live` pattern as `tradingagents analyze`). The dashboard shows:
+
+- **Watchlist table** — daily bias, gate pass/fail (G1/G2), strategy score, direction per symbol
+- **Detail panel** — pre-market analyst reports during setup; per-scan strategy factor checklist during the session
+- **Recent signals** and a **log tail** from `tradingagents.*` loggers
+
+```bash
+# Explicit live mode (default on interactive terminals)
+tradingagents intraday NVDA AAPL --dry-run --live
+
+# Disable dashboard for CI, piping, or plain log output
+tradingagents intraday NVDA AAPL --dry-run --no-live
+```
+
 Signals are logged to `~/.tradingagents/intraday/YYYY-MM-DD/signals.csv`.
 
 Pre-market daily bias is cached to `~/.tradingagents/intraday/YYYY-MM-DD/premarket_bias.json`. When you restart the scanner the same day with an updated watchlist, symbols already analyzed are restored instantly; only new symbols run the LLM pre-market pipeline. If you change `--analysts`, affected symbols are re-analyzed automatically.

@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yfinance as yf
 from langgraph.prebuilt import ToolNode
@@ -385,18 +385,51 @@ class TradingAgentsGraph:
             f"asset={asset_type}",
         ])
 
-    def propagate_daily_bias(self, symbol: str, trade_date: str) -> DailyBiasReport:
+    def propagate_daily_bias(
+        self,
+        symbol: str,
+        trade_date: str,
+        *,
+        on_chunk: Callable[[dict], None] | None = None,
+    ) -> DailyBiasReport:
         """Run analysts + researcher debate and return a cached daily bias report."""
-        final_state, _ = self._run_graph(
-            symbol,
-            trade_date,
-            asset_type="stock",
-            stop_after_research=True,
-        )
+        if on_chunk is None:
+            final_state, _ = self._run_graph(
+                symbol,
+                trade_date,
+                asset_type="stock",
+                stop_after_research=True,
+            )
+        else:
+            final_state = self._run_graph_streaming(
+                symbol,
+                trade_date,
+                asset_type="stock",
+                stop_after_research=True,
+                on_chunk=on_chunk,
+            )
         investment_plan = str(final_state.get("investment_plan", ""))
         rating = parse_rating(investment_plan)
         direction = _rating_to_bias_direction(rating)
         key_levels = _compute_key_levels(symbol, trade_date)
+
+        analyst_reports = {
+            key: str(final_state[key])
+            for key in (
+                "market_report",
+                "sentiment_report",
+                "news_report",
+                "fundamentals_report",
+            )
+            if final_state.get(key)
+        }
+        debate = final_state.get("investment_debate_state") or {}
+        debate_parts = []
+        if debate.get("bull_history"):
+            debate_parts.append(f"**Bull:** {debate['bull_history']}")
+        if debate.get("bear_history"):
+            debate_parts.append(f"**Bear:** {debate['bear_history']}")
+        debate_summary = "\n\n".join(debate_parts)
 
         return DailyBiasReport(
             symbol=symbol,
@@ -405,7 +438,44 @@ class TradingAgentsGraph:
             key_levels=key_levels,
             summary=investment_plan,
             computed_at=datetime.now(),
+            analyst_reports=analyst_reports,
+            debate_summary=debate_summary,
         )
+
+    def _run_graph_streaming(
+        self,
+        company_name,
+        trade_date,
+        asset_type: str = "stock",
+        *,
+        stop_after_research: bool = False,
+        on_chunk: Callable[[dict], None] | None = None,
+    ) -> dict:
+        """Execute the graph via stream(), invoking on_chunk for each node delta."""
+        past_context = self.memory_log.get_past_context(company_name)
+        instrument_context = self.resolve_instrument_context(company_name, asset_type)
+        init_agent_state = self.propagator.create_initial_state(
+            company_name,
+            trade_date,
+            asset_type=asset_type,
+            past_context=past_context,
+            instrument_context=instrument_context,
+        )
+        init_agent_state["stop_after_research"] = stop_after_research
+        args = self.propagator.get_graph_args()
+
+        if self.config.get("checkpoint_enabled"):
+            tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
+            args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
+
+        final_state: dict = {}
+        for chunk in self.graph.stream(init_agent_state, **args):
+            final_state.update(chunk)
+            if on_chunk is not None:
+                on_chunk(chunk)
+
+        self.curr_state = final_state
+        return final_state
 
     def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.

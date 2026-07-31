@@ -296,3 +296,44 @@ def test_no_signal_when_gates_fail(monkeypatch):
 
     scanner._on_bar_close(datetime(2026, 7, 27, 10, 0))
     assert scanner.session.signal_log == []
+
+
+@pytest.mark.unit
+def test_scan_state_populated_on_gate_failure(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(_config(), ta_graph, dry_run=True, skip_premarket=True)
+    scanner.session.daily_bias_cache["NVDA"] = _bias("NVDA")
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=False,
+            direction="none",
+            reason="blocked",
+            factors_met=[],
+            factors_missing=["rsi_in_range"],
+        ),
+    )
+    monkeypatch.setattr(
+        scanner.gating,
+        "evaluate",
+        lambda mtf, strategy_result, daily_bias, config: GateResult(
+            passed=False,
+            gate1_strategy=False,
+            gate1_reason="blocked",
+            gate2_mtf_alignment=False,
+            gate2_reason="not evaluated",
+            final_direction="none",
+        ),
+    )
+
+    scanner._on_bar_close(datetime(2026, 7, 27, 10, 0))
+    assert "NVDA" in scanner.session.latest_scan_by_symbol
+    assert scanner.session.latest_scan_by_symbol["NVDA"].gate1_passed is False
+    assert scanner.session.latest_scan_by_symbol["NVDA"].factors_missing == ["rsi_in_range"]

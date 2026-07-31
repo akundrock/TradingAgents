@@ -13,6 +13,25 @@ class DailyBiasReport:
     key_levels: dict[str, float]
     summary: str
     computed_at: datetime
+    analyst_reports: dict[str, str] = field(default_factory=dict)
+    debate_summary: str = ""
+
+
+@dataclass
+class SymbolScanState:
+    symbol: str
+    bar_time: datetime
+    daily_bias_direction: str
+    strategy_name: str
+    strategy_direction: str
+    factors_met: list[str]
+    factors_missing: list[str]
+    gate1_passed: bool
+    gate2_passed: bool
+    gate_passed: bool
+    final_direction: str | None
+    setup_score: int
+    indicator_snapshot: dict[str, float | str] | None = None
 
 
 @dataclass
@@ -46,3 +65,5 @@ class TradingSession:
             "all_pass": 0,
         }
     )
+    latest_scan_by_symbol: dict[str, SymbolScanState] = field(default_factory=dict)
+    selected_detail_symbol: str | None = None

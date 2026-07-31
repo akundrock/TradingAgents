@@ -21,11 +21,17 @@ from tradingagents.intraday.premarket_cache import (
     save_premarket_cache,
 )
 from tradingagents.intraday.mtf_validator import MultiTimeframeValidator
-from tradingagents.intraday.session import DailyBiasReport, IntradaySignal, TradingSession
+from tradingagents.intraday.session import (
+    DailyBiasReport,
+    IntradaySignal,
+    SymbolScanState,
+    TradingSession,
+)
 from tradingagents.intraday.strategies import get_strategy
 from tradingagents.intraday.strategy import StrategyResult
 
 if TYPE_CHECKING:
+    from cli.intraday_display import IntradayDashboardBuffer
     from tradingagents.graph.intraday_graph import IntradayTradingGraph
     from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -43,6 +49,7 @@ class WatchlistScanner:
         skip_premarket: bool = False,
         restore_premarket: bool = True,
         force_premarket: bool = False,
+        dashboard: IntradayDashboardBuffer | None = None,
     ):
         self.config = config
         self.ta_graph = ta_graph
@@ -50,6 +57,7 @@ class WatchlistScanner:
         self.skip_premarket = skip_premarket
         self.restore_premarket = restore_premarket
         self.force_premarket = force_premarket
+        self.dashboard = dashboard
         self.mtf_validator = MultiTimeframeValidator()
         self.gating = GatingLayer()
         self.strategy = get_strategy(str(config.get("intraday_strategy", "base_momentum")))
@@ -70,10 +78,11 @@ class WatchlistScanner:
         if not self.session.watchlist:
             raise ValueError("Watchlist is empty. Provide symbols via --watchlist or config.")
 
-        console.print(
-            f"[bold]Intraday scanner[/bold] — {self.session.session_date} "
-            f"strategy={self.strategy.name} symbols={', '.join(self.session.watchlist)}"
-        )
+        if self.dashboard is None:
+            console.print(
+                f"[bold]Intraday scanner[/bold] — {self.session.session_date} "
+                f"strategy={self.strategy.name} symbols={', '.join(self.session.watchlist)}"
+            )
 
         if self.skip_premarket:
             self._seed_neutral_bias()
@@ -100,7 +109,8 @@ class WatchlistScanner:
             )
 
     def _run_premarket_setup(self) -> None:
-        console.print("[cyan]Running pre-market daily bias setup...[/cyan]")
+        if self.dashboard is None:
+            console.print("[cyan]Running pre-market daily bias setup...[/cyan]")
         analysts = list(self.config.get("intraday_premarket_analysts") or [])
         cache_file = cache_path(self._output_dir, self.session.session_date)
         disk_cache: PremarketCache | None = None
@@ -134,7 +144,10 @@ class WatchlistScanner:
                     cached_report.direction,
                     cached_report.computed_at.strftime("%H:%M"),
                 )
-                console.print(f"  {symbol}: {cached_report.direction} (restored)")
+                if self.dashboard is not None:
+                    self.dashboard.load_premarket_from_bias(symbol, analysts, cached_report)
+                else:
+                    console.print(f"  {symbol}: {cached_report.direction} (restored)")
             else:
                 if disk_cache is not None and symbol in disk_cache.reports:
                     pass  # already logged analyst change above
@@ -152,7 +165,19 @@ class WatchlistScanner:
 
             def _bias_for_symbol(symbol: str) -> tuple[str, DailyBiasReport]:
                 logger.info("Starting daily bias for %s", symbol)
-                report = self.ta_graph.propagate_daily_bias(symbol, self.session.session_date)
+                if self.dashboard is not None:
+                    self.dashboard.init_premarket_symbol(symbol, analysts)
+
+                    def _on_chunk(chunk: dict) -> None:
+                        self.dashboard.update_premarket_chunk(symbol, chunk)
+
+                    report = self.ta_graph.propagate_daily_bias(
+                        symbol,
+                        self.session.session_date,
+                        on_chunk=_on_chunk,
+                    )
+                else:
+                    report = self.ta_graph.propagate_daily_bias(symbol, self.session.session_date)
                 logger.info("Completed daily bias for %s: %s", symbol, report.direction)
                 return symbol, report
 
@@ -171,10 +196,14 @@ class WatchlistScanner:
                         symbol=symbol,
                         report=report,
                     )
-                    console.print(f"  {symbol}: {report.direction}")
+                    if self.dashboard is None:
+                        console.print(f"  {symbol}: {report.direction}")
 
             if disk_cache is not None:
                 save_premarket_cache(cache_file, disk_cache)
+
+        if self.dashboard is not None:
+            self.dashboard.finish_premarket()
 
         computed = len(symbols_to_compute)
         logger.info(
@@ -182,9 +211,10 @@ class WatchlistScanner:
             restored,
             computed,
         )
-        console.print(
-            f"[cyan]Pre-market complete:[/cyan] {restored} restored, {computed} computed"
-        )
+        if self.dashboard is None:
+            console.print(
+                f"[cyan]Pre-market complete:[/cyan] {restored} restored, {computed} computed"
+            )
         self.session.status = "pre_market"
 
     def _session_loop(self) -> None:
@@ -277,6 +307,9 @@ class WatchlistScanner:
                 if signal is not None:
                     self._emit_signal(signal)
 
+        if self.dashboard is not None:
+            self.dashboard._notify()
+
     def _within_session(self, bar_time: datetime) -> bool:
         start_str = str(self.config.get("intraday_session_start", "09:30"))
         end_str = str(self.config.get("intraday_session_end", "16:00"))
@@ -300,6 +333,9 @@ class WatchlistScanner:
 
         strategy_result = self.strategy.check_setup(symbol, mtf, daily_bias)
         gate_result = self.gating.evaluate(mtf, strategy_result, daily_bias, self.config)
+        self._record_scan_state(
+            symbol, bar_time, daily_bias, mtf, strategy_result, gate_result
+        )
         self._record_gate_stats(gate_result)
         logger.info(
             "%s %s",
@@ -378,6 +414,42 @@ class WatchlistScanner:
             return "Marginal"
         return "None"
 
+    def _record_scan_state(
+        self,
+        symbol: str,
+        bar_time: datetime,
+        daily_bias: DailyBiasReport,
+        mtf,
+        strategy_result: StrategyResult,
+        gate_result,
+    ) -> None:
+        indicator_snapshot = None
+        indicator_fn = getattr(self.strategy, "indicator_snapshot", None)
+        if callable(indicator_fn):
+            try:
+                indicator_snapshot = indicator_fn(symbol, mtf, daily_bias, self.config)
+            except Exception:
+                indicator_snapshot = None
+
+        scan_state = SymbolScanState(
+            symbol=symbol,
+            bar_time=bar_time,
+            daily_bias_direction=daily_bias.direction,
+            strategy_name=self.strategy.name,
+            strategy_direction=strategy_result.direction,
+            factors_met=list(strategy_result.factors_met),
+            factors_missing=list(strategy_result.factors_missing),
+            gate1_passed=gate_result.gate1_strategy,
+            gate2_passed=gate_result.gate2_mtf_alignment,
+            gate_passed=gate_result.passed,
+            final_direction=gate_result.final_direction if gate_result.passed else None,
+            setup_score=len(strategy_result.factors_met),
+            indicator_snapshot=indicator_snapshot,
+        )
+        self.session.latest_scan_by_symbol[symbol] = scan_state
+        if self.dashboard is not None:
+            self.dashboard.record_scan_state(scan_state)
+
     def _record_gate_stats(self, gate_result) -> None:
         if gate_result.passed:
             self.session.gate_stats["all_pass"] += 1
@@ -390,10 +462,13 @@ class WatchlistScanner:
         self.session.signal_log.append(signal)
         self.session.last_signal_by_symbol[signal.symbol] = signal
 
-        console.print(
-            f"[green]SIGNAL[/green] {signal.symbol} {signal.action} "
-            f"@ {signal.bar_time:%H:%M} — {signal.reasoning[:120]}"
-        )
+        if self.dashboard is not None:
+            self.dashboard.add_signal(signal)
+        else:
+            console.print(
+                f"[green]SIGNAL[/green] {signal.symbol} {signal.action} "
+                f"@ {signal.bar_time:%H:%M} — {signal.reasoning[:120]}"
+            )
 
         out_dir = self._output_dir / self.session.session_date
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -465,6 +540,8 @@ class WatchlistScanner:
         )
 
     def _eod_summary(self) -> None:
+        if self.dashboard is not None:
+            return
         table = Table(title="Intraday Session Summary")
         table.add_column("Metric")
         table.add_column("Value")

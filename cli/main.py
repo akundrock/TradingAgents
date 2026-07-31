@@ -20,6 +20,12 @@ from rich.table import Table
 from rich.text import Text
 
 from cli.announcements import display_announcements, fetch_announcements
+from cli.display_common import (
+    ANALYST_AGENT_NAMES,
+    ANALYST_ORDER,
+    ANALYST_REPORT_MAP,
+    update_analyst_statuses,
+)
 from cli.stats_handler import StatsCallbackHandler
 from cli.utils import (
     ask_anthropic_effort,
@@ -867,69 +873,6 @@ def update_research_team_status(status):
         message_buffer.update_agent_status(agent, status)
 
 
-# Ordered list of analysts for status transitions
-ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
-ANALYST_AGENT_NAMES = {
-    "market": "Market Analyst",
-    "social": "Sentiment Analyst",
-    "news": "News Analyst",
-    "fundamentals": "Fundamentals Analyst",
-}
-ANALYST_REPORT_MAP = {
-    "market": "market_report",
-    "social": "sentiment_report",
-    "news": "news_report",
-    "fundamentals": "fundamentals_report",
-}
-
-
-def update_analyst_statuses(message_buffer, chunk, wall_time_tracker=None):
-    """Update analyst statuses based on accumulated report state.
-
-    Logic:
-    - Store new report content from the current chunk if present
-    - Check accumulated report_sections (not just current chunk) for status
-    - Analysts with reports = completed
-    - First analyst without report = in_progress
-    - Remaining analysts without reports = pending
-    - When all analysts done, set Bull Researcher to in_progress
-    """
-    selected = message_buffer.selected_analysts
-    found_active = False
-
-    if wall_time_tracker is not None:
-        sync_analyst_tracker_from_chunk(wall_time_tracker, chunk)
-
-    for analyst_key in ANALYST_ORDER:
-        if analyst_key not in selected:
-            continue
-
-        agent_name = ANALYST_AGENT_NAMES[analyst_key]
-        report_key = ANALYST_REPORT_MAP[analyst_key]
-
-        # Capture new report content from current chunk
-        if chunk.get(report_key):
-            message_buffer.update_report_section(report_key, chunk[report_key])
-
-        # Determine status from accumulated sections, not just current chunk
-        has_report = bool(message_buffer.report_sections.get(report_key))
-
-        if has_report:
-            message_buffer.update_agent_status(agent_name, "completed")
-        elif not found_active:
-            message_buffer.update_agent_status(agent_name, "in_progress")
-            found_active = True
-        else:
-            message_buffer.update_agent_status(agent_name, "pending")
-
-    # When all analysts complete, transition research team to in_progress
-    if (
-        not found_active
-        and selected
-        and message_buffer.agent_status.get("Bull Researcher") == "pending"
-    ):
-        message_buffer.update_agent_status("Bull Researcher", "in_progress")
-
 def extract_content_string(content):
     """Extract string content from various message formats.
     Returns None if no meaningful text content is found.
@@ -1605,8 +1548,15 @@ def intraday(
         "--output-dir",
         help="Override signal log directory.",
     ),
+    live: bool | None = typer.Option(
+        None,
+        "--live/--no-live",
+        help="Rich live dashboard (default: on when stdout is a TTY).",
+    ),
 ):
     """Run the intraday watchlist scanner on live Schwab data."""
+    import sys
+
     from tradingagents.dataflows.config import set_config
 
     resolved_level = configure_logging(log_level or ("INFO" if verbose else None))
@@ -1668,7 +1618,9 @@ def intraday(
         else:
             restore_label = "disabled"
         table.add_row("Premarket restore", restore_label)
-    console.print(table)
+    use_live = live if live is not None else sys.stdout.isatty()
+    if not use_live:
+        console.print(table)
 
     if no_restore_premarket:
         config["intraday_restore_premarket_bias"] = False
@@ -1686,7 +1638,44 @@ def intraday(
         restore_premarket=bool(config.get("intraday_restore_premarket_bias", True)),
         force_premarket=force_premarket,
     )
-    scanner.run()
+
+    if use_live:
+        from cli.intraday_display import (
+            IntradayDashboardBuffer,
+            attach_dashboard_logging,
+            create_intraday_layout,
+            detach_dashboard_logging,
+            update_intraday_display,
+        )
+
+        start_time = datetime.datetime.now()
+        stats_handler = StatsCallbackHandler()
+        buffer = IntradayDashboardBuffer(
+            session=scanner.session,
+            strategy_name=strategy,
+        )
+        scanner.dashboard = buffer
+        layout = create_intraday_layout()
+        log_handler = attach_dashboard_logging(buffer)
+
+        def refresh() -> None:
+            update_intraday_display(
+                layout,
+                buffer,
+                stats_handler=stats_handler,
+                start_time=start_time,
+            )
+
+        buffer.set_refresh_callback(refresh)
+
+        with Live(layout, refresh_per_second=4):
+            refresh()
+            scanner.run()
+            refresh()
+
+        detach_dashboard_logging(log_handler)
+    else:
+        scanner.run()
 
 
 if __name__ == "__main__":

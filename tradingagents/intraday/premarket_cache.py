@@ -9,6 +9,8 @@ from pathlib import Path
 
 from tradingagents.intraday.session import DailyBiasReport
 
+CACHE_SCHEMA_VERSION = 2
+
 
 @dataclass
 class PremarketCache:
@@ -26,7 +28,7 @@ def analysts_match(cached: list[str], current: list[str]) -> bool:
 
 
 def report_to_dict(report: DailyBiasReport) -> dict:
-    return {
+    payload = {
         "symbol": report.symbol,
         "trade_date": report.trade_date,
         "direction": report.direction,
@@ -34,12 +36,21 @@ def report_to_dict(report: DailyBiasReport) -> dict:
         "summary": report.summary,
         "computed_at": report.computed_at.isoformat(),
     }
+    if report.analyst_reports:
+        payload["analyst_reports"] = dict(report.analyst_reports)
+    if report.debate_summary:
+        payload["debate_summary"] = report.debate_summary
+    return payload
 
 
 def report_from_dict(data: dict) -> DailyBiasReport:
     direction = data.get("direction", "neutral")
     if direction not in ("bullish", "bearish", "neutral"):
         direction = "neutral"
+    analyst_reports = {
+        str(key): str(value)
+        for key, value in (data.get("analyst_reports") or {}).items()
+    }
     return DailyBiasReport(
         symbol=str(data["symbol"]),
         trade_date=str(data["trade_date"]),
@@ -47,11 +58,14 @@ def report_from_dict(data: dict) -> DailyBiasReport:
         key_levels={str(k): float(v) for k, v in (data.get("key_levels") or {}).items()},
         summary=str(data.get("summary", "")),
         computed_at=datetime.fromisoformat(str(data["computed_at"])),
+        analyst_reports=analyst_reports,
+        debate_summary=str(data.get("debate_summary", "")),
     )
 
 
 def cache_to_dict(cache: PremarketCache) -> dict:
     return {
+        "schema_version": CACHE_SCHEMA_VERSION,
         "session_date": cache.session_date,
         "analysts": list(cache.analysts),
         "reports": {

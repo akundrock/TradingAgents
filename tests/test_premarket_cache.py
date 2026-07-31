@@ -42,6 +42,52 @@ def test_report_round_trip():
 
 
 @pytest.mark.unit
+def test_report_round_trip_with_analyst_reports():
+    report = _report()
+    report.analyst_reports = {"market_report": "bullish trend"}
+    report.debate_summary = "bull case wins"
+    restored = report_from_dict(report_to_dict(report))
+    assert restored.analyst_reports == report.analyst_reports
+    assert restored.debate_summary == report.debate_summary
+
+
+@pytest.mark.unit
+def test_v1_cache_backward_compat():
+    data = {
+        "session_date": "2026-07-28",
+        "analysts": ["market"],
+        "reports": {
+            "NVDA": {
+                "symbol": "NVDA",
+                "trade_date": "2026-07-28",
+                "direction": "bullish",
+                "key_levels": {},
+                "summary": "buy",
+                "computed_at": "2026-07-28T09:05:12",
+            }
+        },
+    }
+    cache = cache_from_dict(data)
+    assert cache is not None
+    assert cache.reports["NVDA"].analyst_reports == {}
+
+
+@pytest.mark.unit
+def test_cache_schema_version_written(tmp_path):
+    path = cache_path(tmp_path, "2026-07-28")
+    cache = PremarketCache(
+        session_date="2026-07-28",
+        analysts=["market"],
+        reports={"NVDA": _report()},
+    )
+    save_premarket_cache(path, cache)
+    import json
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["schema_version"] == 2
+
+
+@pytest.mark.unit
 def test_analysts_match_ignores_order():
     assert analysts_match(["market", "news"], ["news", "market"])
     assert not analysts_match(["market", "news"], ["market", "social"])
