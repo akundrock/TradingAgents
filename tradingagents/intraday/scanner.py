@@ -29,6 +29,7 @@ from tradingagents.intraday.session import (
 )
 from tradingagents.intraday.strategies import get_strategy
 from tradingagents.intraday.strategy import StrategyResult
+from tradingagents.intraday.universe_screener import UniverseScreener
 
 if TYPE_CHECKING:
     from cli.intraday_display import IntradayDashboardBuffer
@@ -69,24 +70,36 @@ class WatchlistScanner:
 
         today = datetime.now().strftime("%Y-%m-%d")
         watchlist = list(config.get("watchlist") or [])
-        self.session = TradingSession(session_date=today, watchlist=watchlist)
+        self.session = TradingSession(
+            session_date=today,
+            watchlist=list(watchlist),
+            base_watchlist=list(watchlist),
+        )
+        for symbol in self.session.base_watchlist:
+            self.session.symbol_sources[symbol] = "static"
+        self.universe_screener: UniverseScreener | None = None
+        if bool(config.get("intraday_screener_enabled")):
+            self.universe_screener = UniverseScreener(config)
         self._output_dir = Path(
             str(config.get("intraday_output_dir", "~/.tradingagents/intraday"))
         ).expanduser()
 
     def run(self) -> TradingSession:
-        if not self.session.watchlist:
+        screener_enabled = bool(self.config.get("intraday_screener_enabled"))
+        if not self.session.watchlist and not screener_enabled:
             raise ValueError("Watchlist is empty. Provide symbols via --watchlist or config.")
 
         if self.dashboard is None:
+            screener_note = " screener=on" if screener_enabled else ""
             console.print(
                 f"[bold]Intraday scanner[/bold] — {self.session.session_date} "
                 f"strategy={self.strategy.name} symbols={', '.join(self.session.watchlist)}"
+                f"{screener_note}"
             )
 
         if self.skip_premarket:
             self._seed_neutral_bias()
-        else:
+        elif self.session.watchlist:
             self._run_premarket_setup()
 
         self.session.status = "active"
@@ -292,6 +305,8 @@ class WatchlistScanner:
             logger.debug("Waiting %ds for bar-close data to settle", delay)
             time.sleep(delay)
 
+        self._maybe_refresh_watchlist(bar_time)
+
         self.session.last_scan_time = bar_time
         self.session.scan_count += 1
         logger.info("Scan #%d @ %s", self.session.scan_count, bar_time.strftime("%H:%M"))
@@ -309,6 +324,120 @@ class WatchlistScanner:
 
         if self.dashboard is not None:
             self.dashboard._notify()
+
+    def _maybe_refresh_watchlist(self, bar_time: datetime) -> None:
+        if self.universe_screener is None:
+            return
+        if not self._within_screener_window(bar_time):
+            return
+
+        interval = int(self.config.get("intraday_screener_interval_minutes", 15))
+        last = self.session.screener_last_refresh
+        if last is not None and (bar_time - last) < timedelta(minutes=interval):
+            return
+
+        try:
+            refreshed, screened = self.universe_screener.refresh_watchlist(
+                bar_time,
+                self.session.base_watchlist,
+            )
+        except Exception as exc:
+            logger.warning("Watchlist screener refresh failed: %s", exc)
+            return
+
+        self.session.screener_last_refresh = bar_time
+        self.session.screener_last_candidate_count = len(screened)
+        for item in screened:
+            self.session.screener_snapshots[item.symbol] = {
+                "rrs_5m": item.rrs_by_tf.get("5m", 0.0),
+                "rrs_30m": item.rrs_by_tf.get("30m", 0.0),
+                "rrs_60m": item.rrs_by_tf.get("60m", 0.0),
+                "aligned": item.aligned_count,
+                "rvol_5m": item.relative_volume_5m,
+                "direction": item.direction,
+            }
+
+        previous = set(self.session.watchlist)
+        next_set = set(refreshed)
+        added = sorted(next_set - previous)
+        removed = sorted(previous - next_set)
+
+        for symbol in added:
+            self._add_screener_symbol(symbol)
+        for symbol in removed:
+            if symbol in self.session.base_watchlist:
+                continue
+            self._remove_screener_symbol(symbol, bar_time)
+
+        self.session.watchlist = refreshed
+        logger.info(
+            "Screener refresh: %d candidates, watchlist=%d (+%d -%d)",
+            len(screened),
+            len(refreshed),
+            len(added),
+            len(removed),
+        )
+
+    def _within_screener_window(self, bar_time: datetime) -> bool:
+        start_str = str(self.config.get("intraday_screener_start_time", "10:00"))
+        end_str = str(self.config.get("intraday_session_end", "16:00"))
+        start_hour, start_minute = [int(x) for x in start_str.split(":", maxsplit=1)]
+        end_hour, end_minute = [int(x) for x in end_str.split(":", maxsplit=1)]
+        start = bar_time.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+        end = bar_time.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+        return start <= bar_time <= end
+
+    def _add_screener_symbol(self, symbol: str) -> None:
+        self.session.symbol_sources[symbol] = "screener"
+        if symbol in self.session.daily_bias_cache:
+            return
+        self._seed_neutral_bias_for_symbol(symbol)
+        if bool(self.config.get("intraday_screener_run_premarket_for_new")):
+            self._run_premarket_for_symbol(symbol)
+
+    def _remove_screener_symbol(self, symbol: str, bar_time: datetime) -> None:
+        self.session.removed_symbols[symbol] = bar_time
+        self.session.symbol_sources.pop(symbol, None)
+        self.session.latest_scan_by_symbol.pop(symbol, None)
+
+    def _seed_neutral_bias_for_symbol(self, symbol: str) -> None:
+        now = datetime.now()
+        self.session.daily_bias_cache[symbol] = DailyBiasReport(
+            symbol=symbol,
+            trade_date=self.session.session_date,
+            direction="neutral",
+            key_levels={},
+            summary="Screener-added symbol; neutral bias applied.",
+            computed_at=now,
+        )
+
+    def _run_premarket_for_symbol(self, symbol: str) -> None:
+        analysts = list(self.config.get("intraday_premarket_analysts") or [])
+        cache_file = cache_path(self._output_dir, self.session.session_date)
+        disk_cache: PremarketCache | None = load_premarket_cache(
+            cache_file, session_date=self.session.session_date
+        )
+        if self.dashboard is not None:
+            self.dashboard.init_premarket_symbol(symbol, analysts)
+
+            def _on_chunk(chunk: dict) -> None:
+                self.dashboard.update_premarket_chunk(symbol, chunk)
+
+            report = self.ta_graph.propagate_daily_bias(
+                symbol,
+                self.session.session_date,
+                on_chunk=_on_chunk,
+            )
+        else:
+            report = self.ta_graph.propagate_daily_bias(symbol, self.session.session_date)
+        self.session.daily_bias_cache[symbol] = report
+        disk_cache = merge_report(
+            disk_cache,
+            session_date=self.session.session_date,
+            analysts=analysts,
+            report=report,
+        )
+        save_premarket_cache(cache_file, disk_cache)
 
     def _within_session(self, bar_time: datetime) -> bool:
         start_str = str(self.config.get("intraday_session_start", "09:30"))

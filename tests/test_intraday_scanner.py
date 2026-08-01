@@ -337,3 +337,39 @@ def test_scan_state_populated_on_gate_failure(monkeypatch):
     assert "NVDA" in scanner.session.latest_scan_by_symbol
     assert scanner.session.latest_scan_by_symbol["NVDA"].gate1_passed is False
     assert scanner.session.latest_scan_by_symbol["NVDA"].factors_missing == ["rsi_in_range"]
+
+
+@pytest.mark.unit
+def test_screener_refresh_updates_watchlist(monkeypatch):
+    ta_graph = MagicMock()
+    config = _config()
+    config["intraday_screener_enabled"] = True
+    config["intraday_screener_interval_minutes"] = 15
+    config["intraday_screener_start_time"] = "09:30"
+    config["watchlist"] = ["SPY"]
+    scanner = WatchlistScanner(config, ta_graph, dry_run=True, skip_premarket=True)
+    scanner.session.daily_bias_cache["SPY"] = _bias("SPY")
+    scanner.session.daily_bias_cache["NVDA"] = _bias("NVDA")
+
+    mock_universe = MagicMock()
+    mock_universe.refresh_watchlist.return_value = (
+        ["SPY", "NVDA"],
+        [
+            MagicMock(
+                symbol="NVDA",
+                rrs_by_tf={"5m": 1.2, "30m": 0.8, "60m": 0.5},
+                aligned_count=3,
+                relative_volume_5m=1.5,
+                direction="long",
+            ),
+        ],
+    )
+    scanner.universe_screener = mock_universe
+
+    bar_time = datetime(2026, 7, 27, 10, 0)
+    scanner._maybe_refresh_watchlist(bar_time)
+
+    assert "NVDA" in scanner.session.watchlist
+    assert scanner.session.symbol_sources["NVDA"] == "screener"
+    assert scanner.session.screener_last_candidate_count == 1
+    assert "NVDA" in scanner.session.screener_snapshots

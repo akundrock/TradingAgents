@@ -759,3 +759,30 @@ def get_indicator(symbol: str, indicator: str, curr_date: str, look_back_days: i
         + "\n\n"
         + best_ind_params[indicator]
     )
+
+
+USER_PREFERENCE_URL = "https://api.schwabapi.com/trader/v1/userPreference"
+
+
+def get_user_preference() -> dict:
+    """Fetch Schwab user preference including streamer WebSocket connection info."""
+    access_token, refresh_token = _get_access_token()
+
+    def _request(token: str) -> requests.Response:
+        return requests.get(
+            USER_PREFERENCE_URL,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=30,
+        )
+
+    response = _request(access_token)
+    if response.status_code == 401 and refresh_token:
+        access_token = _refresh_access_token(refresh_token)
+        response = _request(access_token)
+    if response.status_code == 429:
+        raise SchwabRateLimitError("Schwab userPreference was rate-limited")
+    if response.status_code != 200:
+        raise SchwabNotConfiguredError(
+            f"Schwab userPreference failed (status {response.status_code})"
+        )
+    return response.json()

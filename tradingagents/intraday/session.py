@@ -67,3 +67,9 @@ class TradingSession:
     )
     latest_scan_by_symbol: dict[str, SymbolScanState] = field(default_factory=dict)
     selected_detail_symbol: str | None = None
+    base_watchlist: list[str] = field(default_factory=list)
+    symbol_sources: dict[str, str] = field(default_factory=dict)
+    removed_symbols: dict[str, datetime] = field(default_factory=dict)
+    screener_last_refresh: datetime | None = None
+    screener_last_candidate_count: int = 0
+    screener_snapshots: dict[str, dict[str, float | str]] = field(default_factory=dict)

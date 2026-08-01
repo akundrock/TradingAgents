@@ -46,6 +46,7 @@ bedrock = [
 ]
 intraday = [
     "apscheduler>=3.10",
+    "websockets>=12.0",
 ]
 
 [project.scripts]

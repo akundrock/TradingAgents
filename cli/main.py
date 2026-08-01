@@ -1553,6 +1553,16 @@ def intraday(
         "--live/--no-live",
         help="Rich live dashboard (default: on when stdout is a TTY).",
     ),
+    screener: bool = typer.Option(
+        False,
+        "--screener/--no-screener",
+        help="Enable dynamic volume + RRS watchlist screener (Schwab Streamer).",
+    ),
+    screener_interval: int = typer.Option(
+        15,
+        "--screener-interval",
+        help="Minutes between screener watchlist refreshes.",
+    ),
 ):
     """Run the intraday watchlist scanner on live Schwab data."""
     import sys
@@ -1565,18 +1575,21 @@ def intraday(
     config["intraday_enabled"] = True
     config["magpie_enabled"] = True
     config["intraday_strategy"] = strategy
+    config["intraday_screener_enabled"] = screener
+    config["intraday_screener_interval_minutes"] = screener_interval
     resolved_watchlist = _resolve_intraday_watchlist(symbols, watchlist)
     if resolved_watchlist:
         config["watchlist"] = resolved_watchlist
     if output_dir:
         config["intraday_output_dir"] = output_dir
 
-    if not config.get("watchlist"):
+    if not config.get("watchlist") and not screener:
         console.print(
             "[red]Watchlist is empty.[/red]\n"
             "Examples:\n"
             "  tradingagents intraday NVDA AAPL SPY --dry-run\n"
             "  tradingagents intraday --watchlist NVDA,AAPL,SPY --dry-run\n"
+            "  tradingagents intraday --screener --dry-run\n"
             "  tradingagents intraday --watchlist NVDA --watchlist AAPL --dry-run"
         )
         raise typer.Exit(code=1)

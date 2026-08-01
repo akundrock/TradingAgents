@@ -257,6 +257,17 @@ def update_intraday_display(
         if session.last_scan_time is not None
         else "—"
     )
+    screener_time = (
+        session.screener_last_refresh.strftime("%H:%M")
+        if session.screener_last_refresh is not None
+        else "—"
+    )
+    screener_note = ""
+    if session.screener_last_refresh is not None or session.screener_last_candidate_count:
+        screener_note = (
+            f" | screener @ {screener_time} "
+            f"candidates={session.screener_last_candidate_count}"
+        )
 
     layout["header"].update(
         Panel(
@@ -265,6 +276,7 @@ def update_intraday_display(
                 f"strategy={buffer.strategy_name} | "
                 f"status={session.status} | "
                 f"scan #{session.scan_count} @ {scan_time} ET"
+                f"{screener_note}"
             ),
             border_style="cyan",
         )
@@ -277,6 +289,7 @@ def update_intraday_display(
         expand=True,
     )
     watchlist_table.add_column("Symbol", style="bold")
+    watchlist_table.add_column("Src", style="dim")
     watchlist_table.add_column("Bias")
     watchlist_table.add_column("G1", justify="center")
     watchlist_table.add_column("G2", justify="center")
@@ -287,6 +300,7 @@ def update_intraday_display(
     for symbol in session.watchlist:
         bias = session.daily_bias_cache.get(symbol)
         bias_dir = bias.direction if bias else "—"
+        source = session.symbol_sources.get(symbol, "static")
         scan = snap["latest_scan"].get(symbol)
         marker = "› " if symbol == selected else "  "
         if scan is not None:
@@ -294,6 +308,7 @@ def update_intraday_display(
             score = f"{scan.setup_score}/{total_factors}" if total_factors else str(scan.setup_score)
             watchlist_table.add_row(
                 f"{marker}{symbol}",
+                source[:4],
                 f"[{_bias_style(bias_dir)}]{bias_dir}[/]",
                 _gate_cell(scan.gate1_passed),
                 _gate_cell(scan.gate2_passed if scan.gate1_passed else None),
@@ -304,6 +319,7 @@ def update_intraday_display(
         else:
             watchlist_table.add_row(
                 f"{marker}{symbol}",
+                source[:4],
                 f"[{_bias_style(bias_dir)}]{bias_dir}[/]" if bias else "—",
                 "-",
                 "-",
@@ -399,7 +415,12 @@ def _render_detail_panel(buffer: IntradayDashboardBuffer, snap: dict, selected: 
             parts.append("## Indicators")
             for key, value in scan.indicator_snapshot.items():
                 parts.append(f"- **{key}**: {value}")
-    elif bias:
+    screener_snap = session.screener_snapshots.get(selected)
+    if screener_snap:
+        parts.append("## Screener RRS")
+        for key, value in screener_snap.items():
+            parts.append(f"- **{key}**: {value}")
+    if scan is None and not screener_snap and bias:
         parts.append(f"## Daily Bias\n**Direction:** {bias.direction}\n\n{_truncate_text(bias.summary)}")
 
     return _truncate_text("\n\n".join(parts))
