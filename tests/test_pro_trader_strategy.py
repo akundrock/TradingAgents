@@ -164,3 +164,137 @@ def test_pro_trader_dry_run_config_keys_present():
 
     assert "pro_trader_benchmark" in DEFAULT_CONFIG
     assert DEFAULT_CONFIG["intraday_mtf_timeframes"] == [5, 30]
+    assert DEFAULT_CONFIG["pro_trader_require_buy_pressure"] is False
+    assert DEFAULT_CONFIG["pro_trader_require_sell_pressure"] is False
+
+
+@pytest.mark.unit
+def test_pro_trader_snapshot_includes_volume_pressure():
+    strategy = ProTraderDashboardStrategy()
+    mtf = _pro_trader_mtf()
+    snap = strategy.indicator_snapshot("NVDA", mtf, _bias())
+    assert "buy_percent" in snap
+    assert "sell_percent" in snap
+    assert "premarket_volume" in snap
+    assert snap["buy_percent"] > 50
+
+
+@pytest.mark.unit
+def test_pro_trader_buy_pressure_gate_blocks_weak_bar():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_buy_pressure": True,
+        "pro_trader_min_buy_percent": 80.0,
+    }
+    mtf = _pro_trader_mtf(close=101.0, or_high=102.0, or_low=100.0)
+    # Close near low of bar → low buy pressure
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "Close"] = 100.5
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "High"] = 102.0
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "Low"] = 100.0
+    mtf.snapshot_5min["Close"] = 100.5
+    long_result = strategy._evaluate_long("NVDA", mtf, _bias("bullish"), strategy._build_context("NVDA", mtf, _bias("bullish"), config), config)
+    assert long_result.passed is False
+    assert "buy_pressure" in long_result.factors_missing
+
+
+@pytest.mark.unit
+def test_pro_trader_buy_pressure_gate_passes_strong_bar():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_buy_pressure": True,
+        "pro_trader_min_buy_percent": 55.0,
+    }
+    mtf = _pro_trader_mtf(close=105.0, or_high=102.0, or_low=100.0)
+    result = strategy.check_setup("NVDA", mtf, _bias("bullish"), config=config)
+    if result.direction == "long":
+        assert "buy_pressure" in result.factors_met
+
+
+@pytest.mark.unit
+def test_pro_trader_gates_off_no_volume_pressure_factors():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    result = strategy.check_setup("NVDA", _pro_trader_mtf(), _bias("bullish"), config=config)
+    assert "buy_pressure" not in result.factors_met
+    assert "buy_pressure" not in result.factors_missing
+    assert "sell_pressure" not in result.factors_met
+    assert "sell_pressure" not in result.factors_missing
+
+
+@pytest.mark.unit
+def test_pro_trader_premarket_volume_gate_blocks_when_below_threshold():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_min_premarket_volume": 10000,
+    }
+    mtf = _pro_trader_mtf()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    long_result = strategy._evaluate_long("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "premarket_volume" in long_result.factors_missing
+
+
+@pytest.mark.unit
+def test_pro_trader_price_volume_trend_gate_blocks_without_trend():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_price_volume_trend": True,
+    }
+    mtf = _pro_trader_mtf()
+    # Flat volume on last bars — no 3-bar increasing trend
+    mtf.df_5min["Volume"] = 1000
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    long_result = strategy._evaluate_long("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "price_volume_trend" in long_result.factors_missing
+
+
+@pytest.mark.unit
+def test_pro_trader_sell_pressure_gate_blocks_weak_bar():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_sell_pressure": True,
+        "pro_trader_min_sell_percent": 80.0,
+    }
+    mtf = _pro_trader_mtf(close=99.0, or_high=102.0, or_low=100.0, bullish_orb=False)
+    # Close near high of bar → low sell pressure
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "Close"] = 101.5
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "High"] = 102.0
+    mtf.df_5min.loc[mtf.df_5min.index[-1], "Low"] = 100.0
+    mtf.snapshot_5min["Close"] = 101.5
+    ctx = strategy._build_context("NVDA", mtf, _bias("bearish"), config)
+    short_result = strategy._evaluate_short("NVDA", mtf, _bias("bearish"), ctx, config)
+    assert "sell_pressure" in short_result.factors_missing
+
+
+@pytest.mark.unit
+def test_pro_trader_volume_pressure_config_defaults():
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["pro_trader_min_buy_percent"] == 55.0
+    assert DEFAULT_CONFIG["pro_trader_min_sell_percent"] == 55.0
+    assert DEFAULT_CONFIG["pro_trader_require_price_volume_trend"] is False
+    assert DEFAULT_CONFIG["pro_trader_min_premarket_volume"] == 0

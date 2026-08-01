@@ -39,6 +39,13 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LOG_LEVEL":                  "log_level",
     "TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS": "intraday_premarket_analysts",
     "TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS": "intraday_restore_premarket_bias",
+    # Pro Trader volume pressure (optional gates; default off in DEFAULT_CONFIG).
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE": "pro_trader_require_buy_pressure",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_SELL_PRESSURE": "pro_trader_require_sell_pressure",
+    "TRADINGAGENTS_PRO_TRADER_MIN_BUY_PERCENT": "pro_trader_min_buy_percent",
+    "TRADINGAGENTS_PRO_TRADER_MIN_SELL_PERCENT": "pro_trader_min_sell_percent",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_VOLUME_TREND": "pro_trader_require_price_volume_trend",
+    "TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME": "pro_trader_min_premarket_volume",
 }
 
 
@@ -202,6 +209,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "pro_trader_require_relative_volume": True,
     "pro_trader_require_daily_rrs": True,
     "pro_trader_key_level_atr_buffer": 0.5,
+    "pro_trader_require_buy_pressure": False,
+    "pro_trader_require_sell_pressure": False,
+    "pro_trader_min_buy_percent": 55.0,
+    "pro_trader_min_sell_percent": 55.0,
+    "pro_trader_require_price_volume_trend": False,
+    "pro_trader_min_premarket_volume": 0,
     "intraday_output_dir": os.path.join(_TRADINGAGENTS_HOME, "intraday"),
     "intraday_max_concurrent_symbols": 5,
     "intraday_signal_cooldown_bars": 3,

@@ -412,8 +412,24 @@ def _render_detail_panel(buffer: IntradayDashboardBuffer, snap: dict, selected: 
         for factor in scan.factors_missing:
             parts.append(f"- ✗ {factor}")
         if scan.indicator_snapshot:
+            vp_keys = (
+                "buy_percent",
+                "sell_percent",
+                "premarket_volume",
+                "increasing_price_volume",
+                "decreasing_price_volume",
+            )
+            snap = scan.indicator_snapshot
+            vp_present = any(key in snap for key in vp_keys)
+            if vp_present:
+                parts.append("## Volume Pressure")
+                for key in vp_keys:
+                    if key in snap:
+                        parts.append(f"- **{key}**: {snap[key]}")
             parts.append("## Indicators")
-            for key, value in scan.indicator_snapshot.items():
+            for key, value in snap.items():
+                if key in vp_keys:
+                    continue
                 parts.append(f"- **{key}**: {value}")
     screener_snap = session.screener_snapshots.get(selected)
     if screener_snap:

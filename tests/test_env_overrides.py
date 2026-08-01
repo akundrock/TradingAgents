@@ -18,6 +18,13 @@ def _reload_with_env(monkeypatch, **overrides):
     return importlib.reload(default_config_module)
 
 
+@pytest.fixture(autouse=True)
+def _restore_default_config_after_test(monkeypatch):
+    """Reload default_config without env overrides so other test modules see defaults."""
+    yield
+    _reload_with_env(monkeypatch)
+
+
 def test_no_env_uses_built_in_defaults(monkeypatch):
     dc = _reload_with_env(monkeypatch)
     assert dc.DEFAULT_CONFIG["llm_provider"] == "openai"
@@ -167,3 +174,15 @@ def test_magpie_implied_move_lock_override(monkeypatch):
         TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME="10:35",
     )
     assert dc.DEFAULT_CONFIG["magpie_implied_move_lock_time"] == "10:35"
+
+
+def test_pro_trader_volume_pressure_env_overrides(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE="true",
+        TRADINGAGENTS_PRO_TRADER_MIN_BUY_PERCENT="60.0",
+        TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME="50000",
+    )
+    assert dc.DEFAULT_CONFIG["pro_trader_require_buy_pressure"] is True
+    assert dc.DEFAULT_CONFIG["pro_trader_min_buy_percent"] == 60.0
+    assert dc.DEFAULT_CONFIG["pro_trader_min_premarket_volume"] == 50000.0

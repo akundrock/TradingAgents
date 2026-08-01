@@ -20,6 +20,8 @@ from tradingagents.intraday.indicators.sector_mapping import get_sector_etf, get
 from tradingagents.intraday.indicators.supertrend import compute_supertrend
 from tradingagents.intraday.indicators.volume_pressure import (
     compute_bar_volume_pressure,
+    compute_premarket_volume,
+    decreasing_price_volume_condition,
     increasing_price_volume_condition,
 )
 
@@ -156,6 +158,32 @@ def test_increasing_price_volume_condition():
         }
     )
     assert increasing_price_volume_condition(df, bars=3) is True
+
+
+@pytest.mark.unit
+def test_decreasing_price_volume_condition():
+    df = pd.DataFrame(
+        {
+            "Close": [103, 102, 101, 100],
+            "Volume": [1000, 1100, 1200, 1300],
+        }
+    )
+    assert decreasing_price_volume_condition(df, bars=3) is True
+
+
+@pytest.mark.unit
+def test_premarket_volume_accumulator_uses_extended_hours():
+    start = datetime(2026, 7, 27, 4, 0)
+    rows = []
+    for i in range(3):
+        t = start + pd.Timedelta(minutes=5 * i)
+        rows.append({"Date": t, "Volume": 1000})
+    for i in range(2):
+        t = datetime(2026, 7, 27, 9, 30) + pd.Timedelta(minutes=5 * i)
+        rows.append({"Date": t, "Volume": 500})
+    df = pd.DataFrame(rows)
+    assert compute_premarket_volume(df) == 3000.0
+    assert compute_premarket_volume(df.iloc[3:]) == 0.0
 
 
 @pytest.mark.unit

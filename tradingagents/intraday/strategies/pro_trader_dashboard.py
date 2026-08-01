@@ -24,6 +24,12 @@ from tradingagents.intraday.indicators.sector_mapping import (
     get_sector_etf,
     sector_aligned_for_direction,
 )
+from tradingagents.intraday.indicators.volume_pressure import (
+    compute_bar_volume_pressure,
+    compute_premarket_volume,
+    decreasing_price_volume_condition,
+    increasing_price_volume_condition,
+)
 from tradingagents.intraday.indicators.supertrend import SuperTrendState, compute_supertrend
 from tradingagents.intraday.mtf_validator import MTFValidationResult
 from tradingagents.intraday.session import DailyBiasReport
@@ -39,12 +45,34 @@ class ProTraderContext:
     sector_etf: str | None
     symbol_power: float
     sector_power: float
+    buy_percent: float = 50.0
+    sell_percent: float = 50.0
+    premarket_volume: float = 0.0
+    increasing_price_volume: bool = False
+    decreasing_price_volume: bool = False
 
 
 def _cfg(config: dict[str, Any] | None, key: str, default: Any) -> Any:
     if config:
         return config.get(key, default)
     return get_config().get(key, default)
+
+
+def _last_bar_ohlcv(mtf: MTFValidationResult) -> tuple[float, float, float, float]:
+    if mtf.df_5min is not None and not mtf.df_5min.empty:
+        row = mtf.df_5min.iloc[-1]
+        high = float(row.get("High", row.get("high", 0.0)))
+        low = float(row.get("Low", row.get("low", 0.0)))
+        close = float(row.get("Close", row.get("close", 0.0)))
+        volume = float(row.get("Volume", row.get("volume", 0.0)))
+        return high, low, close, volume
+
+    snap = mtf.snapshot_5min
+    high = float(snap.get("High", snap.get("high", 0.0)))
+    low = float(snap.get("Low", snap.get("low", 0.0)))
+    close = float(snap.get("Close", snap.get("close", 0.0)))
+    volume = float(snap.get("Volume", snap.get("volume", 0.0)))
+    return high, low, close, volume
 
 
 @lru_cache(maxsize=128)
@@ -133,6 +161,12 @@ class ProTraderDashboardStrategy:
         rrs_by_tf = compute_rrs_multi_timeframe(symbol_frames, benchmark_frames)
         relative_volume_5m = compute_relative_volume(mtf.df_5min, "5m")
 
+        bar_high, bar_low, bar_close, bar_volume = _last_bar_ohlcv(mtf)
+        bar_pressure = compute_bar_volume_pressure(bar_high, bar_low, bar_close, bar_volume)
+        premarket_volume = compute_premarket_volume(mtf.df_5min, timezone=tz)
+        increasing_pv = increasing_price_volume_condition(mtf.df_5min)
+        decreasing_pv = decreasing_price_volume_condition(mtf.df_5min)
+
         sector_etf = get_sector_etf(symbol)
         symbol_power = compute_power_index(symbol_frames.get("daily", pd.DataFrame()))
         sector_power = 0.0
@@ -147,6 +181,11 @@ class ProTraderDashboardStrategy:
             sector_etf=sector_etf,
             symbol_power=symbol_power,
             sector_power=sector_power,
+            buy_percent=bar_pressure.buy_percent,
+            sell_percent=bar_pressure.sell_percent,
+            premarket_volume=premarket_volume,
+            increasing_price_volume=increasing_pv,
+            decreasing_price_volume=decreasing_pv,
         )
 
     def _evaluate_long(
@@ -226,6 +265,17 @@ class ProTraderDashboardStrategy:
         if resistance is not None and mtf.atr_5min > 0:
             checks["not_into_daily_resistance"] = close < resistance - buffer * mtf.atr_5min
 
+        if _cfg(config, "pro_trader_require_buy_pressure", False):
+            min_buy = float(_cfg(config, "pro_trader_min_buy_percent", 55.0))
+            checks["buy_pressure"] = ctx.buy_percent >= min_buy
+
+        if _cfg(config, "pro_trader_require_price_volume_trend", False):
+            checks["price_volume_trend"] = ctx.increasing_price_volume
+
+        min_premarket = float(_cfg(config, "pro_trader_min_premarket_volume", 0))
+        if min_premarket > 0:
+            checks["premarket_volume"] = ctx.premarket_volume >= min_premarket
+
         met = [name for name, ok in checks.items() if ok]
         missing = [name for name, ok in checks.items() if not ok]
         return met, missing
@@ -271,6 +321,17 @@ class ProTraderDashboardStrategy:
         if support is not None and mtf.atr_5min > 0:
             checks["not_into_daily_support"] = close > support + buffer * mtf.atr_5min
 
+        if _cfg(config, "pro_trader_require_sell_pressure", False):
+            min_sell = float(_cfg(config, "pro_trader_min_sell_percent", 55.0))
+            checks["sell_pressure"] = ctx.sell_percent >= min_sell
+
+        if _cfg(config, "pro_trader_require_price_volume_trend", False):
+            checks["price_volume_trend"] = ctx.decreasing_price_volume
+
+        min_premarket = float(_cfg(config, "pro_trader_min_premarket_volume", 0))
+        if min_premarket > 0:
+            checks["premarket_volume"] = ctx.premarket_volume >= min_premarket
+
         met = [name for name, ok in checks.items() if ok]
         missing = [name for name, ok in checks.items() if not ok]
         return met, missing
@@ -290,6 +351,11 @@ def indicator_snapshot_from_context(ctx: ProTraderContext) -> dict[str, float | 
     snapshot: dict[str, float | str] = {
         "supertrend": "long" if ctx.supertrend.is_long else "short",
         "relative_volume_5m": round(ctx.relative_volume_5m, 2),
+        "buy_percent": round(ctx.buy_percent, 1),
+        "sell_percent": round(ctx.sell_percent, 1),
+        "premarket_volume": round(ctx.premarket_volume, 0),
+        "increasing_price_volume": str(ctx.increasing_price_volume),
+        "decreasing_price_volume": str(ctx.decreasing_price_volume),
         "symbol_power": round(ctx.symbol_power, 2),
         "sector_power": round(ctx.sector_power, 2),
         "rs_aligned_long": count_aligned_rrs(ctx.rrs_by_tf, "long"),

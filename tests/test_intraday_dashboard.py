@@ -13,6 +13,7 @@ from cli.intraday_display import (
     create_intraday_layout,
     detach_dashboard_logging,
     update_intraday_display,
+    _render_detail_panel,
 )
 from tradingagents.intraday.session import (
     DailyBiasReport,
@@ -155,3 +156,38 @@ def test_attach_detach_dashboard_logging():
     logger.info("hello dashboard")
     detach_dashboard_logging(handler)
     assert any("hello dashboard" in line[2] for line in buffer.log_lines)
+
+
+@pytest.mark.unit
+def test_detail_panel_shows_volume_pressure_section():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="pro_trader_dashboard")
+    buffer.record_scan_state(
+        SymbolScanState(
+            symbol="NVDA",
+            bar_time=datetime(2026, 7, 31, 10, 0),
+            daily_bias_direction="bullish",
+            strategy_name="pro_trader_dashboard",
+            strategy_direction="long",
+            factors_met=["orb_breakout"],
+            factors_missing=[],
+            gate1_passed=True,
+            gate2_passed=True,
+            gate_passed=True,
+            final_direction="long",
+            setup_score=1,
+            indicator_snapshot={
+                "buy_percent": 72.5,
+                "sell_percent": 27.5,
+                "premarket_volume": 125000,
+                "increasing_price_volume": "True",
+                "relative_volume_5m": 1.4,
+            },
+        )
+    )
+    snap = buffer.snapshot()
+    detail = _render_detail_panel(buffer, snap, "NVDA")
+    assert "## Volume Pressure" in detail
+    assert "buy_percent" in detail
+    assert "premarket_volume" in detail
+    assert "relative_volume_5m" in detail
