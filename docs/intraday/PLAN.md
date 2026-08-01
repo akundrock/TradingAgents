@@ -537,3 +537,18 @@ Phase 1 (Data) → Phase 2 (Scanner) ┐
                                      ├→ Phase 4 (Pipeline) → Phase 5 (Config/CLI) → Phase 6 (Tests)
 Phase 3 (Strategy/Gating) ──────────┘
 ```
+
+---
+
+## Post-MVP Extensions (implemented)
+
+Work beyond the original Phases 1–6 plan:
+
+| Area | Docs | Code |
+|------|------|------|
+| Pro Trader Dashboard strategy | [pro-trader-dashboard-spec.md](../pro-trader-dashboard-spec.md) | `strategies/pro_trader_dashboard.py`, `indicators/` |
+| Dynamic volume + RRS screener | [README.md](README.md), spec §11 | `universe_screener.py`, `schwab_streamer.py` |
+| Live dashboard + premarket cache | [README.md](README.md), [STATUS.md](STATUS.md) | `cli/intraday_display.py`, `premarket_cache.py` |
+
+See [PROGRESS.md](PROGRESS.md) Phases 7–9 for completion status.
+

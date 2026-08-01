@@ -429,18 +429,47 @@ tradingagents  # Fully configured, no interaction
 
 | Parameter | Type | Default | Env Var | Description |
 |-----------|------|---------|---------|-------------|
-| `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | Strategy evaluated on each bar close (`base_momentum`, `pro_trader_dashboard`) |
-| `intraday_mtf_timeframes` | list[int] | `[5, 30]` | — | Schwab-fetchable candle intervals (minutes). `pro_trader_dashboard` auto-adds 15/30 and derives 60m locally. |
-| `pro_trader_benchmark` | str | `SPY` | — | Benchmark symbol for RRS (pro_trader_dashboard) |
+| `intraday_enabled` | bool | `False` | — | Master toggle (set by `tradingagents intraday` CLI) |
+| `watchlist` | list[str] | `[]` | — | Static symbols; merged with screener results when enabled |
+| `intraday_scan_interval_minutes` | int | `5` | — | Bar-close scan cadence |
+| `intraday_bar_close_delay_seconds` | int | `15` | — | Wait after bar close before fetching Schwab candles |
+| `intraday_premarket_setup_time` | str | `09:00` | — | ET hint for pre-market bias (scanner runs bias at startup) |
+| `intraday_session_start` | str | `09:30` | — | ET session start for scans |
+| `intraday_session_end` | str | `16:00` | — | ET session end |
+| `intraday_timezone` | str | `America/New_York` | — | Scheduler timezone |
+| `intraday_mtf_timeframes` | list[int] | `[5, 30]` | — | Schwab-fetchable intervals (minutes). `pro_trader_dashboard` auto-adds 15/30/60. |
+| `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | `base_momentum` or `pro_trader_dashboard` |
+| `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: 30m trend vs daily bias |
+| `intraday_output_dir` | str | `~/.tradingagents/intraday` | — | Signals CSV and premarket cache root |
+| `intraday_max_concurrent_symbols` | int | `5` | — | Parallel symbol evaluation / screener RRS batch size |
+| `intraday_signal_cooldown_bars` | int | `3` | — | Suppress duplicate same-direction signals within N scan intervals |
+| `intraday_premarket_analysts` | list[str] | `market,social,news,fundamentals` | `TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS` | Analyst wire keys for pre-market bias |
+| `intraday_restore_premarket_bias` | bool | `True` | `TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS` | Restore `premarket_bias.json` on same-day restart |
+| `intraday_screener_enabled` | bool | `False` | — | Dynamic volume + RRS watchlist screener |
+| `intraday_screener_interval_minutes` | int | `15` | — | Screener refresh cadence |
+| `intraday_screener_keys` | list[str] | `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0` | — | Schwab Streamer `SCREENER_EQUITY` keys |
+| `intraday_screener_candidate_limit` | int | `50` | — | Max symbols from streamer before RRS filter |
+| `intraday_screener_rrs_timeframes` | list[int] | `[5, 30, 60]` | — | RRS timeframes for screener filter |
+| `intraday_screener_min_rrs_aligned` | int | `3` | — | Min aligned RRS TFs (TOS 3-scan intersection parity) |
+| `intraday_screener_require_relative_volume` | bool | `False` | — | Optional 5m rvolume > 1 before RRS ranking |
+| `intraday_screener_max_watchlist` | int | `12` | — | Cap merged watchlist size |
+| `intraday_screener_direction` | str | `long` | — | `long`, `short`, or `both` for RRS alignment |
+| `intraday_screener_start_time` | str | `10:00` | — | ET — no screener refresh before OR window ends |
+| `intraday_screener_symbol_cooldown_minutes` | int | `30` | — | Cooldown after symbol removed (config only; enforcement pending) |
+| `intraday_screener_run_premarket_for_new` | bool | `False` | — | Run LLM pre-market for screener-added symbols |
+| `pro_trader_benchmark` | str | `SPY` | — | RRS benchmark (`pro_trader_dashboard`) |
 | `pro_trader_entry_mode` | str | `wick_touch` | — | ORB entry: `wick_touch` or `close_above` |
-| `pro_trader_min_rs_timeframes` | int | `4` | — | Min aligned RRS timeframes for setup pass |
-| `pro_trader_require_sector_alignment` | bool | `True` | — | Require sector power-index alignment |
-| `pro_trader_require_relative_volume` | bool | `True` | — | Require 5m relative volume > 1 |
-| `pro_trader_require_daily_rrs` | bool | `True` | — | Require daily RRS direction filter |
-| `pro_trader_key_level_atr_buffer` | float | `0.5` | — | ATR buffer when filtering near daily key levels |
-| `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: require 30-min trend to align with daily bias |
-| `intraday_premarket_analysts` | list[str] | `market,social,news,fundamentals` | `TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS` | Analyst wire keys for pre-market daily bias. Omit `social` to skip Sentiment/Reddit. |
-| `intraday_restore_premarket_bias` | bool | `True` | `TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS` | Restore cached pre-market bias from `{intraday_output_dir}/{date}/premarket_bias.json` on scanner restart |
+| `pro_trader_min_rs_timeframes` | int | `4` | — | Min aligned RRS TFs for strategy pass |
+| `pro_trader_require_sector_alignment` | bool | `True` | — | Sector power-index alignment |
+| `pro_trader_require_relative_volume` | bool | `True` | — | 5m relative volume > 1 |
+| `pro_trader_require_daily_rrs` | bool | `True` | — | Daily RRS direction filter |
+| `pro_trader_key_level_atr_buffer` | float | `0.5` | — | ATR buffer near daily resistance/support |
+| `pro_trader_require_buy_pressure` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE` | Long bar buy-pressure gate (default off) |
+| `pro_trader_require_sell_pressure` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_SELL_PRESSURE` | Short bar sell-pressure gate (default off) |
+| `pro_trader_min_buy_percent` | float | `55.0` | `TRADINGAGENTS_PRO_TRADER_MIN_BUY_PERCENT` | Min buy % for long pressure gate |
+| `pro_trader_min_sell_percent` | float | `55.0` | `TRADINGAGENTS_PRO_TRADER_MIN_SELL_PERCENT` | Min sell % for short pressure gate |
+| `pro_trader_require_price_volume_trend` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_VOLUME_TREND` | 3-bar price+volume trend gate |
+| `pro_trader_min_premarket_volume` | float | `0` | `TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME` | Min pre-market volume (0 = no filter) |
 
 ### Data Vendor API Keys
 

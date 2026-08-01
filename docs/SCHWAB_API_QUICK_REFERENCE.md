@@ -97,6 +97,36 @@ A complete OpenAPI 3.0 specification for the Charles Schwab Market Data API endp
 3. Exchange code for tokens (calls token endpoint)
 4. Automatic refresh when tokens expire (calls token endpoint with `grant_type: refresh_token`)
 
+### 4. User Preference (Streamer Connection)
+**Endpoint**: `GET https://api.schwabapi.com/trader/v1/userPreference`
+
+**What it does**: Returns `streamerInfo` with WebSocket URL and client IDs required for the Schwab Streamer API.
+
+**Used by**: [`tradingagents/dataflows/schwab_streamer.py`](../tradingagents/dataflows/schwab_streamer.py) for intraday equity screener.
+
+**Key response fields**:
+- `streamerInfo[0].streamerSocketUrl` — WebSocket endpoint
+- `schwabClientCustomerId`, `schwabClientChannel`, `schwabClientFunctionId` — login parameters
+
+### 5. Streamer WebSocket — Equity Screener (not REST)
+
+There is **no REST stock screener**. Universe discovery for the intraday watchlist uses the Schwab Streamer WebSocket:
+
+- **Service**: `SCREENER_EQUITY`
+- **Example keys**: `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0`, `EQUITY_ALL_AVERAGE_PERCENT_VOLUME_30`
+- **Format**: `PREFIX_SORTFIELD_FREQUENCY` (e.g. `NYSE_PERCENT_CHANGE_UP_60`)
+
+Full field definitions and subscribe payload: see `thinkorswim-scripts/tos-market-data/schwab-streamer-api.md` (SCREENER Services section).
+
+**TradingAgents usage**:
+```python
+from tradingagents.dataflows.schwab_streamer import SchwabEquityScreener
+screener = SchwabEquityScreener()
+candidates = screener.fetch_top_symbols(["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"], limit=50)
+```
+
+Bar data for RRS filtering still comes from REST `pricehistory` via `get_candles_multi_timeframe()`.
+
 ## Authentication
 
 **Header for API requests**:
@@ -149,6 +179,8 @@ The market data is fetched via Schwab API (see docs/schwab-api-spec.openapi.yaml
 Available endpoints:
 - Price history: /marketdata/v1/pricehistory (daily + intraday)
 - Option chains: /marketdata/v1/chains (IV for implied move)
+- User preference: /trader/v1/userPreference (streamer WebSocket setup)
+- Streamer SCREENER_EQUITY (intraday watchlist; not in OpenAPI spec)
 ```
 
 ### For Code Generation
@@ -168,6 +200,7 @@ Use the spec to validate requests/responses:
 
 - **OpenAPI Spec**: [`docs/schwab-api-spec.openapi.yaml`](schwab-api-spec.openapi.yaml)
 - **Implementation**: [`tradingagents/dataflows/schwab.py`](../tradingagents/dataflows/schwab.py)
+- **Streamer screener**: [`tradingagents/dataflows/schwab_streamer.py`](../tradingagents/dataflows/schwab_streamer.py)
 - **Config**: [`tradingagents/default_config.py`](../tradingagents/default_config.py) (Schwab vendor config)
 - **Tests**: [`tests/test_schwab_*.py`](../../tests/) (Schwab integration tests)
 

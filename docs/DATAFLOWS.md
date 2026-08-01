@@ -219,7 +219,39 @@ TRADINGAGENTS_FRED_API_KEY=<your-key>  # Required
 - API key required
 - Data typically released monthly/quarterly
 
-#### 4. Polymarket
+#### 4. Charles Schwab (REST + Streamer)
+
+**Locations**:
+- [`tradingagents/dataflows/schwab.py`](../../tradingagents/dataflows/schwab.py) — REST market data (primary intraday OHLCV vendor)
+- [`tradingagents/dataflows/schwab_streamer.py`](../../tradingagents/dataflows/schwab_streamer.py) — WebSocket equity screener (intraday watchlist discovery only)
+
+**REST coverage** (`schwab.py`):
+- Daily and intraday OHLCV via `GET /marketdata/v1/pricehistory`
+- Multi-timeframe intraday fetch: `get_candles_multi_timeframe()` (used by `MultiTimeframeValidator`)
+- Option chains for implied move (Magpie)
+- User preference for streamer: `get_user_preference()`
+- Minute frequencies: 1, 5, 10, 15, 30 (60m derived locally via resample)
+
+**Streamer coverage** (`schwab_streamer.py`):
+- `SCREENER_EQUITY` — volume-ranked universe (`NASDAQ_VOLUME_0`, etc.)
+- Short-lived WebSocket connection per screener refresh
+- **Not** routed through `interface.py` vendor router; called directly by [`universe_screener.py`](../../tradingagents/intraday/universe_screener.py)
+
+**Intraday data flow**:
+1. Streamer screener → candidate symbols (optional)
+2. REST `pricehistory` → MTF bars for RRS filter and strategy evaluation
+3. No REST stock screener endpoint exists
+
+**Configuration**:
+```bash
+TRADINGAGENTS_SCHWAB_CLIENT_ID=...
+TRADINGAGENTS_SCHWAB_CLIENT_SECRET=...
+# Tokens cached at ~/.tradingagents/cache/schwab_tokens.json (or TRADINGAGENTS_SCHWAB_TOKENS_PATH)
+```
+
+See [SCHWAB_API_QUICK_REFERENCE.md](SCHWAB_API_QUICK_REFERENCE.md) and [intraday/README.md](intraday/README.md).
+
+#### 5. Polymarket
 
 **Location**: `tradingagents/dataflows/polymarket.py`
 
@@ -244,7 +276,7 @@ TRADINGAGENTS_POLYMARKET_API_KEY=...  # Optional
 - Smaller liquidity than traditional markets
 - Event-specific availability
 
-#### 5. Reddit
+#### 6. Reddit
 
 **Location**: `tradingagents/dataflows/reddit.py`
 
@@ -270,7 +302,7 @@ TRADINGAGENTS_REDDIT_USER_AGENT=...    # Required
 - Retail bias (not institutional)
 - API authentication required
 
-#### 6. StockTwits
+#### 7. StockTwits
 
 **Location**: `tradingagents/dataflows/stocktwits.py`
 

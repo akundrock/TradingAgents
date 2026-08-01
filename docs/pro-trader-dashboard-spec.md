@@ -125,7 +125,24 @@ buying  = volume * (close - low)  / (high - low)
 selling = volume * (high - close) / (high - low)
 ```
 
-Pre-market accumulator: 4:00–9:29 ET. Visual confirmation only in TOS.
+Pre-market accumulator: 4:00–9:29 ET. Visual confirmation only in TOS — **TOS entry arrows do not require volume pressure.**
+
+**Distinction from relative volume:** `relative_volume` (SMBD) compares current bar volume to historical same-time-of-day averages. Volume pressure splits bar volume into buy vs sell based on close position within the range.
+
+**TradingAgents wiring:** Computed on every `pro_trader_dashboard` scan; exposed in dashboard snapshot. Optional strategy gates default **off** (active day-trading entry timing, not required for TOS parity).
+
+| Config key | Default | Behavior |
+|------------|---------|----------|
+| `pro_trader_require_buy_pressure` | `false` | Long: `buy_percent >= pro_trader_min_buy_percent` |
+| `pro_trader_require_sell_pressure` | `false` | Short: `sell_percent >= pro_trader_min_sell_percent` |
+| `pro_trader_min_buy_percent` | `55.0` | Long bar-pressure threshold |
+| `pro_trader_min_sell_percent` | `55.0` | Short bar-pressure threshold |
+| `pro_trader_require_price_volume_trend` | `false` | Long: 3-bar increasing price+volume; short: decreasing |
+| `pro_trader_min_premarket_volume` | `0` | If > 0, require pre-market volume ≥ threshold |
+
+Env overrides (see `.env.example`): `TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE`, `TRADINGAGENTS_PRO_TRADER_REQUIRE_SELL_PRESSURE`, `TRADINGAGENTS_PRO_TRADER_MIN_BUY_PERCENT`, `TRADINGAGENTS_PRO_TRADER_MIN_SELL_PERCENT`, `TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_VOLUME_TREND`, `TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME`.
+
+**Future:** Pass bar-context (volume pressure + indicators) into Trader/PM for entry confidence and position exit monitoring.
 
 ---
 
@@ -175,6 +192,43 @@ Pre-market accumulator: 4:00–9:29 ET. Visual confirmation only in TOS.
 | `pro_trader_require_sector_alignment` | `true` | Sector confirmation |
 | `pro_trader_require_relative_volume` | `true` | 5m rvolume > 1 |
 | `pro_trader_key_level_atr_buffer` | `0.5` | ATR buffer for daily level filter |
+| `pro_trader_require_buy_pressure` | `false` | Long bar buy-pressure gate (off by default) |
+| `pro_trader_require_sell_pressure` | `false` | Short bar sell-pressure gate (off by default) |
+| `pro_trader_min_buy_percent` | `55.0` | Min buy % for long pressure gate |
+| `pro_trader_min_sell_percent` | `55.0` | Min sell % for short pressure gate |
+| `pro_trader_require_price_volume_trend` | `false` | 3-bar price+volume trend gate |
+| `pro_trader_min_premarket_volume` | `0` | Min pre-market volume (0 = no filter) |
+
+---
+
+## 11. RS Stock Scanner (ThinkScript)
+
+Source: `thinkorswim-scripts/thinkscript/pro-trader-dashboard/scanner/`
+
+Six files (`long/shared_long_{5m,30m,1h}_RS.tos` and `short/shared_short_*`) are **byte-identical** 44-line RRS indicators. Timeframe and direction are set in ThinkorSwim Stock Hacker UI, not in script source.
+
+| TOS scan | Filter | Python equivalent |
+|----------|--------|-----------------|
+| Long 5m/30m/1h RS | `RealRelativeStrength > 0` | `compute_rrs()` on 5m/30m/60m; `count_aligned_rrs >= 3` |
+| Short 5m/30m/1h RS | `RealRelativeStrength < 0` | same with short direction |
+
+Formula matches `relative_strength.py` (`length=12`, benchmark SPY). Scanners do **not** include volume, ORB, SuperTrend, or ranking logic.
+
+TradingAgents dynamic watchlist screener (`universe_screener.py`):
+
+1. Schwab Streamer `SCREENER_EQUITY` for volume-ranked universe
+2. RRS pre-filter on 5m/30m/60m (ThinkScript scanner parity)
+3. `pro_trader_dashboard` strategy at bar-close (full entry logic)
+
+| Config key | Default | Description |
+|------------|---------|-------------|
+| `intraday_screener_enabled` | `false` | Enable dynamic screener |
+| `intraday_screener_interval_minutes` | `15` | Refresh cadence |
+| `intraday_screener_keys` | NASDAQ/NYSE volume keys | Streamer screener keys |
+| `intraday_screener_rrs_timeframes` | `[5, 30, 60]` | RRS TFs for filter |
+| `intraday_screener_min_rrs_aligned` | `3` | Min aligned TFs (TOS 3-scan intersection) |
+| `intraday_screener_require_relative_volume` | `false` | Optional 5m rvolume > 1 pre-filter |
+| `intraday_screener_max_watchlist` | `12` | Cap merged watchlist size |
 
 ---
 

@@ -79,12 +79,12 @@ Track implementation status across coding sessions. Update checkboxes and notes 
 
 - [x] **Step 10** — Create `tradingagents/intraday/gating.py`
   - [x] `GateResult` dataclass
-  - [x] `GatingLayer.evaluate()` with three sequential gates
-  - [x] Gate 1: Magpie score ≥ `intraday_min_magpie_score`
-  - [x] Gate 2: 30-min trend aligns with `daily_bias.direction`
-  - [x] Gate 3: `strategy.check_setup()` passed
+  - [x] `GatingLayer.evaluate()` with two sequential gates (strategy-first)
+  - [x] Gate 1: strategy `check_setup()` passed with long/short direction
+  - [x] Gate 2: optional 30-min trend aligns with `daily_bias.direction`
   - [x] Short-circuit on Gate 1 failure
   - [x] Session: 2026-07-27
+  - [x] Note: original plan referenced Magpie Gate 1; implementation uses strategy-first gating
 
 ---
 
@@ -180,6 +180,48 @@ Track implementation status across coding sessions. Update checkboxes and notes 
 
 ---
 
+## Phase 7 — Pro Trader Dashboard Strategy
+
+**Objective**: Port ThinkOrSwim Pro Trader Dashboard indicators and entry logic.
+
+- [x] Indicator modules — ORB, RRS, relative volume, SuperTrend, sector mapping, resample
+- [x] `strategies/pro_trader_dashboard.py` — multi-factor entry (ORB, RRS TFs, rvolume, sector)
+- [x] MTF validator — auto 5/15/30/60m for pro_trader; 60m from 30m resample
+- [x] Tests — `test_pro_trader_indicators.py`, `test_pro_trader_strategy.py`, `test_mtf_validator_60m.py`
+- [x] Spec — `docs/pro-trader-dashboard-spec.md`
+- [x] Session: 2026-07-31
+
+---
+
+## Phase 8 — Dynamic Volume + RRS Screener
+
+**Objective**: Schwab Streamer universe discovery + ThinkScript RS scanner parity filter.
+
+- [x] `tradingagents/dataflows/schwab_streamer.py` — `SCREENER_EQUITY` WebSocket client
+- [x] `get_user_preference()` in `schwab.py`
+- [x] `tradingagents/intraday/universe_screener.py` — volume candidates → RRS 5m/30m/60m filter
+- [x] `WatchlistScanner` — periodic watchlist refresh, neutral bias for new symbols
+- [x] CLI — `--screener`, `--screener-interval`
+- [x] Config — screener keys in `default_config.py`
+- [x] Tests — `test_schwab_streamer.py`, `test_universe_screener.py`, screener test in `test_intraday_scanner.py`
+- [x] Session: 2026-07-31
+
+---
+
+## Phase 9 — Live Dashboard & Pre-market Cache
+
+**Objective**: Rich TUI and resilient pre-market restart.
+
+- [x] `cli/intraday_display.py` — watchlist table, detail panel, signals, log tail
+- [x] `cli/display_common.py` — shared analyst status helpers
+- [x] `premarket_cache.py` — restore bias on same-day restart; analyst config change detection
+- [x] CLI — `--live/--no-live`, `--no-restore-premarket`, `--force-premarket`, `--analysts`
+- [x] Dashboard screener metadata — `Src` column, screener refresh in header, RRS snapshot
+- [x] Tests — `test_intraday_dashboard.py`, `test_premarket_cache.py`
+- [x] Session: 2026-07-31
+
+---
+
 ## Open Questions
 
 Track decisions that still need an answer before or during implementation.
@@ -199,3 +241,5 @@ Use this section to record observations, blockers, and decisions made during imp
 |------|---------------|
 | 2026-07-27 | Initial plan created. All phases defined. Open questions identified. |
 | 2026-07-27 | Full implementation complete (Phases 1–6). 619 tests passing. |
+| 2026-07-31 | Phases 7–9: pro_trader_dashboard, dynamic screener, live dashboard. Docs sync in STATUS.md. |
+| 2026-07-31 | Volume pressure wired (optional gates default off, env overrides, dashboard section). |
