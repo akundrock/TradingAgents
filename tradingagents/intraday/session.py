@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
+import pandas as pd
+
+import pandas as pd
+
 
 @dataclass
 class DailyBiasReport:
@@ -67,9 +71,14 @@ class TradingSession:
     )
     latest_scan_by_symbol: dict[str, SymbolScanState] = field(default_factory=dict)
     selected_detail_symbol: str | None = None
+    detail_follow_mode: bool = True
     base_watchlist: list[str] = field(default_factory=list)
     symbol_sources: dict[str, str] = field(default_factory=dict)
     removed_symbols: dict[str, datetime] = field(default_factory=dict)
     screener_last_refresh: datetime | None = None
     screener_last_candidate_count: int = 0
     screener_snapshots: dict[str, dict[str, float | str]] = field(default_factory=dict)
+    intraday_scan_bar_time: datetime | None = None
+    intraday_5m_cache: dict[str, pd.DataFrame] = field(default_factory=dict)
+    benchmark_intraday_frames: dict[int, pd.DataFrame] = field(default_factory=dict)
+    benchmark_daily_df: pd.DataFrame = field(default_factory=pd.DataFrame)

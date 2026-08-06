@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from tradingagents.intraday.strategies.base_momentum import BaseMomentumStrategy
+from tradingagents.intraday.strategies.orb_breakout import OrbBreakoutStrategy
 from tradingagents.intraday.strategies.pro_trader_dashboard import ProTraderDashboardStrategy
 from tradingagents.intraday.strategy import IntradayStrategy
 
 STRATEGY_REGISTRY: dict[str, type[IntradayStrategy]] = {
     "base_momentum": BaseMomentumStrategy,
     "pro_trader_dashboard": ProTraderDashboardStrategy,
+    "orb_breakout": OrbBreakoutStrategy,
 }
 
 

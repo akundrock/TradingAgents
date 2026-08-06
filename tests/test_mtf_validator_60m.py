@@ -6,11 +6,11 @@ import pandas as pd
 import pytest
 
 from tradingagents.dataflows.errors import NoMarketDataError
-from tradingagents.intraday.mtf_validator import (
-    MultiTimeframeValidator,
-    _effective_timeframes,
-    _synthesize_60m,
+from tradingagents.intraday.frame_enrichment import (
+    effective_requested_timeframes,
+    synthesize_60m,
 )
+from tradingagents.intraday.mtf_validator import MultiTimeframeValidator, _effective_timeframes
 from tradingagents.intraday.session import DailyBiasReport, TradingSession
 
 
@@ -62,12 +62,103 @@ def test_synthesize_60m_from_30m(monkeypatch):
         return df.copy()
 
     monkeypatch.setattr(
-        "tradingagents.intraday.mtf_validator.compute_tf_indicators",
+        "tradingagents.intraday.frame_enrichment.compute_tf_indicators",
         fake_compute_tf,
     )
-    result = _synthesize_60m(enriched_30)
+    result = synthesize_60m(enriched_30)
     assert 60 in result
     assert len(result[60]) >= 2
+
+
+@pytest.mark.unit
+def test_mtf_validator_5m_resample_uses_single_fetch(monkeypatch):
+    session_start = datetime(2026, 7, 27, 9, 30)
+    as_of = datetime(2026, 7, 27, 12, 0)
+    five_m_calls: list[str] = []
+    multi_calls: list[str] = []
+
+    def fake_get_5m(symbol, start, end):
+        five_m_calls.append(symbol)
+        return _build_df(session_start, as_of, 5)
+
+    def fake_get_candles(symbol, start, end, timeframes=None):
+        multi_calls.append(symbol)
+        return {tf: _build_df(session_start, as_of, tf) for tf in (timeframes or [])}
+
+    def fake_load_ohlcv(symbol, trade_date):
+        return _build_df(datetime(2026, 6, 1), datetime(2026, 7, 27), 1440)
+
+    def fake_compute_mtf(candle_dfs):
+        return {tf: df.copy() for tf, df in candle_dfs.items()}
+
+    def fake_compute_tf(df):
+        row = df.iloc[-1]
+        return df.assign(
+            close_10_ema=row["Close"],
+            close_20_sma=row["Close"] - 0.5,
+            atr=1.0,
+            vwap=row["Close"],
+        )
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_intraday_5m_candles",
+        fake_get_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_candles_multi_timeframe",
+        fake_get_candles,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.load_ohlcv",
+        fake_load_ohlcv,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        fake_compute_mtf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_tf_indicators",
+        fake_compute_tf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_sector_etf",
+        lambda symbol: None,
+    )
+
+    session = TradingSession(
+        session_date="2026-07-27",
+        watchlist=["NVDA"],
+        daily_bias_cache={
+            "NVDA": DailyBiasReport(
+                symbol="NVDA",
+                trade_date="2026-07-27",
+                direction="neutral",
+                key_levels={},
+                summary="",
+                computed_at=as_of,
+            )
+        },
+        intraday_scan_bar_time=as_of,
+        benchmark_intraday_frames={
+            5: _build_df(session_start, as_of, 5),
+            30: _build_df(session_start, as_of, 30),
+        },
+    )
+    config = {
+        "intraday_strategy": "pro_trader_dashboard",
+        "intraday_mtf_timeframes": [5, 30],
+        "intraday_mtf_fetch_mode": "5m_resample",
+        "intraday_benchmark_cache_per_scan": True,
+        "intraday_timezone": "America/New_York",
+        "intraday_session_start": "09:30",
+    }
+
+    result = MultiTimeframeValidator().evaluate("NVDA", as_of, session, config)
+
+    assert five_m_calls == ["NVDA"]
+    assert multi_calls == []
+    assert 60 in result.intraday_frames
+    assert result.snapshot_60min
 
 
 @pytest.mark.unit
@@ -104,11 +195,11 @@ def test_mtf_validator_synthesizes_60m_without_schwab_60(monkeypatch):
         fake_load_ohlcv,
     )
     monkeypatch.setattr(
-        "tradingagents.intraday.mtf_validator.compute_mtf_indicators",
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
         fake_compute_mtf,
     )
     monkeypatch.setattr(
-        "tradingagents.intraday.mtf_validator.compute_tf_indicators",
+        "tradingagents.intraday.frame_enrichment.compute_tf_indicators",
         fake_compute_tf,
     )
     monkeypatch.setattr(
@@ -133,6 +224,8 @@ def test_mtf_validator_synthesizes_60m_without_schwab_60(monkeypatch):
     config = {
         "intraday_strategy": "pro_trader_dashboard",
         "intraday_mtf_timeframes": [5, 30],
+        "intraday_mtf_fetch_mode": "multi",
+        "intraday_benchmark_cache_per_scan": False,
         "intraday_timezone": "America/New_York",
         "intraday_session_start": "09:30",
     }
@@ -142,6 +235,168 @@ def test_mtf_validator_synthesizes_60m_without_schwab_60(monkeypatch):
     assert 60 not in schwab_calls[0]
     assert 60 in result.intraday_frames
     assert result.snapshot_60min
+
+
+@pytest.mark.unit
+def test_mtf_validator_reuses_session_benchmark_cache(monkeypatch):
+    session_start = datetime(2026, 7, 27, 9, 30)
+    as_of = datetime(2026, 7, 27, 12, 0)
+    five_m_calls: list[str] = []
+
+    def fake_get_5m(symbol, start, end):
+        five_m_calls.append(symbol)
+        return _build_df(session_start, as_of, 5)
+
+    def fake_load_ohlcv(symbol, trade_date):
+        return _build_df(datetime(2026, 6, 1), datetime(2026, 7, 27), 1440)
+
+    def fake_compute_mtf(candle_dfs):
+        return {tf: df.copy() for tf, df in candle_dfs.items()}
+
+    def fake_compute_tf(df):
+        row = df.iloc[-1]
+        return df.assign(
+            close_10_ema=row["Close"],
+            close_20_sma=row["Close"] - 0.5,
+            atr=1.0,
+            vwap=row["Close"],
+        )
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_intraday_5m_candles",
+        fake_get_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.load_ohlcv",
+        fake_load_ohlcv,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        fake_compute_mtf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_tf_indicators",
+        fake_compute_tf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_sector_etf",
+        lambda symbol: None,
+    )
+
+    bench_frames = {
+        5: _build_df(session_start, as_of, 5),
+        30: _build_df(session_start, as_of, 30),
+    }
+    session = TradingSession(
+        session_date="2026-07-27",
+        watchlist=["NVDA", "AAPL"],
+        daily_bias_cache={
+            sym: DailyBiasReport(
+                symbol=sym,
+                trade_date="2026-07-27",
+                direction="neutral",
+                key_levels={},
+                summary="",
+                computed_at=as_of,
+            )
+            for sym in ("NVDA", "AAPL")
+        },
+        intraday_scan_bar_time=as_of,
+        benchmark_intraday_frames=bench_frames,
+    )
+    config = {
+        "intraday_strategy": "pro_trader_dashboard",
+        "intraday_mtf_timeframes": [5, 30],
+        "intraday_mtf_fetch_mode": "5m_resample",
+        "intraday_benchmark_cache_per_scan": True,
+        "intraday_timezone": "America/New_York",
+        "intraday_session_start": "09:30",
+    }
+    validator = MultiTimeframeValidator()
+
+    validator.evaluate("NVDA", as_of, session, config)
+    validator.evaluate("AAPL", as_of, session, config)
+
+    assert five_m_calls == ["NVDA", "AAPL"]
+    assert "SPY" not in five_m_calls
+
+
+@pytest.mark.unit
+def test_mtf_validator_reuses_screener_5m_cache(monkeypatch):
+    session_start = datetime(2026, 7, 27, 9, 30)
+    as_of = datetime(2026, 7, 27, 12, 0)
+    five_m_calls: list[str] = []
+
+    def fake_get_5m(symbol, start, end):
+        five_m_calls.append(symbol)
+        return _build_df(session_start, as_of, 5)
+
+    def fake_load_ohlcv(symbol, trade_date):
+        return _build_df(datetime(2026, 6, 1), datetime(2026, 7, 27), 1440)
+
+    def fake_compute_mtf(candle_dfs):
+        return {tf: df.copy() for tf, df in candle_dfs.items()}
+
+    def fake_compute_tf(df):
+        row = df.iloc[-1]
+        return df.assign(
+            close_10_ema=row["Close"],
+            close_20_sma=row["Close"] - 0.5,
+            atr=1.0,
+            vwap=row["Close"],
+        )
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_intraday_5m_candles",
+        fake_get_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.load_ohlcv",
+        fake_load_ohlcv,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        fake_compute_mtf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_tf_indicators",
+        fake_compute_tf,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.mtf_validator.get_sector_etf",
+        lambda symbol: None,
+    )
+
+    cached_df = _build_df(session_start, as_of, 5)
+    session = TradingSession(
+        session_date="2026-07-27",
+        watchlist=["NVDA"],
+        daily_bias_cache={
+            "NVDA": DailyBiasReport(
+                symbol="NVDA",
+                trade_date="2026-07-27",
+                direction="neutral",
+                key_levels={},
+                summary="",
+                computed_at=as_of,
+            )
+        },
+        intraday_scan_bar_time=as_of,
+        intraday_5m_cache={"NVDA": cached_df},
+        benchmark_intraday_frames={5: cached_df},
+    )
+    config = {
+        "intraday_strategy": "pro_trader_dashboard",
+        "intraday_mtf_timeframes": [5, 30],
+        "intraday_mtf_fetch_mode": "5m_resample",
+        "intraday_benchmark_cache_per_scan": True,
+        "intraday_timezone": "America/New_York",
+        "intraday_session_start": "09:30",
+    }
+
+    MultiTimeframeValidator().evaluate("NVDA", as_of, session, config)
+
+    assert five_m_calls == []
 
 
 @pytest.mark.unit

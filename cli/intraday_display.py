@@ -5,7 +5,7 @@ import logging
 import threading
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Literal
 
 from rich import box
 from rich.layout import Layout
@@ -83,14 +83,91 @@ class IntradayDashboardBuffer:
     def add_signal(self, signal: IntradaySignal) -> None:
         with self._lock:
             self.signals.appendleft(signal)
-            self.session.selected_detail_symbol = signal.symbol
+            self._maybe_auto_select(signal.symbol)
         self._notify()
 
     def record_scan_state(self, scan_state: SymbolScanState) -> None:
         with self._lock:
             self.session.latest_scan_by_symbol[scan_state.symbol] = scan_state
-            self.session.selected_detail_symbol = scan_state.symbol
+            self._maybe_auto_select(scan_state.symbol)
         self._notify()
+
+    def select_symbol(self, symbol: str, *, source: Literal["user", "auto"] = "user") -> None:
+        with self._lock:
+            if symbol not in self.session.watchlist:
+                return
+            self.session.selected_detail_symbol = symbol
+            if source == "user":
+                self.session.detail_follow_mode = False
+        self._notify()
+
+    def select_relative(self, delta: int) -> None:
+        with self._lock:
+            watchlist = self.session.watchlist
+            if not watchlist:
+                return
+            selected = self.session.selected_detail_symbol
+            if selected in watchlist:
+                index = watchlist.index(selected)
+            else:
+                index = 0 if delta >= 0 else len(watchlist) - 1
+            next_index = (index + delta) % len(watchlist)
+            symbol = watchlist[next_index]
+            self.session.selected_detail_symbol = symbol
+            self.session.detail_follow_mode = False
+        self._notify()
+
+    def select_first(self) -> None:
+        with self._lock:
+            if self.session.watchlist:
+                self.session.selected_detail_symbol = self.session.watchlist[0]
+                self.session.detail_follow_mode = False
+        self._notify()
+
+    def select_last(self) -> None:
+        with self._lock:
+            if self.session.watchlist:
+                self.session.selected_detail_symbol = self.session.watchlist[-1]
+                self.session.detail_follow_mode = False
+        self._notify()
+
+    def pin_current_symbol(self) -> None:
+        with self._lock:
+            if self.session.selected_detail_symbol is None and self.session.watchlist:
+                self.session.selected_detail_symbol = self.session.watchlist[0]
+            self.session.detail_follow_mode = False
+        self._notify()
+
+    def toggle_follow_mode(self) -> None:
+        with self._lock:
+            self.session.detail_follow_mode = not self.session.detail_follow_mode
+            if self.session.detail_follow_mode:
+                symbol = self._most_recent_scan_symbol()
+                if symbol is not None:
+                    self.session.selected_detail_symbol = symbol
+        self._notify()
+
+    def _maybe_auto_select(self, symbol: str) -> None:
+        if self.session.detail_follow_mode:
+            self.session.selected_detail_symbol = symbol
+
+    def _most_recent_scan_symbol(self) -> str | None:
+        if not self.session.latest_scan_by_symbol:
+            return None
+        return max(
+            self.session.latest_scan_by_symbol.values(),
+            key=lambda scan: scan.bar_time,
+        ).symbol
+
+    def _ensure_selection_valid(self) -> None:
+        watchlist = self.session.watchlist
+        selected = self.session.selected_detail_symbol
+        if not watchlist:
+            self.session.selected_detail_symbol = None
+            return
+        if selected not in watchlist:
+            self.session.selected_detail_symbol = watchlist[0]
+            self.session.detail_follow_mode = False
 
     def init_premarket_symbol(self, symbol: str, analysts: list[str]) -> None:
         selected = [a.lower() for a in analysts]
@@ -111,7 +188,7 @@ class IntradayDashboardBuffer:
         with self._lock:
             self.premarket_by_symbol[symbol] = state
             self.premarket_active = True
-            self.session.selected_detail_symbol = symbol
+            self._maybe_auto_select(symbol)
         self._notify()
 
     def load_premarket_from_bias(self, symbol: str, analysts: list[str], report) -> None:
@@ -137,7 +214,7 @@ class IntradayDashboardBuffer:
         update_analyst_statuses(proxy, chunk)
         update_research_status_from_chunk(proxy, chunk)
         with self._lock:
-            self.session.selected_detail_symbol = symbol
+            self._maybe_auto_select(symbol)
         self._notify()
 
     def finish_premarket(self) -> None:
@@ -147,6 +224,7 @@ class IntradayDashboardBuffer:
 
     def snapshot(self) -> dict:
         with self._lock:
+            self._ensure_selection_valid()
             return {
                 "log_lines": list(self.log_lines),
                 "signals": list(self.signals),
@@ -160,6 +238,7 @@ class IntradayDashboardBuffer:
                 },
                 "premarket_active": self.premarket_active,
                 "selected_symbol": self.session.selected_detail_symbol,
+                "detail_follow_mode": self.session.detail_follow_mode,
                 "latest_scan": dict(self.session.latest_scan_by_symbol),
             }
 
@@ -248,6 +327,7 @@ def update_intraday_display(
     *,
     stats_handler=None,
     start_time: datetime.datetime | None = None,
+    show_nav_hints: bool = False,
 ) -> None:
     session = buffer.session
     snap = buffer.snapshot()
@@ -333,10 +413,12 @@ def update_intraday_display(
     )
 
     detail_text = _render_detail_panel(buffer, snap, selected)
+    follow_mode = snap["detail_follow_mode"]
+    mode_label = "[follow]" if follow_mode else "[pinned]"
     layout["detail"].update(
         Panel(
             Markdown(detail_text) if detail_text else Text("No symbol selected.", style="dim"),
-            title=f"Detail — {selected or '—'}",
+            title=f"Detail — {selected or '—'} {mode_label}",
             border_style="green",
         )
     )
@@ -379,6 +461,8 @@ def update_intraday_display(
     if start_time is not None:
         elapsed = datetime.datetime.now() - start_time
         footer_parts.append(f"elapsed: {int(elapsed.total_seconds())}s")
+    if show_nav_hints:
+        footer_parts.append("↑↓/jk navigate | f follow | Enter pin")
 
     layout["footer"].update(
         Panel(" | ".join(footer_parts), border_style="dim")

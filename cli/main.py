@@ -1485,6 +1485,269 @@ def schwab_auth(
         console.print(f"[green]Access token expires in:[/green] {expires_in} seconds")
 
 
+@app.command("screener-debug")
+def screener_debug(
+    source: str = typer.Option(
+        "both",
+        "--source",
+        help="Universe source: streamer, sp500_quotes, sp500_rrs, or both.",
+    ),
+    keys: list[str] = typer.Option(
+        [],
+        "--keys",
+        help="Streamer screener keys (default from config).",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        help="Max candidates to fetch per source.",
+    ),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="Print first raw Streamer item JSON.",
+    ),
+    compare: bool = typer.Option(
+        False,
+        "--compare",
+        help="Compare streamer vs REST quote totalVolume for top symbols.",
+    ),
+):
+    """Validate universe screener volume discovery (Streamer vs SP500 quotes)."""
+    import json
+
+    from tradingagents.dataflows.config import set_config
+    from tradingagents.dataflows.schwab_quotes import (
+        fetch_sp500_quote_candidates,
+        fetch_sp500_volume_candidates,
+        get_quotes,
+    )
+    from tradingagents.dataflows.schwab_streamer import SchwabEquityScreener
+    from tradingagents.intraday.indicators.sector_mapping import is_sp500_constituent
+
+    config = dict(DEFAULT_CONFIG)
+    set_config(config)
+
+    if source not in ("streamer", "sp500_quotes", "sp500_rrs", "both"):
+        console.print(f"[red]Invalid --source:[/red] {source}")
+        raise typer.Exit(code=1)
+
+    streamer_keys = keys or list(config.get("intraday_screener_keys") or [])
+    streamer_candidates: list = []
+    sp500_candidates: list = []
+    sp500_rrs_candidates: list = []
+    debug_capture: list[dict] = []
+
+    if source in ("streamer", "both"):
+        screener = SchwabEquityScreener()
+        streamer_candidates = screener.fetch_top_symbols(
+            streamer_keys,
+            limit=limit,
+            debug_capture=debug_capture if raw else None,
+        )
+        console.print(
+            f"[bold]Streamer[/bold] keys={streamer_keys} "
+            f"candidates={len(streamer_candidates)}"
+        )
+
+    if source in ("sp500_quotes", "both"):
+        sp500_candidates = fetch_sp500_volume_candidates(limit)
+        console.print(
+            f"[bold]SP500 quotes[/bold] candidates={len(sp500_candidates)} (volume-ranked)"
+        )
+
+    if source == "sp500_rrs":
+        sp500_rrs_candidates = fetch_sp500_quote_candidates()
+        console.print(
+            f"[bold]SP500 RRS[/bold] quote candidates={len(sp500_rrs_candidates)} "
+            "(all constituents, price gate only — use intraday screener for RRS rank)"
+        )
+
+    if raw and debug_capture:
+        console.print("[bold]Raw Streamer capture:[/bold]")
+        console.print(json.dumps(debug_capture[0], indent=2, default=str))
+
+    table = Table(title="Screener candidates")
+    table.add_column("Source")
+    table.add_column("Symbol")
+    table.add_column("Last")
+    table.add_column("Volume")
+    table.add_column("TotalVol")
+    table.add_column("Trades")
+    table.add_column("SP500")
+
+    def _add_rows(label: str, candidates: list) -> None:
+        for c in candidates:
+            table.add_row(
+                label,
+                c.symbol,
+                f"{c.last_price:.2f}" if c.last_price else "",
+                str(c.volume or ""),
+                str(c.total_volume or ""),
+                str(c.trades or ""),
+                "yes" if is_sp500_constituent(c.symbol) else "no",
+            )
+
+    if streamer_candidates:
+        _add_rows("streamer", streamer_candidates)
+    if sp500_candidates:
+        _add_rows("sp500_quotes", sp500_candidates)
+    if sp500_rrs_candidates:
+        display = sp500_rrs_candidates[:limit] if limit else sp500_rrs_candidates
+        _add_rows("sp500_rrs", display)
+
+    console.print(table)
+
+    if compare and streamer_candidates:
+        compare_symbols = [c.symbol for c in streamer_candidates[:5]]
+        quote_map = get_quotes(compare_symbols)
+        compare_table = Table(title="Streamer vs REST quote totalVolume")
+        compare_table.add_column("Symbol")
+        compare_table.add_column("Streamer totalVol")
+        compare_table.add_column("Streamer volume")
+        compare_table.add_column("REST totalVol")
+        for c in streamer_candidates[:5]:
+            rest = quote_map.get(c.symbol)
+            compare_table.add_row(
+                c.symbol,
+                str(c.total_volume or ""),
+                str(c.volume or ""),
+                str(rest.total_volume if rest else ""),
+            )
+        console.print(compare_table)
+
+
+@app.command("rrs-debug")
+def rrs_debug(
+    symbol: str = typer.Argument(..., help="Symbol to inspect."),
+    benchmark: str = typer.Option("SPY", "--benchmark", help="RRS benchmark symbol."),
+    timeframes: str = typer.Option(
+        "5m,30m,60m",
+        "--timeframes",
+        help="Comma-separated RRS timeframes (5m, 30m, 60m).",
+    ),
+    length: int = typer.Option(12, "--length", help="RRS rolling length."),
+):
+    """Dump per-timeframe RRS values for TOS parity debugging."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from tradingagents.dataflows.config import set_config
+    from tradingagents.dataflows.schwab import get_intraday_5m_candles
+    from tradingagents.intraday.frame_enrichment import enriched_frames_from_5m
+    from tradingagents.intraday.indicators.relative_strength import compute_rrs
+
+    config = dict(DEFAULT_CONFIG)
+    set_config(config)
+
+    tz = ZoneInfo(str(config.get("intraday_timezone", "America/New_York")))
+    now = datetime.now(tz)
+    start_str = str(config.get("intraday_session_start", "09:30"))
+    hour, minute = [int(x) for x in start_str.split(":", maxsplit=1)]
+    session_start = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    tf_map = {"5m": 5, "30m": 30, "60m": 60, "15m": 15}
+    requested = [part.strip().lower() for part in timeframes.split(",") if part.strip()]
+    tf_minutes = [tf_map[label] for label in requested if label in tf_map]
+    if not tf_minutes:
+        console.print("[red]No valid timeframes.[/red] Use 5m, 30m, or 60m.")
+        raise typer.Exit(code=1)
+
+    sym_5m = get_intraday_5m_candles(symbol.upper(), session_start, now)
+    bench_5m = get_intraday_5m_candles(benchmark.upper(), session_start, now)
+    sym_enriched = enriched_frames_from_5m(sym_5m, tf_minutes)
+    bench_enriched = enriched_frames_from_5m(bench_5m, tf_minutes)
+
+    table = Table(title=f"RRS debug {symbol.upper()} vs {benchmark.upper()}")
+    table.add_column("TF")
+    table.add_column("Symbol bars")
+    table.add_column("Bench bars")
+    table.add_column("Sym close")
+    table.add_column("RRS")
+
+    for label in requested:
+        minutes = tf_map.get(label)
+        if minutes is None:
+            continue
+        sym_df = sym_enriched.get(minutes)
+        bench_df = bench_enriched.get(minutes)
+        if sym_df is None or bench_df is None or sym_df.empty or bench_df.empty:
+            table.add_row(label, "0", "0", "", "n/a")
+            continue
+        sym_close = float(sym_df["Close"].iloc[-1])
+        rrs_val = compute_rrs(sym_df, bench_df, length=length)
+        table.add_row(
+            label,
+            str(len(sym_df)),
+            str(len(bench_df)),
+            f"{sym_close:.2f}",
+            f"{rrs_val:.4f}",
+        )
+
+    console.print(table)
+    console.print(
+        "[dim]Compare these values to TOS RealRelativeStrength on the same aggregation. "
+        "Mismatches often come from 5m-resampled vs native TF bars or session bar alignment.[/dim]"
+    )
+
+
+@app.command("refresh-sp500")
+def refresh_sp500(
+    source: str = typer.Option(
+        "wikipedia",
+        "--source",
+        help="Data source: wikipedia (full S&P 500) or yfinance (SPY top holdings only).",
+    ),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Write bundled sp500_constituents.json in the package data directory.",
+    ),
+    cache_path: str | None = typer.Option(
+        None,
+        "--cache-path",
+        help="Optional path to write JSON (e.g. ~/.tradingagents/cache/sp500_constituents.json).",
+    ),
+):
+    """Refresh S&P 500 (SPY index) constituent symbol list."""
+    from pathlib import Path
+
+    from tradingagents.intraday.indicators.sp500_constituents import (
+        bundled_data_path,
+        refresh_sp500_constituents,
+        write_sp500_constituents,
+    )
+
+    if source not in ("wikipedia", "yfinance"):
+        console.print(f"[red]Invalid source:[/red] {source} (use wikipedia or yfinance)")
+        raise typer.Exit(code=1)
+
+    try:
+        payload = refresh_sp500_constituents(source=source)
+    except Exception as exc:
+        console.print(f"[red]SP500 refresh failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    count = len(payload.get("symbols") or [])
+    console.print(
+        f"[green]Fetched {count} symbols[/green] "
+        f"(as_of={payload.get('as_of')}, source={payload.get('source')})"
+    )
+    if "PLTR" in payload.get("symbols", []):
+        console.print("[cyan]PLTR[/cyan] is in the refreshed list")
+
+    if write:
+        path = write_sp500_constituents(payload, path=bundled_data_path())
+        console.print(f"[green]Updated bundled file:[/green] {path}")
+    if cache_path:
+        path = write_sp500_constituents(payload, path=Path(cache_path).expanduser())
+        console.print(f"[green]Wrote cache file:[/green] {path}")
+    if not write and not cache_path:
+        console.print(
+            "[yellow]No file written.[/yellow] Use --write or --cache-path to save."
+        )
+
+
 @app.command()
 def intraday(
     symbols: list[str] | None = typer.Argument(
@@ -1563,6 +1826,16 @@ def intraday(
         "--screener-interval",
         help="Minutes between screener watchlist refreshes.",
     ),
+    screener_filters: str | None = typer.Option(
+        None,
+        "--screener-filters",
+        help="Comma-separated screener filter pipeline (orb, rrs). Default from config.",
+    ),
+    screener_filter_mode: str | None = typer.Option(
+        None,
+        "--screener-filter-mode",
+        help="Screener filter combine mode: any (union) or all (intersection).",
+    ),
 ):
     """Run the intraday watchlist scanner on live Schwab data."""
     import sys
@@ -1577,6 +1850,12 @@ def intraday(
     config["intraday_strategy"] = strategy
     config["intraday_screener_enabled"] = screener
     config["intraday_screener_interval_minutes"] = screener_interval
+    if screener_filters is not None:
+        config["intraday_screener_filters"] = [
+            part.strip() for part in screener_filters.split(",") if part.strip()
+        ]
+    if screener_filter_mode is not None:
+        config["intraday_screener_filter_mode"] = screener_filter_mode
     resolved_watchlist = _resolve_intraday_watchlist(symbols, watchlist)
     if resolved_watchlist:
         config["watchlist"] = resolved_watchlist
@@ -1653,6 +1932,7 @@ def intraday(
     )
 
     if use_live:
+        from cli.dashboard_input import DashboardInputHandler
         from cli.intraday_display import (
             IntradayDashboardBuffer,
             attach_dashboard_logging,
@@ -1670,6 +1950,8 @@ def intraday(
         scanner.dashboard = buffer
         layout = create_intraday_layout()
         log_handler = attach_dashboard_logging(buffer)
+        input_handler = DashboardInputHandler(buffer)
+        nav_hints = sys.stdin.isatty()
 
         def refresh() -> None:
             update_intraday_display(
@@ -1677,16 +1959,19 @@ def intraday(
                 buffer,
                 stats_handler=stats_handler,
                 start_time=start_time,
+                show_nav_hints=nav_hints,
             )
 
         buffer.set_refresh_callback(refresh)
-
-        with Live(layout, refresh_per_second=4):
-            refresh()
-            scanner.run()
-            refresh()
-
-        detach_dashboard_logging(log_handler)
+        input_handler.start()
+        try:
+            with Live(layout, refresh_per_second=4):
+                refresh()
+                scanner.run()
+                refresh()
+        finally:
+            input_handler.stop()
+            detach_dashboard_logging(log_handler)
     else:
         scanner.run()
 

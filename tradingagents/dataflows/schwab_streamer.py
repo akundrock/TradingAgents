@@ -11,6 +11,7 @@ from typing import Any
 from tradingagents.dataflows.schwab import (
     _get_access_token,
     get_user_preference,
+    refresh_access_token_if_possible,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,63 @@ def _field_int(value: Any) -> int:
         return 0
 
 
+def _parse_screener_item(item: dict[str, Any]) -> ScreenerCandidate | None:
+    """Parse one screener item; supports named fields and numeric string keys."""
+    symbol = str(
+        item.get("symbol")
+        or item.get("Symbol")
+        or item.get("0")
+        or ""
+    ).strip().upper()
+    if not symbol:
+        return None
+    return ScreenerCandidate(
+        symbol=symbol,
+        last_price=_field_float(
+            item.get("lastPrice") or item.get("LastPrice") or item.get("3")
+        ),
+        net_change=_field_float(
+            item.get("netChange") or item.get("NetChange") or item.get("4")
+        ),
+        net_percent_change=_field_float(
+            item.get("netPercentChange") or item.get("NetPercentChange") or item.get("5")
+        ),
+        volume=_field_int(item.get("volume") or item.get("Volume") or item.get("6")),
+        total_volume=_field_int(
+            item.get("totalVolume") or item.get("TotalVolume") or item.get("7")
+        ),
+        trades=_field_int(item.get("trades") or item.get("Trades") or item.get("8")),
+        market_share=_field_float(
+            item.get("marketShare") or item.get("MarketShare") or item.get("9")
+        ),
+    )
+
+
+def _total_volume_anomaly(candidates: list[ScreenerCandidate]) -> bool:
+    if len(candidates) < 2:
+        return False
+    totals = [c.total_volume for c in candidates if c.total_volume > 0]
+    if len(totals) < 2:
+        return False
+    most_common = max(set(totals), key=totals.count)
+    same_count = sum(1 for v in totals if v == most_common)
+    return same_count / len(totals) > 0.8
+
+
+def _effective_volume(candidate: ScreenerCandidate, *, use_volume_field: bool) -> int:
+    if use_volume_field and candidate.volume > 0:
+        return candidate.volume
+    return candidate.total_volume or candidate.volume
+
+
+def _format_candidate_volume(candidate: ScreenerCandidate) -> str:
+    vol = candidate.volume or 0
+    total = candidate.total_volume or 0
+    if vol and total and vol != total:
+        return f"{candidate.symbol}(vol={vol},total={total})"
+    return f"{candidate.symbol}({total or vol})"
+
+
 def _parse_screener_items(content: dict[str, Any], screener_key: str) -> list[ScreenerCandidate]:
     raw_items = content.get("4")
     if raw_items is None:
@@ -125,24 +183,11 @@ def _parse_screener_items(content: dict[str, Any], screener_key: str) -> list[Sc
     for item in raw_items:
         if not isinstance(item, dict):
             continue
-        symbol = str(item.get("symbol") or item.get("Symbol") or "").strip().upper()
-        if not symbol:
+        parsed = _parse_screener_item(item)
+        if parsed is None:
             continue
-        candidates.append(
-            ScreenerCandidate(
-                symbol=symbol,
-                last_price=_field_float(item.get("lastPrice") or item.get("LastPrice")),
-                net_change=_field_float(item.get("netChange") or item.get("NetChange")),
-                net_percent_change=_field_float(
-                    item.get("netPercentChange") or item.get("NetPercentChange")
-                ),
-                volume=_field_int(item.get("volume") or item.get("Volume")),
-                total_volume=_field_int(item.get("totalVolume") or item.get("TotalVolume")),
-                trades=_field_int(item.get("trades") or item.get("Trades")),
-                market_share=_field_float(item.get("marketShare") or item.get("MarketShare")),
-                screener_key=screener_key,
-            )
-        )
+        candidates.append(parsed)
+        candidates[-1].screener_key = screener_key
     return candidates
 
 
@@ -151,21 +196,203 @@ def _merge_candidates(
     limit: int,
 ) -> list[ScreenerCandidate]:
     merged: dict[str, ScreenerCandidate] = {}
+    flat = [c for batch in batches for c in batch]
+    use_volume_field = _total_volume_anomaly(flat)
+    if use_volume_field:
+        totals = [c.total_volume for c in flat if c.total_volume > 0]
+        most_common = max(set(totals), key=totals.count)
+        same_count = sum(1 for v in totals if v == most_common)
+        logger.warning(
+            "Streamer screener: identical totalVolume on %d/%d items — ranking by volume field",
+            same_count,
+            len(totals),
+        )
+
     for batch in batches:
         for candidate in batch:
             existing = merged.get(candidate.symbol)
             if existing is None:
                 merged[candidate.symbol] = candidate
                 continue
-            if candidate.total_volume > existing.total_volume:
+            if _effective_volume(candidate, use_volume_field=use_volume_field) > _effective_volume(
+                existing, use_volume_field=use_volume_field
+            ):
                 merged[candidate.symbol] = candidate
 
     ranked = sorted(
         merged.values(),
-        key=lambda c: (c.total_volume, c.volume),
+        key=lambda c: (
+            _effective_volume(c, use_volume_field=use_volume_field),
+            c.volume,
+        ),
         reverse=True,
     )
     return ranked[:limit]
+
+
+class StreamerTokenLoginError(RuntimeError):
+    """Streamer ADMIN LOGIN rejected due to invalid or expired OAuth token."""
+
+    def __init__(self, code: Any, msg: str) -> None:
+        self.code = code
+        self.msg = msg
+        super().__init__(f"Streamer LOGIN failed: code={code} msg={msg}")
+
+
+def _is_login_token_error(code: Any, msg: str | None) -> bool:
+    if code == 3:
+        return True
+    text = (msg or "").lower()
+    return "expired" in text or "invalid" in text
+
+
+def _prepare_streamer_session(user_pref: dict) -> SchwabStreamerSession:
+    """Build streamer session using access token after any REST-side refresh."""
+    access_token, _ = _get_access_token()
+    return _build_streamer_session(user_pref, access_token)
+
+
+async def _streamer_login(
+    ws: Any,
+    session: SchwabStreamerSession,
+    request_id: int,
+) -> int:
+    login = _build_request(
+        request_id,
+        "ADMIN",
+        "LOGIN",
+        session,
+        {
+            "Authorization": session.access_token,
+            "SchwabClientChannel": session.channel,
+            "SchwabClientFunctionId": session.function_id,
+        },
+    )
+    await ws.send(json.dumps(login))
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+        envelope = json.loads(raw)
+        for resp in envelope.get("response", []):
+            if resp.get("service") == "ADMIN" and resp.get("command") == "LOGIN":
+                content = resp.get("content", {}) or {}
+                code = content.get("code")
+                msg = str(content.get("msg") or "")
+                if code == 0:
+                    return request_id + 1
+                if _is_login_token_error(code, msg):
+                    raise StreamerTokenLoginError(code, msg)
+                raise RuntimeError(
+                    f"Streamer LOGIN failed: code={code} msg={msg}"
+                )
+    raise RuntimeError("Streamer LOGIN timed out")
+
+
+async def _collect_screener_candidates(
+    ws: Any,
+    session: SchwabStreamerSession,
+    keys: list[str],
+    request_id: int,
+    *,
+    limit: int,
+    timeout_seconds: float,
+    debug_capture: list[dict[str, Any]] | None = None,
+) -> list[ScreenerCandidate]:
+    subscribe = _build_request(
+        request_id,
+        SCREENER_SERVICE,
+        "SUBS",
+        session,
+        {
+            "keys": ",".join(keys),
+            "fields": DEFAULT_SCREENER_FIELDS,
+        },
+    )
+    request_id += 1
+    await ws.send(json.dumps(subscribe))
+
+    collected: list[list[ScreenerCandidate]] = []
+    listen_deadline = time.monotonic() + timeout_seconds
+    seen_keys: set[str] = set()
+    batch_sizes: dict[str, int] = {}
+
+    while time.monotonic() < listen_deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+        except asyncio.TimeoutError:
+            if len(seen_keys) >= len(keys):
+                break
+            continue
+
+        envelope = json.loads(raw)
+        for data in envelope.get("data", []):
+            if data.get("service") != SCREENER_SERVICE:
+                continue
+            for content in data.get("content", []):
+                if not isinstance(content, dict):
+                    continue
+                screener_key = str(content.get("key") or content.get("0") or "")
+                if screener_key:
+                    seen_keys.add(screener_key)
+                    items = _parse_screener_items(content, screener_key)
+                    if items:
+                        collected.append(items)
+                        batch_sizes[screener_key] = len(items)
+                        if debug_capture is not None and not debug_capture:
+                            raw_items = content.get("4") or content.get("items") or content.get("Items")
+                            debug_capture.append(
+                                {
+                                    "screener_key": screener_key,
+                                    "content": content,
+                                    "first_item": raw_items[0] if isinstance(raw_items, list) and raw_items else None,
+                                }
+                            )
+
+        if len(seen_keys) >= len(keys) and collected:
+            break
+
+    merged = _merge_candidates(collected, limit)
+    logger.info(
+        "Streamer screener: received keys=%s batches=%s merged_candidates=%d",
+        sorted(seen_keys),
+        batch_sizes,
+        len(merged),
+    )
+    if merged:
+        top = ", ".join(_format_candidate_volume(c) for c in merged[:8])
+        logger.info("Streamer screener top volume: %s", top)
+    return merged
+
+
+async def _run_screener_session(
+    session: SchwabStreamerSession,
+    keys: list[str],
+    *,
+    limit: int,
+    timeout_seconds: float,
+    debug_capture: list[dict[str, Any]] | None = None,
+) -> list[ScreenerCandidate]:
+    import websockets
+
+    logger.info(
+        "Streamer connecting to %s keys=%s limit=%d",
+        session.socket_url,
+        keys,
+        limit,
+    )
+    async with websockets.connect(session.socket_url, open_timeout=15) as ws:
+        request_id = await _streamer_login(ws, session, 1)
+        logger.info("Streamer LOGIN ok")
+        return await _collect_screener_candidates(
+            ws,
+            session,
+            keys,
+            request_id,
+            limit=limit,
+            timeout_seconds=timeout_seconds,
+            debug_capture=debug_capture,
+        )
 
 
 async def _fetch_screener_candidates_async(
@@ -173,92 +400,29 @@ async def _fetch_screener_candidates_async(
     *,
     limit: int = 50,
     timeout_seconds: float = 30.0,
+    debug_capture: list[dict[str, Any]] | None = None,
 ) -> list[ScreenerCandidate]:
-    import websockets
-
-    access_token, refresh_token = _get_access_token()
+    logger.info("Streamer screener fetch starting keys=%s limit=%d", keys, limit)
     user_pref = get_user_preference()
-    session = _build_streamer_session(user_pref, access_token)
+    session = _prepare_streamer_session(user_pref)
 
-    request_id = 1
-    collected: list[list[ScreenerCandidate]] = []
-
-    async with websockets.connect(session.socket_url, open_timeout=15) as ws:
-        login = _build_request(
-            request_id,
-            "ADMIN",
-            "LOGIN",
-            session,
-            {
-                "Authorization": session.access_token,
-                "SchwabClientChannel": session.channel,
-                "SchwabClientFunctionId": session.function_id,
-            },
+    try:
+        return await _run_screener_session(
+            session, keys, limit=limit, timeout_seconds=timeout_seconds, debug_capture=debug_capture
         )
-        request_id += 1
-        await ws.send(json.dumps(login))
-
-        login_ok = False
-        deadline = time.monotonic() + 15.0
-        while time.monotonic() < deadline:
-            raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
-            envelope = json.loads(raw)
-            for resp in envelope.get("response", []):
-                if resp.get("service") == "ADMIN" and resp.get("command") == "LOGIN":
-                    code = resp.get("content", {}).get("code")
-                    if code == 0:
-                        login_ok = True
-                    else:
-                        raise RuntimeError(
-                            f"Streamer LOGIN failed: code={code} msg={resp.get('content', {}).get('msg')}"
-                        )
-            if login_ok:
-                break
-        if not login_ok:
-            raise RuntimeError("Streamer LOGIN timed out")
-
-        subscribe = _build_request(
-            request_id,
-            SCREENER_SERVICE,
-            "SUBS",
-            session,
-            {
-                "keys": ",".join(keys),
-                "fields": DEFAULT_SCREENER_FIELDS,
-            },
+    except StreamerTokenLoginError:
+        logger.info(
+            "Streamer LOGIN token rejected; refreshing OAuth token and retrying"
         )
-        request_id += 1
-        await ws.send(json.dumps(subscribe))
-
-        listen_deadline = time.monotonic() + timeout_seconds
-        seen_keys: set[str] = set()
-
-        while time.monotonic() < listen_deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-            except asyncio.TimeoutError:
-                if len(seen_keys) >= len(keys):
-                    break
-                continue
-
-            envelope = json.loads(raw)
-            for data in envelope.get("data", []):
-                if data.get("service") != SCREENER_SERVICE:
-                    continue
-                for content in data.get("content", []):
-                    if not isinstance(content, dict):
-                        continue
-                    screener_key = str(content.get("key") or content.get("0") or "")
-                    if screener_key:
-                        seen_keys.add(screener_key)
-                    items = _parse_screener_items(content, screener_key)
-                    if items:
-                        collected.append(items)
-
-            if len(seen_keys) >= len(keys) and collected:
-                break
-
-    return _merge_candidates(collected, limit)
+        refresh_access_token_if_possible()
+        session = _prepare_streamer_session(user_pref)
+        return await _run_screener_session(
+            session,
+            keys,
+            limit=limit,
+            timeout_seconds=timeout_seconds,
+            debug_capture=debug_capture,
+        )
 
 
 class SchwabEquityScreener:
@@ -270,6 +434,7 @@ class SchwabEquityScreener:
         limit: int = 50,
         *,
         timeout_seconds: float = 30.0,
+        debug_capture: list[dict[str, Any]] | None = None,
     ) -> list[ScreenerCandidate]:
         if not keys:
             return []
@@ -279,6 +444,7 @@ class SchwabEquityScreener:
                     keys,
                     limit=limit,
                     timeout_seconds=timeout_seconds,
+                    debug_capture=debug_capture,
                 )
             )
         except Exception as exc:

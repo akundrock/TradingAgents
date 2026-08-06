@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from typing import Literal
 
 import pandas as pd
 
-from tradingagents.dataflows.schwab import SCHWAB_INTRADAY_MINUTES, get_candles_multi_timeframe
+from tradingagents.dataflows.schwab import get_candles_multi_timeframe, get_intraday_5m_candles
 from tradingagents.dataflows.stockstats_utils import compute_mtf_indicators, compute_tf_indicators, load_ohlcv
-from tradingagents.intraday.indicators.resample import resample_ohlcv
+from tradingagents.intraday.frame_enrichment import (
+    effective_requested_timeframes,
+    enriched_frames_from_5m,
+    resolve_mtf_fetch_mode,
+    synthesize_60m,
+)
 from tradingagents.intraday.indicators.sector_mapping import get_sector_etf
 from tradingagents.intraday.session import TradingSession
 
@@ -69,33 +75,15 @@ def _directions_aligned(
 
 def _effective_timeframes(config: dict) -> tuple[list[int], bool]:
     """Return Schwab-fetchable TFs and whether to synthesize 60m bars."""
-    requested = list(config.get("intraday_mtf_timeframes", [5, 30]))
-    strategy = str(config.get("intraday_strategy", "base_momentum"))
-    if strategy == "pro_trader_dashboard":
-        for tf in (5, 15, 30, 60):
-            if tf not in requested:
-                requested.append(tf)
-
-    need_60m = 60 in requested
-    fetch_tfs = sorted({tf for tf in requested if tf in SCHWAB_INTRADAY_MINUTES})
-    if not fetch_tfs:
-        fetch_tfs = [5, 30]
-    return fetch_tfs, need_60m
+    return effective_requested_timeframes(config)
 
 
-def _synthesize_60m(enriched: dict[int, pd.DataFrame]) -> dict[int, pd.DataFrame]:
-    """Derive 60m indicators from 30m (preferred) or 5m bars."""
-    if 60 in enriched and not enriched[60].empty:
-        return enriched
-    source_tf = 30 if 30 in enriched and not enriched[30].empty else 5
-    if source_tf not in enriched or enriched[source_tf].empty:
-        return enriched
-    raw_60 = resample_ohlcv(enriched[source_tf], 60)
-    if raw_60.empty:
-        return enriched
-    enriched = dict(enriched)
-    enriched[60] = compute_tf_indicators(raw_60)
-    return enriched
+@lru_cache(maxsize=32)
+def _load_sector_daily_cached(sector_etf: str, trade_date: str) -> pd.DataFrame:
+    try:
+        return load_ohlcv(sector_etf, trade_date).tail(60)
+    except Exception:
+        return pd.DataFrame()
 
 
 class MultiTimeframeValidator:
@@ -109,38 +97,58 @@ class MultiTimeframeValidator:
         fetch_tfs, need_60m = _effective_timeframes(config)
         session_start = self._session_start(as_of, config)
         trade_date = as_of.strftime("%Y-%m-%d")
+        fetch_mode = resolve_mtf_fetch_mode(config)
 
-        intraday_dfs = get_candles_multi_timeframe(
-            symbol, session_start, as_of, timeframes=fetch_tfs
-        )
-        enriched = compute_mtf_indicators(intraday_dfs)
-        if need_60m:
-            enriched = _synthesize_60m(enriched)
+        if fetch_mode == "5m_resample":
+            enriched = self._fetch_symbol_enriched_5m(
+                symbol, session_start, as_of, session, fetch_tfs, need_60m
+            )
+        else:
+            intraday_dfs = get_candles_multi_timeframe(
+                symbol, session_start, as_of, timeframes=fetch_tfs
+            )
+            enriched = compute_mtf_indicators(intraday_dfs)
+            if need_60m:
+                enriched = synthesize_60m(enriched)
 
         benchmark = str(config.get("pro_trader_benchmark", "SPY"))
         benchmark_intraday_frames: dict[int, pd.DataFrame] = {}
         benchmark_daily_df = pd.DataFrame()
         sector_daily_df = pd.DataFrame()
-        try:
-            bench_dfs = get_candles_multi_timeframe(
-                benchmark, session_start, as_of, timeframes=fetch_tfs
-            )
-            benchmark_intraday_frames = compute_mtf_indicators(bench_dfs)
-            if need_60m:
-                benchmark_intraday_frames = _synthesize_60m(benchmark_intraday_frames)
-            benchmark_daily_df = load_ohlcv(benchmark, trade_date).tail(60)
-        except Exception:
-            pass
+
+        use_scan_benchmark = bool(config.get("intraday_benchmark_cache_per_scan", True))
+        if (
+            use_scan_benchmark
+            and session.intraday_scan_bar_time == as_of
+            and session.benchmark_intraday_frames
+        ):
+            benchmark_intraday_frames = session.benchmark_intraday_frames
+            benchmark_daily_df = session.benchmark_daily_df
+        else:
+            try:
+                if fetch_mode == "5m_resample":
+                    bench_tfs = list(fetch_tfs)
+                    if need_60m and 60 not in bench_tfs:
+                        bench_tfs = sorted(set(bench_tfs) | {60})
+                    df_5m = get_intraday_5m_candles(benchmark, session_start, as_of)
+                    benchmark_intraday_frames = enriched_frames_from_5m(df_5m, bench_tfs)
+                else:
+                    bench_dfs = get_candles_multi_timeframe(
+                        benchmark, session_start, as_of, timeframes=fetch_tfs
+                    )
+                    benchmark_intraday_frames = compute_mtf_indicators(bench_dfs)
+                    if need_60m:
+                        benchmark_intraday_frames = synthesize_60m(benchmark_intraday_frames)
+                benchmark_daily_df = load_ohlcv(benchmark, trade_date).tail(60)
+            except Exception:
+                pass
 
         daily_raw = load_ohlcv(symbol, trade_date).tail(60)
         daily_enriched = compute_tf_indicators(daily_raw)
 
         sector_etf = get_sector_etf(symbol)
         if sector_etf:
-            try:
-                sector_daily_df = load_ohlcv(sector_etf, trade_date).tail(60)
-            except Exception:
-                sector_daily_df = pd.DataFrame()
+            sector_daily_df = _load_sector_daily_cached(sector_etf, trade_date)
 
         tf5 = 5 if 5 in enriched else min(enriched.keys())
         tf15 = 15 if 15 in enriched else tf5
@@ -179,6 +187,31 @@ class MultiTimeframeValidator:
             benchmark_daily_df=benchmark_daily_df,
             sector_daily_df=sector_daily_df,
         )
+
+    def _fetch_symbol_enriched_5m(
+        self,
+        symbol: str,
+        session_start: datetime,
+        as_of: datetime,
+        session: TradingSession,
+        timeframes: list[int],
+        need_60m: bool,
+    ) -> dict[int, pd.DataFrame]:
+        tf_list = list(timeframes)
+        if need_60m and 60 not in tf_list:
+            tf_list = sorted(set(tf_list) | {60})
+
+        df_5m: pd.DataFrame | None = None
+        if (
+            session.intraday_scan_bar_time == as_of
+            and symbol in session.intraday_5m_cache
+        ):
+            df_5m = session.intraday_5m_cache[symbol]
+
+        if df_5m is None:
+            df_5m = get_intraday_5m_candles(symbol, session_start, as_of)
+
+        return enriched_frames_from_5m(df_5m, tf_list)
 
     @staticmethod
     def _session_start(as_of: datetime, config: dict) -> datetime:

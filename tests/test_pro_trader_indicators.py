@@ -95,6 +95,40 @@ def test_opening_range_detects_bullish_breakout():
 
 
 @pytest.mark.unit
+def test_opening_range_with_utc_naive_schwab_style_timestamps():
+    """Schwab used to expose UTC wall-clock as naive Date values before session_timezone fix."""
+    from tradingagents.intraday.indicators.opening_range import compute_opening_range
+
+    start = datetime(2026, 8, 5, 13, 30)  # 9:30 ET as UTC-naive
+    bars = []
+    for i in range(6):
+        bars.append((100.0, 102.0, 100.0, 101.0))
+    bars.append((101.5, 103.0, 101.0, 102.5))
+    rows = []
+    for i, (o, h, l, c) in enumerate(bars):
+        rows.append(
+            {
+                "Date": start + pd.Timedelta(minutes=5 * i),
+                "Open": o,
+                "High": h,
+                "Low": l,
+                "Close": c,
+                "Volume": 1000.0,
+            }
+        )
+    df = pd.DataFrame(rows)
+    # After schwab fix, dates are ET-naive; simulate converted ET bars directly.
+    df["Date"] = [
+        datetime(2026, 8, 5, 9, 30) + pd.Timedelta(minutes=5 * i) for i in range(len(bars))
+    ]
+    as_of = datetime(2026, 8, 5, 10, 30)
+    state = compute_opening_range(df, as_of, entry_mode="wick_touch")
+    assert state is not None
+    assert state.opening_range_high == 102.0
+    assert state.bullish_orb is True
+
+
+@pytest.mark.unit
 def test_relative_volume_above_one_on_surge():
     volume = [100.0] * 2000
     volume[-1] = 5000.0

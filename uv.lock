@@ -3192,6 +3192,7 @@ dev = [
 ]
 intraday = [
     { name = "apscheduler" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -3227,6 +3228,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "typer", specifier = ">=0.21.0" },
     { name = "typing-extensions", specifier = ">=4.14.0" },
+    { name = "websockets", marker = "extra == 'intraday'", specifier = ">=12.0" },
     { name = "yfinance", specifier = ">=1.4.1" },
 ]
 provides-extras = ["dev", "bedrock", "intraday"]

@@ -18,6 +18,28 @@ class GateResult:
     final_direction: Literal["long", "short", "none"]
 
 
+def resolve_require_daily_bias_alignment(config: dict) -> bool:
+    """Return whether Gate 2 (30m trend vs daily bias) should run.
+
+    ``intraday_require_daily_bias_alignment`` is the master switch. When it is
+    true, ``orb_breakout`` + screener disables Gate 2 by default because
+    screener-added symbols use neutral daily bias unless pre-market is run.
+    Set ``intraday_orb_breakout_screener_disable_gate2`` to false to keep Gate 2.
+    """
+    if not bool(config.get("intraday_require_daily_bias_alignment", True)):
+        return False
+
+    if not bool(config.get("intraday_orb_breakout_screener_disable_gate2", True)):
+        return True
+
+    strategy = str(config.get("intraday_strategy", "base_momentum"))
+    screener_enabled = bool(config.get("intraday_screener_enabled", False))
+    if strategy == "orb_breakout" and screener_enabled:
+        return False
+
+    return True
+
+
 class GatingLayer:
     def evaluate(
         self,
@@ -43,7 +65,7 @@ class GatingLayer:
                 final_direction="none",
             )
 
-        require_alignment = bool(config.get("intraday_require_daily_bias_alignment", True))
+        require_alignment = resolve_require_daily_bias_alignment(config)
         gate2_pass = self._mtf_aligns_with_bias(mtf, daily_bias, direction)
         if require_alignment and not gate2_pass:
             gate2_reason = (

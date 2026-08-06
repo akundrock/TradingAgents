@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
@@ -56,3 +56,28 @@ def test_get_indicator_uses_schwab_ohlcv(monkeypatch):
     out = schwab.get_indicator("AAPL", "close_10_ema", "2026-05-20", 3)
     assert "close_10_ema values from 2026-05-17 to 2026-05-20" in out
     assert "2026-05-20:" in out
+
+
+@pytest.mark.unit
+def test_candles_to_df_converts_intraday_timestamps_to_eastern():
+    # 9:30 AM ET on 2026-08-05 (EDT, UTC-4) = 13:30 UTC
+    utc_open = datetime(2026, 8, 5, 13, 30, tzinfo=timezone.utc)
+    candles = [
+        {
+            "datetime": int(utc_open.timestamp() * 1000),
+            "open": 100.0,
+            "high": 101.0,
+            "low": 99.5,
+            "close": 100.5,
+            "volume": 1000,
+        }
+    ]
+    df = schwab._candles_to_df(
+        candles,
+        "AAPL",
+        "2026-08-05",
+        session_timezone="America/New_York",
+    )
+    bar_time = pd.Timestamp(df["Date"].iloc[0])
+    assert bar_time.hour == 9
+    assert bar_time.minute == 30

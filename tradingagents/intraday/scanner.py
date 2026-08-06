@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pandas as pd
 from rich.console import Console
 from rich.table import Table
 
@@ -80,6 +81,29 @@ class WatchlistScanner:
         self.universe_screener: UniverseScreener | None = None
         if bool(config.get("intraday_screener_enabled")):
             self.universe_screener = UniverseScreener(config)
+            from tradingagents.intraday.indicators.sp500_constituents import sp500_metadata
+            from tradingagents.intraday.universe_screener import resolve_screener_source
+
+            sp500 = sp500_metadata()
+            screener_source = resolve_screener_source(config)
+            logger.info(
+                "Universe screener enabled: source=%s keys=%s interval=%dm window=%s–%s "
+                "candidate_limit=%d max_watchlist=%d direction=%s rank_rrs=%s "
+                "min_price=%.2f require_sp500=%s sp500_universe=%d as_of=%s",
+                screener_source,
+                config.get("intraday_screener_keys"),
+                int(config.get("intraday_screener_interval_minutes", 15)),
+                config.get("intraday_screener_start_time", "10:00"),
+                config.get("intraday_session_end", "16:00"),
+                int(config.get("intraday_screener_candidate_limit", 50)),
+                int(config.get("intraday_screener_max_watchlist", 12)),
+                config.get("intraday_screener_direction", "long"),
+                config.get("intraday_screener_rank_rrs_timeframe", "5m"),
+                float(config.get("intraday_screener_min_price", 10.0)),
+                bool(config.get("intraday_screener_require_sp500", True)),
+                sp500.get("count", 0),
+                sp500.get("as_of", ""),
+            )
         self._output_dir = Path(
             str(config.get("intraday_output_dir", "~/.tradingagents/intraday"))
         ).expanduser()
@@ -305,11 +329,26 @@ class WatchlistScanner:
             logger.debug("Waiting %ds for bar-close data to settle", delay)
             time.sleep(delay)
 
+        self.session.intraday_5m_cache.clear()
+
         self._maybe_refresh_watchlist(bar_time)
+
+        self._prepare_scan_cache(bar_time)
 
         self.session.last_scan_time = bar_time
         self.session.scan_count += 1
-        logger.info("Scan #%d @ %s", self.session.scan_count, bar_time.strftime("%H:%M"))
+        watchlist_note = (
+            f"watchlist={len(self.session.watchlist)}"
+            if self.session.watchlist
+            else "watchlist=empty"
+        )
+        logger.info(
+            "Scan #%d @ %s — evaluating %d symbols (%s)",
+            self.session.scan_count,
+            bar_time.strftime("%H:%M"),
+            len(self.session.watchlist),
+            watchlist_note,
+        )
         max_workers = int(self.config.get("intraday_max_concurrent_symbols", 5))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -329,17 +368,35 @@ class WatchlistScanner:
         if self.universe_screener is None:
             return
         if not self._within_screener_window(bar_time):
+            start_str = str(self.config.get("intraday_screener_start_time", "10:00"))
+            end_str = str(self.config.get("intraday_session_end", "16:00"))
+            logger.info(
+                "Screener skip at %s: outside screener window (%s–%s)",
+                bar_time.strftime("%H:%M"),
+                start_str,
+                end_str,
+            )
             return
 
         interval = int(self.config.get("intraday_screener_interval_minutes", 15))
         last = self.session.screener_last_refresh
         if last is not None and (bar_time - last) < timedelta(minutes=interval):
+            next_refresh = last + timedelta(minutes=interval)
+            logger.info(
+                "Screener skip at %s: interval %dm (last=%s, next=%s)",
+                bar_time.strftime("%H:%M"),
+                interval,
+                last.strftime("%H:%M"),
+                next_refresh.strftime("%H:%M"),
+            )
             return
 
+        logger.info("Screener refresh starting at %s", bar_time.strftime("%H:%M"))
         try:
             refreshed, screened = self.universe_screener.refresh_watchlist(
                 bar_time,
                 self.session.base_watchlist,
+                session=self.session,
             )
         except Exception as exc:
             logger.warning("Watchlist screener refresh failed: %s", exc)
@@ -348,14 +405,24 @@ class WatchlistScanner:
         self.session.screener_last_refresh = bar_time
         self.session.screener_last_candidate_count = len(screened)
         for item in screened:
-            self.session.screener_snapshots[item.symbol] = {
+            snapshot = {
+                "passed_filter": item.passed_filter,
+                "rank_score": item.rank_score,
+                "direction": item.direction,
                 "rrs_5m": item.rrs_by_tf.get("5m", 0.0),
                 "rrs_30m": item.rrs_by_tf.get("30m", 0.0),
                 "rrs_60m": item.rrs_by_tf.get("60m", 0.0),
+                "rank_rrs_timeframe": item.rank_rrs_timeframe,
                 "aligned": item.aligned_count,
                 "rvol_5m": item.relative_volume_5m,
-                "direction": item.direction,
             }
+            meta = item.filter_metadata or {}
+            if "orh" in meta:
+                snapshot["orh"] = meta["orh"]
+                snapshot["orl"] = meta["orl"]
+                snapshot["bullish_orb"] = meta.get("bullish_orb", False)
+                snapshot["bearish_orb"] = meta.get("bearish_orb", False)
+            self.session.screener_snapshots[item.symbol] = snapshot
 
         previous = set(self.session.watchlist)
         next_set = set(refreshed)
@@ -370,13 +437,68 @@ class WatchlistScanner:
             self._remove_screener_symbol(symbol, bar_time)
 
         self.session.watchlist = refreshed
+        static_count = sum(
+            1 for s in refreshed if self.session.symbol_sources.get(s) == "static"
+        )
+        screener_count = sum(
+            1 for s in refreshed if self.session.symbol_sources.get(s) == "screener"
+        )
         logger.info(
-            "Screener refresh: %d candidates, watchlist=%d (+%d -%d)",
+            "Screener refresh done: %d RRS-passed, watchlist=%d (static=%d screener=%d) "
+            "(+%d -%d)",
             len(screened),
             len(refreshed),
+            static_count,
+            screener_count,
             len(added),
             len(removed),
         )
+        if screened:
+            top = ", ".join(
+                f"{s.symbol}({s.direction} aligned={s.aligned_count} "
+                f"rrs{s.rank_rrs_timeframe}={s.rank_score:.2f})"
+                for s in screened[:5]
+            )
+            logger.info("Screener top passed: %s", top)
+        if added:
+            logger.info("Screener added to watchlist: %s", ", ".join(added))
+        if removed:
+            logger.info("Screener removed from watchlist: %s", ", ".join(removed))
+
+    def _prepare_scan_cache(self, bar_time: datetime) -> None:
+        if not bool(self.config.get("intraday_benchmark_cache_per_scan", True)):
+            return
+
+        from tradingagents.dataflows.schwab import get_intraday_5m_candles
+        from tradingagents.dataflows.stockstats_utils import load_ohlcv
+        from tradingagents.intraday.frame_enrichment import (
+            effective_requested_timeframes,
+            enriched_frames_from_5m,
+        )
+
+        benchmark = str(self.config.get("pro_trader_benchmark", "SPY"))
+        session_start = MultiTimeframeValidator._session_start(bar_time, self.config)
+        trade_date = bar_time.strftime("%Y-%m-%d")
+        fetch_tfs, need_60m = effective_requested_timeframes(self.config)
+        bench_tfs = list(fetch_tfs)
+        if need_60m and 60 not in bench_tfs:
+            bench_tfs = sorted(set(bench_tfs) | {60})
+
+        try:
+            df_5m = get_intraday_5m_candles(benchmark, session_start, bar_time)
+            self.session.benchmark_intraday_frames = enriched_frames_from_5m(df_5m, bench_tfs)
+            self.session.benchmark_daily_df = load_ohlcv(benchmark, trade_date).tail(60)
+            self.session.intraday_scan_bar_time = bar_time
+            logger.info(
+                "Scan cache: benchmark %s 5m bars (%d rows) for %d symbols",
+                benchmark,
+                len(df_5m),
+                len(self.session.watchlist),
+            )
+        except Exception as exc:
+            logger.warning("Scan benchmark cache failed for %s: %s", benchmark, exc)
+            self.session.benchmark_intraday_frames = {}
+            self.session.benchmark_daily_df = pd.DataFrame()
 
     def _within_screener_window(self, bar_time: datetime) -> bool:
         start_str = str(self.config.get("intraday_screener_start_time", "10:00"))

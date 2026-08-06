@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +19,11 @@ from .config import get_config
 from .errors import NoMarketDataError, VendorNotConfiguredError, VendorRateLimitError
 from .stockstats_utils import _assert_ohlcv_not_stale
 
+logger = logging.getLogger(__name__)
+
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
+SCHWAB_RATE_LIMIT_MAX_RETRIES = 3
+SCHWAB_RATE_LIMIT_BASE_DELAY = 2.0
 AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
 OPTION_CHAINS_URL = "https://api.schwabapi.com/marketdata/v1/chains"
@@ -218,6 +224,17 @@ def _get_access_token() -> tuple[str, str | None]:
     return access_token, refresh_token
 
 
+def refresh_access_token_if_possible() -> str:
+    """Refresh OAuth access token using cached refresh_token; raises if unavailable."""
+    _, refresh_token = _get_access_token()
+    if not refresh_token:
+        raise SchwabNotConfiguredError(
+            "Cannot refresh Schwab access token (no refresh_token). "
+            "Re-authorize or remove TRADINGAGENTS_SCHWAB_ACCESS_TOKEN."
+        )
+    return _refresh_access_token(refresh_token)
+
+
 def _fetch_price_history(
     symbol: str,
     start_date: str,
@@ -237,6 +254,48 @@ def _fetch_price_history(
     )
 
 
+def _schwab_get_with_retry(
+    url: str,
+    params: dict,
+    *,
+    rate_limit_message: str,
+) -> requests.Response:
+    """GET with token refresh on 401 and exponential backoff on 429."""
+    access_token, refresh_token = _get_access_token()
+
+    for attempt in range(SCHWAB_RATE_LIMIT_MAX_RETRIES + 1):
+        response = requests.get(
+            url,
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            timeout=45,
+        )
+        if response.status_code == 401 and refresh_token:
+            access_token = _refresh_access_token(refresh_token)
+            response = requests.get(
+                url,
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                timeout=45,
+            )
+
+        if response.status_code == 429:
+            if attempt < SCHWAB_RATE_LIMIT_MAX_RETRIES:
+                delay = SCHWAB_RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "Schwab rate limited, retrying in %.0fs (attempt %d/%d)",
+                    delay,
+                    attempt + 1,
+                    SCHWAB_RATE_LIMIT_MAX_RETRIES,
+                )
+                time.sleep(delay)
+                continue
+            raise SchwabRateLimitError(rate_limit_message)
+        return response
+
+    raise SchwabRateLimitError(rate_limit_message)
+
+
 def _fetch_price_history_range(
     symbol: str,
     start_dt: datetime,
@@ -247,7 +306,6 @@ def _fetch_price_history_range(
     if end_dt <= start_dt:
         raise ValueError("end_dt must be after start_dt")
 
-    access_token, refresh_token = _get_access_token()
     params = {
         "symbol": _normalize_symbol(symbol),
         "startDate": int(start_dt.timestamp() * 1000),
@@ -257,21 +315,12 @@ def _fetch_price_history_range(
         "needExtendedHoursData": True,
     }
 
-    def _request(token: str):
-        return requests.get(
-            PRICE_HISTORY_URL,
-            params=params,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=45,
-        )
+    response = _schwab_get_with_retry(
+        PRICE_HISTORY_URL,
+        params,
+        rate_limit_message="Schwab price history request was rate-limited",
+    )
 
-    response = _request(access_token)
-    if response.status_code == 401 and refresh_token:
-        access_token = _refresh_access_token(refresh_token)
-        response = _request(access_token)
-
-    if response.status_code == 429:
-        raise SchwabRateLimitError("Schwab price history request was rate-limited")
     if response.status_code == 401:
         raise SchwabNotConfiguredError("Schwab access token unauthorized; re-authorize and retry")
     if response.status_code >= 400:
@@ -285,23 +334,12 @@ def _fetch_price_history_range(
 
 
 def _authenticated_get(url: str, params: dict, *, no_data_symbol: str, no_data_detail: str) -> dict:
-    access_token, refresh_token = _get_access_token()
+    response = _schwab_get_with_retry(
+        url,
+        params,
+        rate_limit_message="Schwab request was rate-limited",
+    )
 
-    def _request(token: str):
-        return requests.get(
-            url,
-            params=params,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-            timeout=45,
-        )
-
-    response = _request(access_token)
-    if response.status_code == 401 and refresh_token:
-        access_token = _refresh_access_token(refresh_token)
-        response = _request(access_token)
-
-    if response.status_code == 429:
-        raise SchwabRateLimitError("Schwab request was rate-limited")
     if response.status_code == 401:
         raise SchwabNotConfiguredError("Schwab access token unauthorized; re-authorize and retry")
     if response.status_code >= 400:
@@ -364,7 +402,9 @@ def get_implied_move_data(symbol: str, trade_date: str, as_of_datetime: str) -> 
         frequency_type="minute",
         frequency=5,
     )
-    intraday_df = _candles_to_df(intraday_candles, symbol, trade_date)
+    intraday_df = _candles_to_df(
+        intraday_candles, symbol, trade_date, session_timezone="America/New_York"
+    )
     intraday_df = intraday_df[intraday_df["Date"] <= pd.to_datetime(as_of_datetime)]
     if intraday_df.empty:
         raise NoMarketDataError(symbol, canonical, "no intraday bars to compute implied move context")
@@ -435,10 +475,20 @@ def get_implied_move_data(symbol: str, trade_date: str, as_of_datetime: str) -> 
     return header + csv_string
 
 
-def _candles_to_df(candles: list[dict], symbol: str, curr_date: str) -> pd.DataFrame:
+def _candles_to_df(
+    candles: list[dict],
+    symbol: str,
+    curr_date: str,
+    *,
+    session_timezone: str | None = None,
+) -> pd.DataFrame:
     rows = []
     for c in candles:
-        ts = pd.to_datetime(c.get("datetime"), unit="ms", utc=True).tz_localize(None)
+        ts = pd.to_datetime(c.get("datetime"), unit="ms", utc=True)
+        if session_timezone:
+            ts = ts.tz_convert(session_timezone).tz_localize(None)
+        else:
+            ts = ts.tz_localize(None)
         rows.append(
             {
                 "Date": ts,
@@ -613,7 +663,9 @@ def get_candles_multi_timeframe(
             ) from exc
         if not candles:
             return minutes, pd.DataFrame()
-        data = _candles_to_df(candles, symbol, curr_date)
+        data = _candles_to_df(
+            candles, symbol, curr_date, session_timezone="America/New_York"
+        )
         mask = (data["Date"] >= pd.to_datetime(session_start)) & (
             data["Date"] <= pd.to_datetime(as_of)
         )
@@ -643,6 +695,40 @@ def get_candles_multi_timeframe(
             result[minutes] = df
 
     return result
+
+
+def get_intraday_5m_candles(
+    symbol: str,
+    session_start: datetime,
+    as_of: datetime,
+) -> pd.DataFrame:
+    """Fetch session 5m OHLCV bars (single pricehistory call per symbol)."""
+    if as_of <= session_start:
+        raise ValueError("as_of must be after session_start")
+
+    curr_date = as_of.strftime("%Y-%m-%d")
+    canonical = _normalize_symbol(symbol)
+    candles = _fetch_price_history_range(
+        symbol=symbol,
+        start_dt=session_start,
+        end_dt=as_of,
+        frequency_type="minute",
+        frequency=5,
+    )
+    if not candles:
+        raise NoMarketDataError(symbol, canonical, "Schwab returned no 5m candles")
+    data = _candles_to_df(candles, symbol, curr_date, session_timezone="America/New_York")
+    mask = (data["Date"] >= pd.to_datetime(session_start)) & (
+        data["Date"] <= pd.to_datetime(as_of)
+    )
+    frame = data.loc[mask].copy()
+    if frame.empty:
+        raise NoMarketDataError(
+            symbol,
+            canonical,
+            f"no 5m rows between {session_start} and {as_of}",
+        )
+    return frame
 
 
 def get_market_internals(

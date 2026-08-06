@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pytest
 
+from cli.dashboard_input import DashboardInputHandler
 from cli.intraday_display import (
     DashboardLogHandler,
     IntradayDashboardBuffer,
@@ -191,3 +192,99 @@ def test_detail_panel_shows_volume_pressure_section():
     assert "buy_percent" in detail
     assert "premarket_volume" in detail
     assert "relative_volume_5m" in detail
+
+
+def _scan_state(symbol: str, *, bar_time: datetime | None = None) -> SymbolScanState:
+    return SymbolScanState(
+        symbol=symbol,
+        bar_time=bar_time or datetime(2026, 7, 31, 10, 0),
+        daily_bias_direction="bullish",
+        strategy_name="base_momentum",
+        strategy_direction="long",
+        factors_met=["close_above_vwap"],
+        factors_missing=[],
+        gate1_passed=True,
+        gate2_passed=False,
+        gate_passed=False,
+        final_direction=None,
+        setup_score=1,
+    )
+
+
+@pytest.mark.unit
+def test_manual_select_pins_detail_panel():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.select_symbol("NVDA", source="user")
+    assert session.selected_detail_symbol == "NVDA"
+    assert session.detail_follow_mode is False
+
+
+@pytest.mark.unit
+def test_record_scan_state_respects_pin():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.select_symbol("NVDA", source="user")
+    buffer.record_scan_state(_scan_state("AAPL"))
+    assert session.selected_detail_symbol == "NVDA"
+
+
+@pytest.mark.unit
+def test_record_scan_state_follows_when_follow_mode_on():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.record_scan_state(_scan_state("NVDA"))
+    buffer.record_scan_state(_scan_state("AAPL"))
+    assert session.selected_detail_symbol == "AAPL"
+    assert session.detail_follow_mode is True
+
+
+@pytest.mark.unit
+def test_select_relative_wraps_watchlist():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.select_symbol("NVDA", source="user")
+    buffer.select_relative(1)
+    assert session.selected_detail_symbol == "AAPL"
+    buffer.select_relative(1)
+    assert session.selected_detail_symbol == "NVDA"
+
+
+@pytest.mark.unit
+def test_removed_pinned_symbol_falls_back_to_first():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.select_symbol("AAPL", source="user")
+    session.watchlist = ["NVDA"]
+    snap = buffer.snapshot()
+    assert snap["selected_symbol"] == "NVDA"
+    assert session.detail_follow_mode is False
+
+
+@pytest.mark.unit
+def test_toggle_follow_mode_jumps_to_most_recent_scan():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    buffer.select_symbol("NVDA", source="user")
+    buffer.record_scan_state(_scan_state("AAPL", bar_time=datetime(2026, 7, 31, 10, 5)))
+    buffer.record_scan_state(_scan_state("NVDA", bar_time=datetime(2026, 7, 31, 10, 0)))
+    buffer.toggle_follow_mode()
+    assert session.detail_follow_mode is True
+    assert session.selected_detail_symbol == "AAPL"
+
+
+@pytest.mark.unit
+def test_dashboard_input_handler_key_bindings():
+    session = _session()
+    buffer = IntradayDashboardBuffer(session=session, strategy_name="base_momentum")
+    handler = DashboardInputHandler(buffer)
+    buffer.select_symbol("NVDA", source="user")
+
+    handler._handle_key("j")
+    assert session.selected_detail_symbol == "AAPL"
+
+    handler._handle_key("k")
+    assert session.selected_detail_symbol == "NVDA"
+
+    handler._handle_key("f")
+    assert session.detail_follow_mode is True

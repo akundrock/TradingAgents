@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tradingagents.intraday.gating import GatingLayer
+from tradingagents.intraday.gating import GatingLayer, resolve_require_daily_bias_alignment
 from tradingagents.intraday.mtf_validator import MTFValidationResult
 from tradingagents.intraday.session import DailyBiasReport
 from tradingagents.intraday.strategy import StrategyResult
@@ -112,6 +112,57 @@ def test_gate2_skipped_when_alignment_disabled():
         _strategy_result(),
         _bias("bullish"),
         {"intraday_require_daily_bias_alignment": False},
+    )
+    assert result.passed is True
+    assert "disabled" in result.gate2_reason
+
+
+@pytest.mark.unit
+def test_resolve_require_daily_bias_alignment_orb_breakout_screener():
+    config = {
+        "intraday_require_daily_bias_alignment": True,
+        "intraday_orb_breakout_screener_disable_gate2": True,
+        "intraday_strategy": "orb_breakout",
+        "intraday_screener_enabled": True,
+    }
+    assert resolve_require_daily_bias_alignment(config) is False
+
+
+@pytest.mark.unit
+def test_resolve_require_daily_bias_alignment_orb_breakout_static_watchlist():
+    config = {
+        "intraday_require_daily_bias_alignment": True,
+        "intraday_orb_breakout_screener_disable_gate2": True,
+        "intraday_strategy": "orb_breakout",
+        "intraday_screener_enabled": False,
+    }
+    assert resolve_require_daily_bias_alignment(config) is True
+
+
+@pytest.mark.unit
+def test_resolve_require_daily_bias_alignment_orb_breakout_screener_opt_in():
+    config = {
+        "intraday_require_daily_bias_alignment": True,
+        "intraday_orb_breakout_screener_disable_gate2": False,
+        "intraday_strategy": "orb_breakout",
+        "intraday_screener_enabled": True,
+    }
+    assert resolve_require_daily_bias_alignment(config) is True
+
+
+@pytest.mark.unit
+def test_gate2_skipped_for_orb_breakout_screener_with_neutral_bias():
+    gate = GatingLayer()
+    result = gate.evaluate(
+        _mtf(trend_30min="down"),
+        _strategy_result(direction="short"),
+        _bias("neutral"),
+        {
+            "intraday_require_daily_bias_alignment": True,
+            "intraday_orb_breakout_screener_disable_gate2": True,
+            "intraday_strategy": "orb_breakout",
+            "intraday_screener_enabled": True,
+        },
     )
     assert result.passed is True
     assert "disabled" in result.gate2_reason

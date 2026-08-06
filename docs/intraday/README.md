@@ -53,7 +53,8 @@ For a capability matrix and prioritized backlog, see [STATUS.md](STATUS.md).
 |--------|----------------|
 | `session.py` | `TradingSession`, `DailyBiasReport`, `IntradaySignal`, screener metadata |
 | `scanner.py` | `WatchlistScanner` — scheduler, pre-market, screener refresh, bar-close evaluation |
-| `mtf_validator.py` | `MultiTimeframeValidator` — Schwab MTF fetch + indicators (5/15/30/60m + daily) |
+| `mtf_validator.py` | `MultiTimeframeValidator` — 5m fetch + local resample (default) or legacy multi-TF fetch; per-scan benchmark cache |
+| `frame_enrichment.py` | Shared `enriched_frames_from_5m()` for screener and strategy paths |
 | `premarket_cache.py` | Disk cache for daily bias (`premarket_bias.json`) |
 | `universe_screener.py` | Volume universe + RRS pre-filter (ThinkScript scanner parity) |
 | `gating.py` | Two-gate validation (strategy-first, not Magpie) |
@@ -105,7 +106,7 @@ Magpie is **not** run in the intraday scan loop (remains in the daily graph). Ga
 
 **Gate 1 — Strategy:** `check_setup()` must pass with direction `long` or `short`. Factors logged at INFO.
 
-**Gate 2 — MTF alignment (optional):** When `intraday_require_daily_bias_alignment` is `true`, 30m trend must align with pre-market daily bias. Disable when the strategy encodes bias/trend internally (typical for `pro_trader_dashboard`).
+**Gate 2 — MTF alignment (optional):** When `intraday_require_daily_bias_alignment` is `true`, 30m trend must align with pre-market daily bias. Disable when the strategy encodes bias/trend internally (typical for `pro_trader_dashboard`). For `orb_breakout` with `--screener`, Gate 2 is auto-disabled by default (`intraday_orb_breakout_screener_disable_gate2`) because screener-added symbols use neutral daily bias unless pre-market is run for new symbols.
 
 When both gates pass, `IntradayTradingGraph.propagate_intraday()` runs.
 
@@ -115,9 +116,17 @@ When both gates pass, `IntradayTradingGraph.propagate_intraday()` runs.
 
 Three-layer pipeline (see [pro-trader-dashboard-spec.md](../pro-trader-dashboard-spec.md) §11):
 
-1. **Volume universe** — Schwab Streamer keys (default `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0`)
-2. **RRS pre-filter** — `RRS > 0` on 5m + 30m + 60m vs SPY (ThinkScript scanner parity; default `min_rrs_aligned=3`)
-3. **Bar-close strategy** — existing `pro_trader_dashboard` entry logic
+1. **Universe discovery** — `intraday_screener_source`:
+   - `auto` (default): `sp500_quotes` when `require_sp500=true` (volume-ranked top N); else Streamer actives
+   - `sp500_quotes`: REST quotes over full SP500, rank by `totalVolume`, up to `candidate_limit` before RRS
+   - `sp500_rrs`: REST quotes for **all** SP500 → min price gate → multi-TF RRS on full set → rank by 5m RRS → top `candidate_limit` to watchlist (screener picks prioritized over base symbols)
+   - `streamer`: Schwab Streamer exchange actives (`NASDAQ_VOLUME_0`, `NYSE_VOLUME_0`)
+2. **Price pre-filter** — optional min price + S&P 500 check (`sp500_constituents.json`; skipped for `sp500_quotes` / `sp500_rrs`; refresh with `tradingagents refresh-sp500 --write`)
+3. **Pluggable filter pipeline** — configure via `intraday_screener_filters`:
+   - `rrs` (default): 5m/30m/60m RRS vs SPY; benchmark 5m fetched once per refresh
+   - `orb`: opening range breakout (9:30–10:00 ET OR, breakout latch after 10:00)
+   - Combine with `intraday_screener_filter_mode`: `any` (union) or `all` (intersection)
+4. **Bar-close strategy** — `pro_trader_dashboard`, `orb_breakout`, or `base_momentum`
 
 Static symbols from CLI/config are always kept (`base_watchlist`). Screener adds/removes symbols after `intraday_screener_start_time` (default 10:00 ET).
 
@@ -140,6 +149,7 @@ Key settings in `tradingagents/default_config.py`. Full table: [CONFIGURATION.md
 
 # Gating
 "intraday_require_daily_bias_alignment": True,
+"intraday_orb_breakout_screener_disable_gate2": True,  # auto-off Gate 2 for orb_breakout + screener
 
 # Pro Trader (when strategy=pro_trader_dashboard)
 "pro_trader_benchmark": "SPY",
@@ -157,7 +167,13 @@ Key settings in `tradingagents/default_config.py`. Full table: [CONFIGURATION.md
 "intraday_screener_enabled": False,
 "intraday_screener_interval_minutes": 15,
 "intraday_screener_keys": ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"],
+"intraday_screener_source": "auto",  # or sp500_rrs for RRS-first SP500 scan
+"intraday_screener_rank_mode": "pass_only",  # rank_all scores all symbols
+"intraday_screener_rank_rrs_timeframe": "30m",  # sort key: 5m, 30m, or 60m
+"intraday_screener_max_concurrent_symbols": None,  # optional screener throttle
 "intraday_screener_min_rrs_aligned": 3,
+"intraday_screener_filters": ["rrs"],  # or ["orb"], ["orb", "rrs"]
+"intraday_screener_filter_mode": "any",
 "intraday_screener_max_watchlist": 12,
 ```
 
@@ -175,6 +191,12 @@ tradingagents intraday NVDA --strategy pro_trader_dashboard --dry-run
 # Dynamic screener only (no static symbols)
 tradingagents intraday --screener --strategy pro_trader_dashboard --dry-run
 
+# ORB screener + ORB strategy
+tradingagents intraday --screener --screener-filters orb --strategy orb_breakout --dry-run
+
+# RRS debug (compare values to TOS)
+tradingagents rrs-debug AAPL --timeframes 5m,30m,60m
+
 # Static base + screener additions
 tradingagents intraday SPY --screener --screener-interval 15 --strategy pro_trader_dashboard
 
@@ -187,6 +209,11 @@ tradingagents intraday --watchlist SPY,COHR        # restore cache for existing 
 # Logging
 tradingagents intraday SPY --verbose
 tradingagents intraday SPY --log-level DEBUG
+
+# Validate screener volume discovery (Streamer vs SP500 REST quotes)
+tradingagents screener-debug --source both --limit 20 --compare
+tradingagents screener-debug --source sp500_quotes --limit 50
+tradingagents screener-debug --source sp500_rrs --limit 20
 ```
 
 ### Live dashboard
@@ -196,6 +223,19 @@ Default on TTY (`--live/--no-live`):
 - Watchlist: bias, source (`static`/`scre`), gates G1/G2, score, direction
 - Detail: pre-market reports, strategy factors, screener RRS snapshot
 - Recent signals + `tradingagents.*` log tail
+
+**Symbol navigation** (while the scanner runs):
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k` | Previous symbol in watchlist |
+| `↓` / `j` | Next symbol in watchlist |
+| `Home` / `g` | Jump to first symbol |
+| `End` | Jump to last symbol |
+| `Enter` | Pin current symbol |
+| `f` | Toggle follow mode (auto-follow latest scan/signal) |
+
+Manual navigation pins the detail panel (`[pinned]` in the title). Press `f` to resume auto-follow (`[follow]`). The watchlist table still updates on every scan; only the detail panel selection is pinned.
 
 ### Outputs
 

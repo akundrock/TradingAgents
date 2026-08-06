@@ -47,6 +47,13 @@ def get_sector_etf(symbol: str) -> str | None:
     return etfs.get(sector)
 
 
+def is_sp500_constituent(symbol: str) -> bool:
+    """Return True if symbol is in the S&P 500 (SPY index) constituent list."""
+    from tradingagents.intraday.indicators.sp500_constituents import is_sp500_constituent as _is_sp500
+
+    return _is_sp500(symbol)
+
+
 def sector_aligned_for_direction(
     symbol_power: float,
     sector_power: float,

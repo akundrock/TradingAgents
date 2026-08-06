@@ -438,8 +438,11 @@ tradingagents  # Fully configured, no interaction
 | `intraday_session_end` | str | `16:00` | — | ET session end |
 | `intraday_timezone` | str | `America/New_York` | — | Scheduler timezone |
 | `intraday_mtf_timeframes` | list[int] | `[5, 30]` | — | Schwab-fetchable intervals (minutes). `pro_trader_dashboard` auto-adds 15/30/60. |
+| `intraday_mtf_fetch_mode` | str | `5m_resample` | — | `5m_resample` (one 5m call per symbol; 15/30/60 derived locally) or `multi` (legacy parallel fetch per TF) |
+| `intraday_benchmark_cache_per_scan` | bool | `True` | — | Fetch SPY/benchmark intraday frames once per scan cycle (shared across watchlist) |
 | `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | `base_momentum` or `pro_trader_dashboard` |
 | `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: 30m trend vs daily bias |
+| `intraday_orb_breakout_screener_disable_gate2` | bool | `True` | — | When `orb_breakout` + screener, skip Gate 2 unless set to `false` |
 | `intraday_output_dir` | str | `~/.tradingagents/intraday` | — | Signals CSV and premarket cache root |
 | `intraday_max_concurrent_symbols` | int | `5` | — | Parallel symbol evaluation / screener RRS batch size |
 | `intraday_signal_cooldown_bars` | int | `3` | — | Suppress duplicate same-direction signals within N scan intervals |
@@ -447,16 +450,28 @@ tradingagents  # Fully configured, no interaction
 | `intraday_restore_premarket_bias` | bool | `True` | `TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS` | Restore `premarket_bias.json` on same-day restart |
 | `intraday_screener_enabled` | bool | `False` | — | Dynamic volume + RRS watchlist screener |
 | `intraday_screener_interval_minutes` | int | `15` | — | Screener refresh cadence |
-| `intraday_screener_keys` | list[str] | `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0` | — | Schwab Streamer `SCREENER_EQUITY` keys |
-| `intraday_screener_candidate_limit` | int | `50` | — | Max symbols from streamer before RRS filter |
+| `intraday_screener_keys` | list[str] | `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0` | — | Schwab Streamer volume rankings (exchange actives; not SPY index) |
+| `intraday_screener_candidate_limit` | int | `50` | — | Max symbols before RRS (`sp500_quotes`/streamer) or **after** RRS ranking (`sp500_rrs`) |
 | `intraday_screener_rrs_timeframes` | list[int] | `[5, 30, 60]` | — | RRS timeframes for screener filter |
-| `intraday_screener_min_rrs_aligned` | int | `3` | — | Min aligned RRS TFs (TOS 3-scan intersection parity) |
+| `intraday_screener_min_rrs_aligned` | int | `3` | — | Min aligned RRS TFs (`0` = pure rank with `rank_all`) |
+| `intraday_screener_rank_mode` | str | `pass_only` | — | `pass_only` (reject below min_aligned) or `rank_all` (score all, sort by rank RRS TF) |
+| `intraday_screener_rank_rrs_timeframe` | str | `5m` | — | RRS timeframe for screener sort key: `5m`, `30m`, or `60m` |
 | `intraday_screener_require_relative_volume` | bool | `False` | — | Optional 5m rvolume > 1 before RRS ranking |
+| `intraday_screener_min_price` | float | `10.0` | `TRADINGAGENTS_INTRADAY_SCREENER_MIN_PRICE` | Min last price from streamer (0 = no filter) |
+| `intraday_screener_require_sp500` | bool | `True` | `TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_SP500` | Require S&P 500 membership via `sp500_constituents.json` (not `intraday_screener_keys`) |
+| `intraday_screener_source` | str | `auto` | `TRADINGAGENTS_INTRADAY_SCREENER_SOURCE` | `auto`, `sp500_quotes` (volume-ranked), `sp500_rrs` (RRS-ranked full SP500), or `streamer` |
+| `intraday_screener_max_concurrent_symbols` | int | `None` | — | Screener RRS batch parallelism (defaults to `intraday_max_concurrent_symbols`) |
 | `intraday_screener_max_watchlist` | int | `12` | — | Cap merged watchlist size |
 | `intraday_screener_direction` | str | `long` | — | `long`, `short`, or `both` for RRS alignment |
 | `intraday_screener_start_time` | str | `10:00` | — | ET — no screener refresh before OR window ends |
 | `intraday_screener_symbol_cooldown_minutes` | int | `30` | — | Cooldown after symbol removed (config only; enforcement pending) |
 | `intraday_screener_run_premarket_for_new` | bool | `False` | — | Run LLM pre-market for screener-added symbols |
+| `intraday_screener_filters` | list[str] | `["rrs"]` | — | Pluggable screener filter pipeline: `orb`, `rrs` (comma-separated or list) |
+| `intraday_screener_filter_mode` | str | `any` | — | `any` (union — pass if any filter matches) or `all` (intersection) |
+| `screener_orb_direction` | str | `long` | — | ORB filter direction: `long`, `short`, or `both` |
+| `screener_orb_entry_mode` | str | `wick_touch` | — | ORB breakout mode: `wick_touch` or `close_above` |
+| `screener_orb_require_price_beyond` | bool | `True` | — | Require current close beyond ORH/ORL at eval time |
+| `screener_orb_min_range_width` | float | `0.0` | — | Minimum opening range width (0 = no filter) |
 | `pro_trader_benchmark` | str | `SPY` | — | RRS benchmark (`pro_trader_dashboard`) |
 | `pro_trader_entry_mode` | str | `wick_touch` | — | ORB entry: `wick_touch` or `close_above` |
 | `pro_trader_min_rs_timeframes` | int | `4` | — | Min aligned RRS TFs for strategy pass |

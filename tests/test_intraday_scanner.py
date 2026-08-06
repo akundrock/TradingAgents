@@ -361,6 +361,10 @@ def test_screener_refresh_updates_watchlist(monkeypatch):
                 aligned_count=3,
                 relative_volume_5m=1.5,
                 direction="long",
+                rank_score=1.2,
+                rank_rrs_timeframe="5m",
+                passed_filter="rrs",
+                filter_metadata={},
             ),
         ],
     )

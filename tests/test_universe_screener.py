@@ -23,6 +23,96 @@ def _ohlcv(rows: int = 30) -> pd.DataFrame:
     )
 
 
+def _patch_5m_candles(monkeypatch, df: pd.DataFrame | None = None):
+    sym_df = df or _ohlcv()
+
+    def fake_5m(symbol, start, end):
+        return sym_df.copy()
+
+    for target in (
+        "tradingagents.intraday.universe_screener.get_intraday_5m_candles",
+        "tradingagents.intraday.screener_filters.rrs_filter.get_intraday_5m_candles",
+    ):
+        monkeypatch.setattr(target, fake_5m)
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        lambda dfs: {tf: frame.copy() for tf, frame in dfs.items()},
+    )
+
+
+@pytest.mark.unit
+def test_universe_screener_volume_pre_filter():
+    config = {
+        "intraday_screener_min_price": 10.0,
+        "intraday_screener_require_sp500": True,
+    }
+    screener = UniverseScreener(config)
+    candidates = [
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=1000000),
+        ScreenerCandidate(symbol="SNAP", last_price=15.0, total_volume=900000),
+        ScreenerCandidate(symbol="F", last_price=8.0, total_volume=800000),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=700000),
+    ]
+    filtered, summary = screener._filter_volume_candidates(candidates)
+    symbols = [c.symbol for c in filtered]
+    assert symbols == ["NVDA", "AAPL"]
+    assert "not_sp500" in summary
+    assert "price=" in summary
+
+
+@pytest.mark.unit
+def test_universe_screener_sp500_quotes_source(monkeypatch):
+    config = {
+        "intraday_screener_source": "sp500_quotes",
+        "intraday_screener_candidate_limit": 5,
+        "intraday_screener_max_watchlist": 5,
+        "intraday_screener_rrs_timeframes": [5, 30, 60],
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_screener_min_price": 10.0,
+        "intraday_screener_require_sp500": True,
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_candidates = [
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=1000000),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=800000),
+    ]
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.schwab_quotes.fetch_sp500_volume_candidates",
+        lambda limit: mock_candidates[:limit],
+    )
+    _patch_5m_candles(monkeypatch)
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        lambda sym_frames, bench_frames, length=12: {"5m": 1.0, "30m": 0.5, "60m": 0.3},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    watchlist, screened = screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
+
+    assert "NVDA" in watchlist
+    assert len(screened) >= 1
+
+
+@pytest.mark.unit
+def test_resolve_screener_source_auto():
+    from tradingagents.intraday.universe_screener import resolve_screener_source
+
+    assert resolve_screener_source({"intraday_screener_source": "auto", "intraday_screener_require_sp500": True}) == "sp500_quotes"
+    assert resolve_screener_source({"intraday_screener_source": "auto", "intraday_screener_require_sp500": False}) == "streamer"
+    assert resolve_screener_source({"intraday_screener_source": "streamer"}) == "streamer"
+    assert resolve_screener_source({"intraday_screener_source": "sp500_rrs"}) == "sp500_rrs"
+
+
 @pytest.mark.unit
 def test_universe_screener_rrs_filter(monkeypatch):
     config = {
@@ -43,29 +133,13 @@ def test_universe_screener_rrs_filter(monkeypatch):
         ScreenerCandidate(symbol="AAPL", total_volume=800000, volume=40000),
     ]
 
-    sym_df = _ohlcv()
-    bench_df = _ohlcv()
-
-    def fake_mtf(symbol, start, end, timeframes=None):
-        return {tf: sym_df.copy() for tf in (timeframes or [5, 30])}
-
-    def fake_indicators(dfs):
-        return {tf: df.copy() for tf, df in dfs.items()}
-
+    _patch_5m_candles(monkeypatch)
     monkeypatch.setattr(
-        "tradingagents.intraday.universe_screener.get_candles_multi_timeframe",
-        fake_mtf,
-    )
-    monkeypatch.setattr(
-        "tradingagents.intraday.universe_screener.compute_mtf_indicators",
-        fake_indicators,
-    )
-    monkeypatch.setattr(
-        "tradingagents.intraday.universe_screener.compute_rrs_multi_timeframe",
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
         lambda sym_frames, bench_frames, length=12: {"5m": 1.0, "30m": 0.5, "60m": 0.3},
     )
     monkeypatch.setattr(
-        "tradingagents.intraday.universe_screener.compute_relative_volume",
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
         lambda df, tf: 1.5,
     )
 
@@ -76,3 +150,222 @@ def test_universe_screener_rrs_filter(monkeypatch):
     assert "SPY" in watchlist
     assert len(screened) >= 1
     assert screened[0].aligned_count >= 1
+
+
+@pytest.mark.unit
+def test_universe_screener_sp500_rrs_ranks_and_merges_screener_first(monkeypatch):
+    config = {
+        "intraday_screener_source": "sp500_rrs",
+        "intraday_screener_candidate_limit": 2,
+        "intraday_screener_max_watchlist": 4,
+        "intraday_screener_rrs_timeframes": [5, 30, 60],
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_screener_min_price": 10.0,
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_candidates = [
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=100),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=200),
+        ScreenerCandidate(symbol="MSFT", last_price=400.0, total_volume=300),
+    ]
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.schwab_quotes.fetch_sp500_quote_candidates",
+        lambda **kwargs: list(mock_candidates),
+    )
+    sym_df = _ohlcv()
+    close_by_symbol = {"MSFT": 103.0, "AAPL": 102.9, "NVDA": 102.0}
+
+    def fake_5m(symbol, start, end):
+        df = sym_df.copy()
+        if symbol in close_by_symbol:
+            df["Close"] = close_by_symbol[symbol]
+        return df
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.universe_screener.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        lambda dfs: {tf: frame.copy() for tf, frame in dfs.items()},
+    )
+
+    def fake_rrs(sym_frames, bench_frames, length=12):
+        symbol_close = float(sym_frames[5]["Close"].iloc[-1])
+        score = symbol_close - 100.0
+        return {"5m": score, "30m": 0.5, "60m": 0.3}
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        fake_rrs,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    watchlist, screened = screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
+
+    assert len(screened) == 2
+    assert screened[0].symbol == "MSFT"
+    assert screened[1].symbol == "AAPL"
+    assert watchlist[0] == "MSFT"
+    assert "SPY" in watchlist
+
+
+@pytest.mark.unit
+def test_resolve_rank_rrs_timeframe():
+    from tradingagents.intraday.universe_screener import resolve_rank_rrs_timeframe
+
+    assert resolve_rank_rrs_timeframe({"intraday_screener_rank_rrs_timeframe": "30m"}) == "30m"
+    assert resolve_rank_rrs_timeframe({"intraday_screener_rank_rrs_timeframe": "60"}) == "60m"
+    assert resolve_rank_rrs_timeframe({}) == "5m"
+
+
+@pytest.mark.unit
+def test_universe_screener_ranks_by_30m_rrs(monkeypatch):
+    config = {
+        "intraday_screener_source": "sp500_rrs",
+        "intraday_screener_candidate_limit": 2,
+        "intraday_screener_max_watchlist": 4,
+        "intraday_screener_rrs_timeframes": [5, 30, 60],
+        "intraday_screener_rank_rrs_timeframe": "30m",
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_screener_min_price": 10.0,
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_candidates = [
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=100),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=200),
+        ScreenerCandidate(symbol="MSFT", last_price=400.0, total_volume=300),
+    ]
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.schwab_quotes.fetch_sp500_quote_candidates",
+        lambda **kwargs: list(mock_candidates),
+    )
+    _patch_5m_candles(monkeypatch)
+
+    rrs_30m_by_symbol = {"MSFT": 2.5, "AAPL": 1.8, "NVDA": 0.5}
+
+    def fake_rrs(sym_frames, bench_frames, length=12):
+        close = float(sym_frames[5]["Close"].iloc[-1])
+        sym = "MSFT" if close > 102 else "AAPL" if close > 101 else "NVDA"
+        return {
+            "5m": close - 100.0,
+            "30m": rrs_30m_by_symbol.get(sym, 0.0),
+            "60m": 0.3,
+        }
+
+    sym_df = _ohlcv()
+    close_by_symbol = {"MSFT": 103.0, "AAPL": 102.0, "NVDA": 101.0}
+
+    def fake_5m(symbol, start, end):
+        df = sym_df.copy()
+        if symbol in close_by_symbol:
+            df["Close"] = close_by_symbol[symbol]
+        return df
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.universe_screener.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        lambda dfs: {tf: frame.copy() for tf, frame in dfs.items()},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        fake_rrs,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    watchlist, screened = screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
+
+    assert len(screened) == 2
+    assert screened[0].symbol == "MSFT"
+    assert screened[0].rank_rrs_timeframe == "30m"
+    assert screened[0].rank_score == 2.5
+    assert screened[1].symbol == "AAPL"
+    assert watchlist[0] == "MSFT"
+
+
+@pytest.mark.unit
+def test_benchmark_fetched_once_per_refresh(monkeypatch):
+    config = {
+        "intraday_screener_keys": ["NASDAQ_VOLUME_0"],
+        "intraday_screener_candidate_limit": 10,
+        "intraday_screener_max_watchlist": 5,
+        "intraday_screener_rrs_timeframes": [5, 30, 60],
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_screener = MagicMock()
+    mock_screener.fetch_top_symbols.return_value = [
+        ScreenerCandidate(symbol="NVDA", total_volume=1000000, volume=50000),
+        ScreenerCandidate(symbol="AAPL", total_volume=800000, volume=40000),
+    ]
+
+    sym_df = _ohlcv()
+    spy_calls = 0
+
+    def fake_5m(symbol, start, end):
+        nonlocal spy_calls
+        if symbol == "SPY":
+            spy_calls += 1
+        return sym_df.copy()
+
+    monkeypatch.setattr(
+        "tradingagents.intraday.universe_screener.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.get_intraday_5m_candles",
+        fake_5m,
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.frame_enrichment.compute_mtf_indicators",
+        lambda dfs: {tf: frame.copy() for tf, frame in dfs.items()},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        lambda sym_frames, bench_frames, length=12: {"5m": 1.0, "30m": 0.5, "60m": 0.3},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config, screener=mock_screener)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
+
+    assert spy_calls == 1
