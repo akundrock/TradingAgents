@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from tradingagents.dataflows.schwab import _authenticated_get, _normalize_symbol
 from tradingagents.dataflows.schwab_streamer import ScreenerCandidate
+
+ScreenerDirection = Literal["long", "short", "both"]
 
 logger = logging.getLogger(__name__)
 
@@ -196,3 +199,119 @@ def fetch_sp500_volume_candidates(
             len(symbols),
         )
     return top
+
+
+def rs_quote_spread(candidate: ScreenerCandidate, benchmark_net_change: float) -> float:
+    """Session relative performance vs benchmark (quote netChange spread)."""
+    return float(candidate.net_change) - float(benchmark_net_change)
+
+
+def _rs_spread_score(candidate: ScreenerCandidate, benchmark_net_change: float) -> float:
+    return rs_quote_spread(candidate, benchmark_net_change)
+
+
+def _rs_spread_rank_key(
+    candidate: ScreenerCandidate,
+    benchmark_net_change: float,
+    *,
+    use_volume_tiebreak: bool = True,
+) -> float:
+    spread = _rs_spread_score(candidate, benchmark_net_change)
+    if not use_volume_tiebreak:
+        return spread
+    volume = max(int(candidate.total_volume or candidate.volume or 0), 1)
+    return spread * math.log10(volume)
+
+
+def rank_sp500_by_relative_change(
+    limit: int,
+    direction: ScreenerDirection = "long",
+    *,
+    benchmark: str = "SPY",
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_workers: int = 5,
+    use_volume_tiebreak: bool = True,
+) -> list[ScreenerCandidate]:
+    """Rank SP500 by quote netChange vs benchmark; return direction-aware shortlist."""
+    from tradingagents.intraday.indicators.sp500_constituents import load_sp500_constituents
+
+    symbols = sorted(load_sp500_constituents())
+    if not symbols or limit <= 0:
+        return []
+
+    bench_sym = _normalize_symbol(benchmark)
+    quote_symbols = sorted({*symbols, bench_sym})
+    quotes = get_quotes_batched(
+        quote_symbols,
+        chunk_size=chunk_size,
+        max_workers=max_workers,
+    )
+    bench_quote = quotes.get(bench_sym)
+    bench_net = float(bench_quote.net_change) if bench_quote else 0.0
+
+    candidates = [_quote_to_candidate(q) for sym, q in quotes.items() if sym != bench_sym]
+    if not candidates:
+        logger.warning("SP500 RS quotes screener: 0 symbol quotes returned")
+        return []
+
+    ranked = sorted(
+        candidates,
+        key=lambda c: _rs_spread_rank_key(
+            c,
+            bench_net,
+            use_volume_tiebreak=use_volume_tiebreak,
+        ),
+        reverse=True,
+    )
+
+    if direction == "short":
+        shortlist = list(reversed(ranked[-limit:]))
+    elif direction == "both":
+        half = max(limit // 2, 1)
+        top = ranked[:half]
+        bottom = list(reversed(ranked[-half:]))
+        seen: set[str] = set()
+        shortlist: list[ScreenerCandidate] = []
+        for candidate in top + bottom:
+            if candidate.symbol in seen:
+                continue
+            seen.add(candidate.symbol)
+            shortlist.append(candidate)
+            if len(shortlist) >= limit:
+                break
+    else:
+        shortlist = ranked[:limit]
+
+    if shortlist:
+        top_summary = ", ".join(
+            f"{c.symbol}({c.net_change:+.2f})" for c in shortlist[:8]
+        )
+        logger.info(
+            "SP500 RS quotes screener: %d/%d symbols direction=%s bench_net=%.2f; top: %s",
+            len(shortlist),
+            len(candidates),
+            direction,
+            bench_net,
+            top_summary,
+        )
+    return shortlist
+
+
+def fetch_sp500_rs_quote_candidates(
+    limit: int,
+    direction: ScreenerDirection = "long",
+    *,
+    benchmark: str = "SPY",
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    max_workers: int = 5,
+    use_volume_tiebreak: bool = True,
+) -> list[ScreenerCandidate]:
+    """Fetch SP500 quotes and return RS pre-ranked shortlist (before intraday RRS)."""
+    return rank_sp500_by_relative_change(
+        limit,
+        direction,
+        benchmark=benchmark,
+        chunk_size=chunk_size,
+        max_workers=max_workers,
+        use_volume_tiebreak=use_volume_tiebreak,
+    )

@@ -117,6 +117,64 @@ def test_fetch_sp500_volume_candidates_ranks_by_volume():
     assert candidates[0].screener_key == "SP500_QUOTES"
 
 
+def test_rank_sp500_by_relative_change_long():
+    fake_quotes = {
+        "SPY": _parse_quote_entry("SPY", {"quote": {"netChange": 1.0}}),
+        "NVDA": _parse_quote_entry("NVDA", {"quote": {"netChange": 3.0, "totalVolume": 1000}}),
+        "AAPL": _parse_quote_entry("AAPL", {"quote": {"netChange": 2.0, "totalVolume": 1000}}),
+        "F": _parse_quote_entry("F", {"quote": {"netChange": -1.0, "totalVolume": 1000}}),
+    }
+
+    with (
+        patch(
+            "tradingagents.intraday.indicators.sp500_constituents.load_sp500_constituents",
+            return_value=frozenset(["NVDA", "AAPL", "F"]),
+        ),
+        patch(
+            "tradingagents.dataflows.schwab_quotes.get_quotes_batched",
+            return_value=fake_quotes,
+        ),
+    ):
+        from tradingagents.dataflows.schwab_quotes import rank_sp500_by_relative_change
+
+        ranked = rank_sp500_by_relative_change(2, "long", use_volume_tiebreak=False)
+
+    assert [c.symbol for c in ranked] == ["NVDA", "AAPL"]
+
+
+def test_rank_sp500_by_relative_change_short():
+    fake_quotes = {
+        "SPY": _parse_quote_entry("SPY", {"quote": {"netChange": 1.0}}),
+        "NVDA": _parse_quote_entry("NVDA", {"quote": {"netChange": 3.0, "totalVolume": 1000}}),
+        "AAPL": _parse_quote_entry("AAPL", {"quote": {"netChange": 2.0, "totalVolume": 1000}}),
+        "F": _parse_quote_entry("F", {"quote": {"netChange": -1.0, "totalVolume": 1000}}),
+    }
+
+    with (
+        patch(
+            "tradingagents.intraday.indicators.sp500_constituents.load_sp500_constituents",
+            return_value=frozenset(["NVDA", "AAPL", "F"]),
+        ),
+        patch(
+            "tradingagents.dataflows.schwab_quotes.get_quotes_batched",
+            return_value=fake_quotes,
+        ),
+    ):
+        from tradingagents.dataflows.schwab_quotes import rank_sp500_by_relative_change
+
+        ranked = rank_sp500_by_relative_change(1, "short", use_volume_tiebreak=False)
+
+    assert ranked[0].symbol == "F"
+
+
+def test_rs_quote_spread():
+    from tradingagents.dataflows.schwab_quotes import rs_quote_spread
+    from tradingagents.dataflows.schwab_streamer import ScreenerCandidate
+
+    candidate = ScreenerCandidate(symbol="NVDA", net_change=3.0)
+    assert rs_quote_spread(candidate, 1.0) == 2.0
+
+
 @pytest.mark.unit
 def test_total_volume_anomaly_detects_identical_values():
     batch = [

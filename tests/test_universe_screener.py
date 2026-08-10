@@ -26,7 +26,7 @@ def _ohlcv(rows: int = 30) -> pd.DataFrame:
 def _patch_5m_candles(monkeypatch, df: pd.DataFrame | None = None):
     sym_df = df or _ohlcv()
 
-    def fake_5m(symbol, start, end):
+    def fake_5m(symbol, start, end, **kwargs):
         return sym_df.copy()
 
     for target in (
@@ -107,15 +107,36 @@ def test_universe_screener_sp500_quotes_source(monkeypatch):
 def test_resolve_screener_source_auto():
     from tradingagents.intraday.universe_screener import resolve_screener_source
 
-    assert resolve_screener_source({"intraday_screener_source": "auto", "intraday_screener_require_sp500": True}) == "sp500_quotes"
+    assert (
+        resolve_screener_source(
+            {
+                "intraday_screener_source": "auto",
+                "intraday_screener_require_sp500": True,
+                "intraday_screener_filters": ["rrs"],
+            }
+        )
+        == "sp500_rs_quotes"
+    )
+    assert (
+        resolve_screener_source(
+            {
+                "intraday_screener_source": "auto",
+                "intraday_screener_require_sp500": True,
+                "intraday_screener_filters": ["orb"],
+            }
+        )
+        == "sp500_quotes"
+    )
     assert resolve_screener_source({"intraday_screener_source": "auto", "intraday_screener_require_sp500": False}) == "streamer"
     assert resolve_screener_source({"intraday_screener_source": "streamer"}) == "streamer"
     assert resolve_screener_source({"intraday_screener_source": "sp500_rrs"}) == "sp500_rrs"
+    assert resolve_screener_source({"intraday_screener_source": "sp500_rs_quotes"}) == "sp500_rs_quotes"
 
 
 @pytest.mark.unit
 def test_universe_screener_rrs_filter(monkeypatch):
     config = {
+        "intraday_screener_source": "streamer",
         "intraday_screener_keys": ["NASDAQ_VOLUME_0"],
         "intraday_screener_candidate_limit": 10,
         "intraday_screener_max_watchlist": 5,
@@ -180,7 +201,7 @@ def test_universe_screener_sp500_rrs_ranks_and_merges_screener_first(monkeypatch
     sym_df = _ohlcv()
     close_by_symbol = {"MSFT": 103.0, "AAPL": 102.9, "NVDA": 102.0}
 
-    def fake_5m(symbol, start, end):
+    def fake_5m(symbol, start, end, **kwargs):
         df = sym_df.copy()
         if symbol in close_by_symbol:
             df["Close"] = close_by_symbol[symbol]
@@ -275,7 +296,7 @@ def test_universe_screener_ranks_by_30m_rrs(monkeypatch):
     sym_df = _ohlcv()
     close_by_symbol = {"MSFT": 103.0, "AAPL": 102.0, "NVDA": 101.0}
 
-    def fake_5m(symbol, start, end):
+    def fake_5m(symbol, start, end, **kwargs):
         df = sym_df.copy()
         if symbol in close_by_symbol:
             df["Close"] = close_by_symbol[symbol]
@@ -337,7 +358,7 @@ def test_benchmark_fetched_once_per_refresh(monkeypatch):
     sym_df = _ohlcv()
     spy_calls = 0
 
-    def fake_5m(symbol, start, end):
+    def fake_5m(symbol, start, end, **kwargs):
         nonlocal spy_calls
         if symbol == "SPY":
             spy_calls += 1
@@ -369,3 +390,46 @@ def test_benchmark_fetched_once_per_refresh(monkeypatch):
     screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
 
     assert spy_calls == 1
+
+
+@pytest.mark.unit
+def test_universe_screener_sp500_rs_quotes_source(monkeypatch):
+    config = {
+        "intraday_screener_source": "sp500_rs_quotes",
+        "intraday_screener_prefilter_limit": 2,
+        "intraday_screener_candidate_limit": 2,
+        "intraday_screener_max_watchlist": 5,
+        "intraday_screener_rrs_timeframes": [5, 30, 60],
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_screener_min_price": 10.0,
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_candidates = [
+        ScreenerCandidate(symbol="FAST", last_price=80.0, net_change=2.5, total_volume=500000),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, net_change=1.0, total_volume=800000),
+    ]
+
+    monkeypatch.setattr(
+        "tradingagents.dataflows.schwab_quotes.fetch_sp500_rs_quote_candidates",
+        lambda limit, direction, **kwargs: mock_candidates[:limit],
+    )
+    _patch_5m_candles(monkeypatch)
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        lambda sym_frames, bench_frames, length=12: {"5m": 1.0, "30m": 0.5, "60m": 0.3},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    watchlist, screened = screener.refresh_watchlist(bar_time, base_watchlist=[])
+
+    assert "FAST" in watchlist
+    assert len(screened) >= 1

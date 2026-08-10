@@ -19,6 +19,7 @@ from cli.display_common import (
     ANALYST_ORDER,
     PREMARKET_RESEARCH_AGENTS,
     REPORT_SECTION_TITLES,
+    format_tokens,
     update_analyst_statuses,
     update_research_status_from_chunk,
 )
@@ -455,7 +456,12 @@ def update_intraday_display(
         footer_parts.extend(
             [
                 f"LLM: {stats['llm_calls']}",
-                f"tokens: {stats['tokens_in']}+{stats['tokens_out']}",
+                (
+                    f"Tokens: {format_tokens(stats['tokens_in'])}\u2191 "
+                    f"{format_tokens(stats['tokens_out'])}\u2193"
+                    if stats["tokens_in"] > 0 or stats["tokens_out"] > 0
+                    else "Tokens: --"
+                ),
             ]
         )
     if start_time is not None:

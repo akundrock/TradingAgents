@@ -7,6 +7,7 @@ from typing import Literal
 
 from tradingagents.dataflows.schwab import get_intraday_5m_candles
 from tradingagents.dataflows.schwab_streamer import SchwabEquityScreener, ScreenerCandidate
+from tradingagents.intraday.indicators.relative_strength import rrs_intraday_fetch_start
 from tradingagents.intraday.indicators.sector_mapping import is_sp500_constituent
 from tradingagents.intraday.screener_filters import (
     ScreenedSymbol,
@@ -19,6 +20,7 @@ from tradingagents.intraday.screener_filters import (
     uses_rrs_filter,
 )
 from tradingagents.intraday.screener_filters.rrs_filter import resolve_rank_rrs_timeframe
+from tradingagents.intraday.mtf_validator import MultiTimeframeValidator
 
 __all__ = [
     "RANK_RRS_LABELS",
@@ -33,22 +35,54 @@ from tradingagents.intraday.session import TradingSession
 logger = logging.getLogger(__name__)
 
 ScreenerDirection = Literal["long", "short", "both"]
-ScreenerSource = Literal["auto", "streamer", "sp500_quotes", "sp500_rrs"]
+ScreenerSource = Literal["auto", "streamer", "sp500_quotes", "sp500_rrs", "sp500_rs_quotes"]
 RANK_RRS_LABELS = ("5m", "30m", "60m")
 RANK_RRS_MINUTES = {"5m": 5, "30m": 30, "60m": 60}
+_RRS_FIRST_SOURCES = frozenset({"sp500_rrs", "sp500_rs_quotes"})
 
 
 def resolve_screener_source(config: dict) -> str:
-    """Resolve screener universe source from config (auto uses SP500 quotes when required)."""
+    """Resolve screener universe source from config."""
     raw = str(config.get("intraday_screener_source", "auto")).strip().lower()
     if raw == "auto":
-        if bool(config.get("intraday_screener_require_sp500", True)):
+        require_sp500 = bool(config.get("intraday_screener_require_sp500", True))
+        if uses_rrs_filter(config) and require_sp500:
+            return "sp500_rs_quotes"
+        if require_sp500:
             return "sp500_quotes"
         return "streamer"
-    if raw in ("streamer", "sp500_quotes", "sp500_rrs"):
+    if raw in ("streamer", "sp500_quotes", "sp500_rrs", "sp500_rs_quotes"):
         return raw
     logger.warning("Unknown intraday_screener_source=%s; using streamer", raw)
     return "streamer"
+
+
+def _bench_enriched_from_prepared(prepared: object) -> dict:
+    if isinstance(prepared, dict) and "intraday" in prepared:
+        intraday = prepared.get("intraday")
+        return intraday if isinstance(intraday, dict) else {}
+    return prepared if isinstance(prepared, dict) else {}
+
+
+def _sort_screened_results(results: list[ScreenedSymbol], config: dict) -> None:
+    direction = str(config.get("intraday_screener_direction", "long"))
+    rank_by = str(config.get("intraday_screener_rank_by", "magnitude")).strip().lower()
+
+    if rank_by == "aligned":
+        if direction == "short":
+            results.sort(key=lambda s: (s.aligned_count, -s.rank_score), reverse=True)
+        elif direction == "both":
+            results.sort(key=lambda s: (s.aligned_count, abs(s.rank_score)), reverse=True)
+        else:
+            results.sort(key=lambda s: (s.aligned_count, s.rank_score), reverse=True)
+        return
+
+    if direction == "short":
+        results.sort(key=lambda s: (s.rank_score, s.aligned_count))
+    elif direction == "both":
+        results.sort(key=lambda s: abs(s.rank_score), reverse=True)
+    else:
+        results.sort(key=lambda s: (s.rank_score, s.aligned_count), reverse=True)
 
 
 class UniverseScreener:
@@ -64,17 +98,22 @@ class UniverseScreener:
         base_watchlist: list[str],
         session: TradingSession | None = None,
     ) -> tuple[list[str], list[ScreenedSymbol]]:
+        bar_time = MultiTimeframeValidator._naive_market_bar_time(bar_time, self.config)
         keys = list(self.config.get("intraday_screener_keys") or ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"])
         candidate_limit = int(self.config.get("intraday_screener_candidate_limit", 50))
+        prefilter_limit = int(
+            self.config.get("intraday_screener_prefilter_limit", candidate_limit)
+        )
         max_watchlist = int(self.config.get("intraday_screener_max_watchlist", 12))
+        direction = str(self.config.get("intraday_screener_direction", "long"))
         source = resolve_screener_source(self.config)
         filter_names = resolve_filter_names(self.config)
-        rrs_first = source == "sp500_rrs"
+        rrs_first = source in _RRS_FIRST_SOURCES
 
-        if source == "sp500_rrs" and not uses_rrs_filter(self.config):
+        if source in _RRS_FIRST_SOURCES and not uses_rrs_filter(self.config):
             logger.warning(
-                "intraday_screener_source=sp500_rrs but RRS filter not active; "
-                "using sp500_quotes instead"
+                "intraday_screener_source=%s but RRS filter not active; using sp500_quotes instead",
+                source,
             )
             source = "sp500_quotes"
             rrs_first = False
@@ -89,6 +128,15 @@ class UniverseScreener:
             from tradingagents.dataflows.schwab_quotes import fetch_sp500_quote_candidates
 
             candidates = fetch_sp500_quote_candidates()
+        elif source == "sp500_rs_quotes":
+            from tradingagents.dataflows.schwab_quotes import fetch_sp500_rs_quote_candidates
+
+            benchmark = str(self.config.get("pro_trader_benchmark", "SPY"))
+            candidates = fetch_sp500_rs_quote_candidates(
+                prefilter_limit,
+                direction,  # type: ignore[arg-type]
+                benchmark=benchmark,
+            )
         elif source == "sp500_quotes":
             from tradingagents.dataflows.schwab_quotes import fetch_sp500_volume_candidates
 
@@ -126,7 +174,7 @@ class UniverseScreener:
             )
 
         initial_count = len(candidates)
-        skip_sp500_filter = source in ("sp500_quotes", "sp500_rrs")
+        skip_sp500_filter = source in ("sp500_quotes", "sp500_rrs", "sp500_rs_quotes")
         candidates, volume_filter_summary = self._filter_volume_candidates(
             candidates,
             skip_sp500_filter=skip_sp500_filter,
@@ -260,8 +308,8 @@ class UniverseScreener:
                 session=session,
             )
             shared[filt.name] = prepared
-            if filt.name == "rrs" and isinstance(prepared, dict):
-                bench_enriched = prepared
+            if filt.name == "rrs":
+                bench_enriched = _bench_enriched_from_prepared(prepared)
 
         logger.info(
             "Universe screener filter pipeline: evaluating %d candidates "
@@ -303,12 +351,7 @@ class UniverseScreener:
                     if len(reject_samples) < 8:
                         reject_samples.append(reject_reason)
 
-        if direction == "short":
-            results.sort(key=lambda s: (s.rank_score, s.aligned_count))
-        elif direction == "both":
-            results.sort(key=lambda s: abs(s.rank_score), reverse=True)
-        else:
-            results.sort(key=lambda s: (s.rank_score, s.aligned_count), reverse=True)
+        _sort_screened_results(results, self.config)
 
         summary_parts = [f"{k}={v}" for k, v in sorted(reject_counts.items())]
         summary = f"rejected {' '.join(summary_parts)}" if summary_parts else "no rejections"
@@ -330,7 +373,13 @@ class UniverseScreener:
     ) -> tuple[ScreenedSymbol | None, str | None]:
         symbol = candidate.symbol
         try:
-            df_5m = get_intraday_5m_candles(symbol, session_start, bar_time)
+            fetch_start = session_start
+            if uses_rrs_filter(self.config):
+                timeframes = list(self.config.get("intraday_screener_rrs_timeframes") or [5, 30, 60])
+                fetch_start = rrs_intraday_fetch_start(bar_time, session_start, timeframes)
+            df_5m = get_intraday_5m_candles(
+                symbol, session_start, bar_time, fetch_start=fetch_start
+            )
             if session is not None:
                 session.intraday_5m_cache[symbol] = df_5m
 
@@ -389,9 +438,7 @@ class UniverseScreener:
         return merged[:max_watchlist]
 
     def _session_start(self, bar_time: datetime) -> datetime:
-        start_str = str(self.config.get("intraday_session_start", "09:30"))
-        hour, minute = [int(x) for x in start_str.split(":", maxsplit=1)]
-        return bar_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return MultiTimeframeValidator._session_start(bar_time, self.config)
 
     @staticmethod
     def _dedupe_symbols(symbols: list[str]) -> list[str]:

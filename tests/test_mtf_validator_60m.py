@@ -77,7 +77,7 @@ def test_mtf_validator_5m_resample_uses_single_fetch(monkeypatch):
     five_m_calls: list[str] = []
     multi_calls: list[str] = []
 
-    def fake_get_5m(symbol, start, end):
+    def fake_get_5m(symbol, start, end, **kwargs):
         five_m_calls.append(symbol)
         return _build_df(session_start, as_of, 5)
 
@@ -243,7 +243,7 @@ def test_mtf_validator_reuses_session_benchmark_cache(monkeypatch):
     as_of = datetime(2026, 7, 27, 12, 0)
     five_m_calls: list[str] = []
 
-    def fake_get_5m(symbol, start, end):
+    def fake_get_5m(symbol, start, end, **kwargs):
         five_m_calls.append(symbol)
         return _build_df(session_start, as_of, 5)
 
@@ -327,7 +327,7 @@ def test_mtf_validator_reuses_screener_5m_cache(monkeypatch):
     as_of = datetime(2026, 7, 27, 12, 0)
     five_m_calls: list[str] = []
 
-    def fake_get_5m(symbol, start, end):
+    def fake_get_5m(symbol, start, end, **kwargs):
         five_m_calls.append(symbol)
         return _build_df(session_start, as_of, 5)
 
@@ -411,7 +411,7 @@ def test_get_candles_error_includes_timeframe(monkeypatch):
             raise NoMarketDataError(symbol, symbol, "Schwab HTTP 400")
         return [{"datetime": 1}]
 
-    def fake_candles_to_df(candles, symbol, curr_date):
+    def fake_candles_to_df(candles, symbol, curr_date, **kwargs):
         return _build_df(session_start, as_of, 5)
 
     monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_fetch)

@@ -11,6 +11,9 @@ from tradingagents.intraday.indicators.relative_strength import (
     compute_power_index,
     compute_rrs,
     count_aligned_rrs,
+    has_sufficient_rrs_bars,
+    min_rrs_bars,
+    rrs_intraday_fetch_start,
     wilders_average,
     true_range,
 )
@@ -241,3 +244,49 @@ def test_resample_ohlcv_to_60m_from_30m():
     assert len(df_60) >= 2
     assert df_60.iloc[0]["Open"] == 100
     assert df_60["Volume"].sum() == 10000
+
+
+@pytest.mark.unit
+def test_rrs_intraday_fetch_start_extends_for_hourly():
+    session_start = datetime(2026, 7, 27, 9, 30)
+    as_of = datetime(2026, 7, 27, 13, 30)
+    assert rrs_intraday_fetch_start(as_of, session_start, [5]) == session_start
+    lookback = rrs_intraday_fetch_start(as_of, session_start, [5, 60])
+    assert lookback < session_start
+    assert (session_start - lookback).days >= 7
+
+
+@pytest.mark.unit
+def test_hourly_rrs_zero_with_session_only_bars():
+    start = datetime(2026, 7, 27, 9, 30)
+    sym = _make_intraday_bars(
+        [(100 + i, 101 + i, 99 + i, 100 + i) for i in range(14)],
+        start=start,
+        minutes=60,
+    )
+    bench = _make_intraday_bars(
+        [(200, 201, 199, 200) for _ in range(14)],
+        start=start,
+        minutes=60,
+    )
+    assert len(sym) == 14
+    assert has_sufficient_rrs_bars(sym)
+    assert compute_rrs(sym, bench) != 0.0
+
+
+@pytest.mark.unit
+def test_hourly_rrs_insufficient_session_bars_returns_zero():
+    start = datetime(2026, 7, 27, 9, 30)
+    sym = _make_intraday_bars(
+        [(100 + i, 101 + i, 99 + i, 100 + i) for i in range(7)],
+        start=start,
+        minutes=60,
+    )
+    bench = _make_intraday_bars(
+        [(200, 201, 199, 200) for _ in range(7)],
+        start=start,
+        minutes=60,
+    )
+    assert len(sym) < min_rrs_bars()
+    assert not has_sufficient_rrs_bars(sym)
+    assert compute_rrs(sym, bench) == 0.0

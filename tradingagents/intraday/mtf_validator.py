@@ -9,6 +9,7 @@ import pandas as pd
 
 from tradingagents.dataflows.schwab import get_candles_multi_timeframe, get_intraday_5m_candles
 from tradingagents.dataflows.stockstats_utils import compute_mtf_indicators, compute_tf_indicators, load_ohlcv
+from tradingagents.intraday.indicators.relative_strength import rrs_intraday_fetch_start
 from tradingagents.intraday.frame_enrichment import (
     effective_requested_timeframes,
     enriched_frames_from_5m,
@@ -130,7 +131,10 @@ class MultiTimeframeValidator:
                     bench_tfs = list(fetch_tfs)
                     if need_60m and 60 not in bench_tfs:
                         bench_tfs = sorted(set(bench_tfs) | {60})
-                    df_5m = get_intraday_5m_candles(benchmark, session_start, as_of)
+                    fetch_start = rrs_intraday_fetch_start(as_of, session_start, bench_tfs)
+                    df_5m = get_intraday_5m_candles(
+                        benchmark, session_start, as_of, fetch_start=fetch_start
+                    )
                     benchmark_intraday_frames = enriched_frames_from_5m(df_5m, bench_tfs)
                 else:
                     bench_dfs = get_candles_multi_timeframe(
@@ -209,24 +213,31 @@ class MultiTimeframeValidator:
             df_5m = session.intraday_5m_cache[symbol]
 
         if df_5m is None:
-            df_5m = get_intraday_5m_candles(symbol, session_start, as_of)
+            fetch_start = rrs_intraday_fetch_start(as_of, session_start, tf_list)
+            df_5m = get_intraday_5m_candles(
+                symbol, session_start, as_of, fetch_start=fetch_start
+            )
 
         return enriched_frames_from_5m(df_5m, tf_list)
 
     @staticmethod
     def _session_start(as_of: datetime, config: dict) -> datetime:
+        local = MultiTimeframeValidator._naive_market_bar_time(as_of, config)
+        start_str = str(config.get("intraday_session_start", "09:30"))
+        hour, minute = [int(x) for x in start_str.split(":", maxsplit=1)]
+        return local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    @staticmethod
+    def _naive_market_bar_time(bar_time: datetime, config: dict) -> datetime:
         tz_name = str(config.get("intraday_timezone", "America/New_York"))
         try:
             from zoneinfo import ZoneInfo
 
             tz = ZoneInfo(tz_name)
-            local = as_of.astimezone(tz) if as_of.tzinfo else as_of.replace(tzinfo=tz)
+            if bar_time.tzinfo:
+                return bar_time.astimezone(tz).replace(tzinfo=None)
+            return bar_time
         except Exception:
-            local = as_of
-
-        start_str = str(config.get("intraday_session_start", "09:30"))
-        hour, minute = [int(x) for x in start_str.split(":", maxsplit=1)]
-        session_start = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if session_start.tzinfo:
-            return session_start.replace(tzinfo=None)
-        return session_start
+            if bar_time.tzinfo:
+                return bar_time.replace(tzinfo=None)
+            return bar_time

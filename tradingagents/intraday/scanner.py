@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -52,9 +53,11 @@ class WatchlistScanner:
         restore_premarket: bool = True,
         force_premarket: bool = False,
         dashboard: IntradayDashboardBuffer | None = None,
+        callbacks: list | None = None,
     ):
         self.config = config
         self.ta_graph = ta_graph
+        self.callbacks = callbacks or []
         self.dry_run = dry_run
         self.skip_premarket = skip_premarket
         self.restore_premarket = restore_premarket
@@ -67,7 +70,7 @@ class WatchlistScanner:
         if not dry_run:
             from tradingagents.graph.intraday_graph import IntradayTradingGraph
 
-            self.intraday_graph = IntradayTradingGraph(config)
+            self.intraday_graph = IntradayTradingGraph(config, callbacks=self.callbacks)
 
         today = datetime.now().strftime("%Y-%m-%d")
         watchlist = list(config.get("watchlist") or [])
@@ -107,6 +110,9 @@ class WatchlistScanner:
         self._output_dir = Path(
             str(config.get("intraday_output_dir", "~/.tradingagents/intraday"))
         ).expanduser()
+        self._lazy_bias_graph: TradingAgentsGraph | None = None
+        self._lazy_bias_locks: dict[str, threading.Lock] = {}
+        self._lazy_bias_locks_guard = threading.Lock()
 
     def run(self) -> TradingSession:
         screener_enabled = bool(self.config.get("intraday_screener_enabled"))
@@ -475,6 +481,7 @@ class WatchlistScanner:
             effective_requested_timeframes,
             enriched_frames_from_5m,
         )
+        from tradingagents.intraday.indicators.relative_strength import rrs_intraday_fetch_start
 
         benchmark = str(self.config.get("pro_trader_benchmark", "SPY"))
         session_start = MultiTimeframeValidator._session_start(bar_time, self.config)
@@ -485,7 +492,10 @@ class WatchlistScanner:
             bench_tfs = sorted(set(bench_tfs) | {60})
 
         try:
-            df_5m = get_intraday_5m_candles(benchmark, session_start, bar_time)
+            fetch_start = rrs_intraday_fetch_start(bar_time, session_start, bench_tfs)
+            df_5m = get_intraday_5m_candles(
+                benchmark, session_start, bar_time, fetch_start=fetch_start
+            )
             self.session.benchmark_intraday_frames = enriched_frames_from_5m(df_5m, bench_tfs)
             self.session.benchmark_daily_df = load_ohlcv(benchmark, trade_date).tail(60)
             self.session.intraday_scan_bar_time = bar_time
@@ -561,6 +571,85 @@ class WatchlistScanner:
         )
         save_premarket_cache(cache_file, disk_cache)
 
+    def _lazy_bias_analysts(self) -> list[str]:
+        return list(self.config.get("intraday_lazy_bias_analysts") or ["market"])
+
+    def _lazy_bias_enabled(self) -> bool:
+        from tradingagents.intraday.gating import resolve_gate2_mode
+
+        if resolve_gate2_mode(self.config) != "daily_bias":
+            return False
+        return bool(self.config.get("intraday_lazy_bias_on_gate1", True))
+
+    def _lazy_bias_lock(self, symbol: str) -> threading.Lock:
+        with self._lazy_bias_locks_guard:
+            if symbol not in self._lazy_bias_locks:
+                self._lazy_bias_locks[symbol] = threading.Lock()
+            return self._lazy_bias_locks[symbol]
+
+    def _get_lazy_bias_graph(self) -> TradingAgentsGraph:
+        if self._lazy_bias_graph is None:
+            from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+            self._lazy_bias_graph = TradingAgentsGraph(
+                selected_analysts=tuple(self._lazy_bias_analysts()),
+                config=self.config,
+                debug=False,
+                callbacks=self.callbacks,
+            )
+        return self._lazy_bias_graph
+
+    def _restore_lazy_bias_from_disk(self, symbol: str) -> DailyBiasReport | None:
+        if not self.restore_premarket:
+            return None
+        analysts = self._lazy_bias_analysts()
+        cache_file = cache_path(self._output_dir, self.session.session_date)
+        disk_cache = load_premarket_cache(cache_file, session_date=self.session.session_date)
+        if disk_cache is None:
+            return None
+        if not analysts_match(disk_cache.analysts, analysts):
+            return None
+        return disk_cache.reports.get(symbol)
+
+    def _persist_lazy_bias(self, symbol: str, report: DailyBiasReport) -> None:
+        analysts = self._lazy_bias_analysts()
+        cache_file = cache_path(self._output_dir, self.session.session_date)
+        disk_cache = load_premarket_cache(cache_file, session_date=self.session.session_date)
+        disk_cache = merge_report(
+            disk_cache,
+            session_date=self.session.session_date,
+            analysts=analysts,
+            symbol=symbol,
+            report=report,
+        )
+        save_premarket_cache(cache_file, disk_cache)
+
+    def _ensure_lazy_bias(self, symbol: str) -> DailyBiasReport:
+        with self._lazy_bias_lock(symbol):
+            existing = self.session.daily_bias_cache.get(symbol)
+            if existing is not None and existing.direction != "neutral":
+                return existing
+
+            restored = self._restore_lazy_bias_from_disk(symbol)
+            if restored is not None:
+                self.session.daily_bias_cache[symbol] = restored
+                logger.info(
+                    "Restored lazy daily bias for %s: %s",
+                    symbol,
+                    restored.direction,
+                )
+                return restored
+
+            logger.info("Computing lazy daily bias for %s", symbol)
+            report = self._get_lazy_bias_graph().propagate_daily_bias(
+                symbol,
+                self.session.session_date,
+            )
+            self.session.daily_bias_cache[symbol] = report
+            self._persist_lazy_bias(symbol, report)
+            logger.info("Lazy daily bias for %s: %s", symbol, report.direction)
+            return report
+
     def _within_session(self, bar_time: datetime) -> bool:
         start_str = str(self.config.get("intraday_session_start", "09:30"))
         end_str = str(self.config.get("intraday_session_end", "16:00"))
@@ -583,6 +672,13 @@ class WatchlistScanner:
             return None
 
         strategy_result = self.strategy.check_setup(symbol, mtf, daily_bias)
+        if (
+            strategy_result.passed
+            and strategy_result.direction in ("long", "short")
+            and daily_bias.direction == "neutral"
+            and self._lazy_bias_enabled()
+        ):
+            daily_bias = self._ensure_lazy_bias(symbol)
         gate_result = self.gating.evaluate(mtf, strategy_result, daily_bias, self.config)
         self._record_scan_state(
             symbol, bar_time, daily_bias, mtf, strategy_result, gate_result

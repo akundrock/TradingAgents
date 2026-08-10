@@ -403,6 +403,7 @@ def _llm_provider_table() -> list[tuple[str, str, str | None]]:
     localhost default when unset.
     """
     ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
+    llama_cpp_url = os.environ.get("LLAMA_CPP_BASE_URL") or "http://localhost:8080/v1"
     return [
         ("OpenAI", "openai", "https://api.openai.com/v1"),
         ("Google", "google", None),
@@ -420,7 +421,8 @@ def _llm_provider_table() -> list[tuple[str, str, str | None]]:
         ("Azure OpenAI", "azure", None),
         ("Amazon Bedrock", "bedrock", None),
         ("Ollama", "ollama", ollama_url),
-        ("OpenAI-compatible (vLLM, LM Studio, llama.cpp, custom relay)", "openai_compatible", None),
+        ("llama.cpp (llama-server)", "llama_cpp", llama_cpp_url),
+        ("OpenAI-compatible (vLLM, LM Studio, custom relay)", "openai_compatible", None),
     ]
 
 
@@ -654,6 +656,26 @@ def confirm_ollama_endpoint(url: str) -> None:
         console.print(
             f"[yellow]Note: {url!r} doesn't include port 11434. "
             f"Make sure your remote ollama-serve listens on the port "
+            f"shown above.[/yellow]"
+        )
+
+
+def confirm_llama_cpp_endpoint(url: str) -> None:
+    """Show the resolved llama-server endpoint after provider selection."""
+    from_env = os.environ.get("LLAMA_CPP_BASE_URL")
+    origin = " (from LLAMA_CPP_BASE_URL)" if from_env and from_env == url else ""
+    console.print(f"[green]✓ Using llama.cpp server at {url}{origin}[/green]")
+
+    if not url.startswith(("http://", "https://")):
+        console.print(
+            f"[yellow]Note: {url!r} is missing a scheme. "
+            f"llama-server typically expects a URL like "
+            f"http://<host>:8080/v1.[/yellow]"
+        )
+    elif ":8080" not in url and "://localhost" not in url and "://127.0.0.1" not in url:
+        console.print(
+            f"[yellow]Note: {url!r} doesn't include port 8080. "
+            f"Make sure your llama-server listens on the port "
             f"shown above.[/yellow]"
         )
 

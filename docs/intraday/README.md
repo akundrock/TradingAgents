@@ -38,6 +38,8 @@ For a capability matrix and prioritized backlog, see [STATUS.md](STATUS.md).
 │  EACH SCAN INTERVAL (default every 5 min, per symbol in parallel):   │
 │    Schwab MTF fetch → MultiTimeframeValidator                        │
 │    → IntradayStrategy.check_setup()                                  │
+│    → [Gate 1 pass + neutral bias] lazy propagate_daily_bias()      │
+│       (market-only by default; disk-cached like pre-market)          │
 │    → GatingLayer (Gate 1 strategy, Gate 2 optional MTF/bias)         │
 │    → [pass] IntradayTradingGraph → IntradaySignal                    │
 └──────────────────────────────────────────────────────────────────────┘
@@ -106,7 +108,17 @@ Magpie is **not** run in the intraday scan loop (remains in the daily graph). Ga
 
 **Gate 1 — Strategy:** `check_setup()` must pass with direction `long` or `short`. Factors logged at INFO.
 
-**Gate 2 — MTF alignment (optional):** When `intraday_require_daily_bias_alignment` is `true`, 30m trend must align with pre-market daily bias. Disable when the strategy encodes bias/trend internally (typical for `pro_trader_dashboard`). For `orb_breakout` with `--screener`, Gate 2 is auto-disabled by default (`intraday_orb_breakout_screener_disable_gate2`) because screener-added symbols use neutral daily bias unless pre-market is run for new symbols.
+**Gate 2 — MTF alignment (optional):** Configured via `intraday_gate2_mode`:
+
+| Mode | Behavior | LLM needed? |
+|------|----------|-------------|
+| `off` | Skip Gate 2 | No |
+| `daily_bias` | 30m trend must align with pre-market daily bias | Yes (lazy bias when neutral) |
+| `supertrend` | 5m SuperTrend must align with setup direction | No |
+
+For `orb_breakout` with `--screener`, Gate 2 defaults to `supertrend` (Pro Trader-style trend confirmation without LLM). Set `intraday_orb_breakout_screener_disable_gate2: true` to skip Gate 2 entirely. Disable when the strategy encodes bias/trend internally (typical for `pro_trader_dashboard`).
+
+**Lazy Gate-1 bias (optional):** When `intraday_gate2_mode` is `daily_bias` and `intraday_lazy_bias_on_gate1` is `true` (default), symbols that still have neutral daily bias (e.g. screener-added or `--no-premarket`) trigger a slim `propagate_daily_bias()` after Gate 1 passes and before Gate 2 runs. Not used for `supertrend` or `off` modes. Uses `intraday_lazy_bias_analysts` (default `market` only) and shares the same `premarket_bias.json` disk cache when analyst sets match.
 
 When both gates pass, `IntradayTradingGraph.propagate_intraday()` runs.
 
@@ -117,11 +129,12 @@ When both gates pass, `IntradayTradingGraph.propagate_intraday()` runs.
 Three-layer pipeline (see [pro-trader-dashboard-spec.md](../pro-trader-dashboard-spec.md) §11):
 
 1. **Universe discovery** — `intraday_screener_source`:
-   - `auto` (default): `sp500_quotes` when `require_sp500=true` (volume-ranked top N); else Streamer actives
+   - `auto` (default): `sp500_rs_quotes` when RRS filter is active; else `sp500_quotes` when `require_sp500=true`; else Streamer actives
+   - `sp500_rs_quotes`: REST quotes for full SP500 → rank by `netChange` vs SPY (direction-aware) → top `prefilter_limit` → multi-TF RRS on shortlist → top `candidate_limit` to watchlist
    - `sp500_quotes`: REST quotes over full SP500, rank by `totalVolume`, up to `candidate_limit` before RRS
    - `sp500_rrs`: REST quotes for **all** SP500 → min price gate → multi-TF RRS on full set → rank by 5m RRS → top `candidate_limit` to watchlist (screener picks prioritized over base symbols)
    - `streamer`: Schwab Streamer exchange actives (`NASDAQ_VOLUME_0`, `NYSE_VOLUME_0`)
-2. **Price pre-filter** — optional min price + S&P 500 check (`sp500_constituents.json`; skipped for `sp500_quotes` / `sp500_rrs`; refresh with `tradingagents refresh-sp500 --write`)
+2. **Price pre-filter** — optional min price + S&P 500 check (`sp500_constituents.json`; skipped for `sp500_quotes` / `sp500_rrs` / `sp500_rs_quotes`; refresh with `tradingagents refresh-sp500 --write`)
 3. **Pluggable filter pipeline** — configure via `intraday_screener_filters`:
    - `rrs` (default): 5m/30m/60m RRS vs SPY; benchmark 5m fetched once per refresh
    - `orb`: opening range breakout (9:30–10:00 ET OR, breakout latch after 10:00)
@@ -148,8 +161,9 @@ Key settings in `tradingagents/default_config.py`. Full table: [CONFIGURATION.md
 "intraday_strategy": "base_momentum",  # or pro_trader_dashboard
 
 # Gating
-"intraday_require_daily_bias_alignment": True,
-"intraday_orb_breakout_screener_disable_gate2": True,  # auto-off Gate 2 for orb_breakout + screener
+"intraday_gate2_mode": None,  # off | daily_bias | supertrend; orb+screener defaults to supertrend
+"intraday_require_daily_bias_alignment": True,  # legacy; maps to daily_bias when gate2_mode unset
+"intraday_orb_breakout_screener_disable_gate2": False,  # true = off Gate 2 for orb_breakout + screener
 
 # Pro Trader (when strategy=pro_trader_dashboard)
 "pro_trader_benchmark": "SPY",
@@ -167,11 +181,12 @@ Key settings in `tradingagents/default_config.py`. Full table: [CONFIGURATION.md
 "intraday_screener_enabled": False,
 "intraday_screener_interval_minutes": 15,
 "intraday_screener_keys": ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"],
-"intraday_screener_source": "auto",  # or sp500_rrs for RRS-first SP500 scan
-"intraday_screener_rank_mode": "pass_only",  # rank_all scores all symbols
-"intraday_screener_rank_rrs_timeframe": "30m",  # sort key: 5m, 30m, or 60m
-"intraday_screener_max_concurrent_symbols": None,  # optional screener throttle
-"intraday_screener_min_rrs_aligned": 3,
+"intraday_screener_source": "auto",  # RRS filter → sp500_rs_quotes; orb-only → sp500_quotes
+"intraday_screener_prefilter_limit": 100,
+"intraday_screener_direction": "long",  # or short for underperformers vs SPY
+"intraday_screener_include_daily_rrs": true,
+"intraday_screener_min_rrs_aligned": 2,
+"intraday_screener_rank_by": "aligned",
 "intraday_screener_filters": ["rrs"],  # or ["orb"], ["orb", "rrs"]
 "intraday_screener_filter_mode": "any",
 "intraday_screener_max_watchlist": 12,
@@ -212,6 +227,9 @@ tradingagents intraday SPY --log-level DEBUG
 
 # Validate screener volume discovery (Streamer vs SP500 REST quotes)
 tradingagents screener-debug --source both --limit 20 --compare
+tradingagents screener-debug --source sp500_rs_quotes --limit 20 --direction long
+tradingagents screener-debug --source sp500_rs_quotes --limit 20 --direction long --full-rrs
+tradingagents screener-debug --source sp500_rs_quotes --limit 20 --direction short
 tradingagents screener-debug --source sp500_quotes --limit 50
 tradingagents screener-debug --source sp500_rrs --limit 20
 ```

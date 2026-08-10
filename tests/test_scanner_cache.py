@@ -31,7 +31,7 @@ def test_scanner_prepares_benchmark_once_per_scan(monkeypatch):
     as_of = datetime(2026, 7, 27, 12, 0)
     five_m_calls: list[str] = []
 
-    def fake_get_5m(symbol, start, end):
+    def fake_get_5m(symbol, start, end, **kwargs):
         five_m_calls.append(symbol)
         return _build_df(session_start, as_of, 5)
 

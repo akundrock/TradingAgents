@@ -30,6 +30,13 @@ PREMARKET_RESEARCH_AGENTS = [
 ]
 
 
+def format_tokens(n: int) -> str:
+    """Format token count for display (e.g. 1500 -> 1.5k)."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)
+
+
 class AnalystStatusBuffer(Protocol):
     selected_analysts: list[str]
     agent_status: dict[str, str]

@@ -122,6 +122,27 @@ def test_intraday_passes_selected_analysts_to_graph(mock_graph, mock_scanner):
 
 
 @pytest.mark.unit
+@patch("cli.main.WatchlistScanner")
+@patch("cli.main.TradingAgentsGraph")
+@patch("cli.main.Live")
+def test_intraday_live_passes_callbacks_to_graph(mock_live, mock_graph, mock_scanner):
+    mock_scanner.return_value.run.return_value = MagicMock()
+    mock_live.return_value.__enter__ = MagicMock(return_value=None)
+    mock_live.return_value.__exit__ = MagicMock(return_value=False)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["intraday", "NVDA", "--dry-run", "--no-premarket", "--live"],
+    )
+    assert result.exit_code == 0, result.output
+    callbacks = mock_graph.call_args.kwargs.get("callbacks")
+    assert callbacks is not None
+    assert len(callbacks) == 1
+    scanner_callbacks = mock_scanner.call_args.kwargs.get("callbacks")
+    assert scanner_callbacks == callbacks
+
+
+@pytest.mark.unit
 @patch("cli.main.configure_logging", return_value="INFO")
 @patch("cli.main.WatchlistScanner")
 @patch("cli.main.TradingAgentsGraph")

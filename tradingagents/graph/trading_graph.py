@@ -462,7 +462,9 @@ class TradingAgentsGraph:
             instrument_context=instrument_context,
         )
         init_agent_state["stop_after_research"] = stop_after_research
-        args = self.propagator.get_graph_args()
+        args = self.propagator.get_graph_args(
+            callbacks=self.callbacks if self.callbacks else None
+        )
 
         if self.config.get("checkpoint_enabled"):
             tid = thread_id(company_name, str(trade_date), self._run_signature(asset_type))
@@ -555,7 +557,9 @@ class TradingAgentsGraph:
             instrument_context=instrument_context,
         )
         init_agent_state["stop_after_research"] = stop_after_research
-        args = self.propagator.get_graph_args()
+        args = self.propagator.get_graph_args(
+            callbacks=self.callbacks if self.callbacks else None
+        )
 
         # Inject thread_id so same ticker+date+graph-shape resumes; a different
         # date or graph shape starts fresh (#1089).

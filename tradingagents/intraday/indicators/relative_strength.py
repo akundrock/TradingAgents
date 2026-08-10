@@ -1,10 +1,54 @@
 from __future__ import annotations
 
+import math
+from datetime import datetime, timedelta
 from typing import Literal
 
 import pandas as pd
 
 RRSTimeframe = Literal["daily", "60m", "30m", "15m", "5m", "3m"]
+
+DEFAULT_RRS_LENGTH = 12
+_RTH_SESSION_MINUTES = 390  # 09:30–16:00 ET
+
+
+def min_rrs_bars(length: int = DEFAULT_RRS_LENGTH) -> int:
+    """Minimum bar count required before compute_rrs returns a real value."""
+    return length + 2
+
+
+def rrs_intraday_fetch_start(
+    as_of: datetime,
+    session_start: datetime,
+    timeframes: list[int],
+    *,
+    length: int = DEFAULT_RRS_LENGTH,
+    min_lookback_days: int = 7,
+) -> datetime:
+    """Earliest 5m fetch start so resampled intraday TFs have enough bars for RRS.
+
+    ThinkScript hourly RRS uses ~12 hourly bars across multiple sessions. Session-only
+    5m data yields ~7 hourly bars per day, which is insufficient (returns 0.0).
+    """
+    coarsest = max((tf for tf in timeframes if isinstance(tf, int) and tf >= 30), default=0)
+    if coarsest == 0:
+        return session_start
+
+    min_bars = min_rrs_bars(length)
+    bars_per_session = max(1, _RTH_SESSION_MINUTES // coarsest)
+    sessions_needed = math.ceil(min_bars / bars_per_session)
+    calendar_days = max(sessions_needed * 3, min_lookback_days)
+    lookback = as_of - timedelta(days=calendar_days)
+    return lookback.replace(
+        hour=session_start.hour,
+        minute=session_start.minute,
+        second=0,
+        microsecond=0,
+    )
+
+
+def has_sufficient_rrs_bars(df: pd.DataFrame, length: int = DEFAULT_RRS_LENGTH) -> bool:
+    return df is not None and not df.empty and len(df) >= min_rrs_bars(length)
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:

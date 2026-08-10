@@ -24,6 +24,7 @@ from cli.display_common import (
     ANALYST_AGENT_NAMES,
     ANALYST_ORDER,
     ANALYST_REPORT_MAP,
+    format_tokens,
     update_analyst_statuses,
 )
 from cli.stats_handler import StatsCallbackHandler
@@ -36,6 +37,7 @@ from cli.utils import (
     ask_output_language,
     ask_qwen_region,
     confirm_ollama_endpoint,
+    confirm_llama_cpp_endpoint,
     detect_asset_type,
     ensure_api_key,
     get_ticker,
@@ -316,13 +318,6 @@ def create_layout():
         Layout(name="progress", ratio=2), Layout(name="messages", ratio=3)
     )
     return layout
-
-
-def format_tokens(n):
-    """Format token count for display."""
-    if n >= 1000:
-        return f"{n/1000:.1f}k"
-    return str(n)
 
 
 def update_display(layout, spinner_text=None, stats_handler=None, start_time=None):
@@ -708,6 +703,8 @@ def get_user_selections():
         # before model selection so it's obvious where we're connecting.
         if selected_llm_provider == "ollama":
             confirm_ollama_endpoint(backend_url)
+        if selected_llm_provider == "llama_cpp":
+            confirm_llama_cpp_endpoint(backend_url)
 
         # Confirm the provider's API key is present; prompt the user to paste
         # one and persist it to .env if it's missing, so the analysis run
@@ -1490,7 +1487,12 @@ def screener_debug(
     source: str = typer.Option(
         "both",
         "--source",
-        help="Universe source: streamer, sp500_quotes, sp500_rrs, or both.",
+        help="Universe source: streamer, sp500_quotes, sp500_rs_quotes, sp500_rrs, or both.",
+    ),
+    direction: str = typer.Option(
+        "long",
+        "--direction",
+        help="For sp500_rs_quotes: long (outperformers), short (underperformers), or both.",
     ),
     keys: list[str] = typer.Option(
         [],
@@ -1512,15 +1514,24 @@ def screener_debug(
         "--compare",
         help="Compare streamer vs REST quote totalVolume for top symbols.",
     ),
+    full_rrs: bool = typer.Option(
+        False,
+        "--full-rrs",
+        help="Run stage-2 multi-TF RRS filter on the shortlist (5m candle fetches; slower).",
+    ),
 ):
-    """Validate universe screener volume discovery (Streamer vs SP500 quotes)."""
+    """Validate universe screener discovery (Streamer vs SP500 quotes vs RS pre-rank)."""
     import json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     from tradingagents.dataflows.config import set_config
     from tradingagents.dataflows.schwab_quotes import (
         fetch_sp500_quote_candidates,
+        fetch_sp500_rs_quote_candidates,
         fetch_sp500_volume_candidates,
         get_quotes,
+        rs_quote_spread,
     )
     from tradingagents.dataflows.schwab_streamer import SchwabEquityScreener
     from tradingagents.intraday.indicators.sector_mapping import is_sp500_constituent
@@ -1528,7 +1539,7 @@ def screener_debug(
     config = dict(DEFAULT_CONFIG)
     set_config(config)
 
-    if source not in ("streamer", "sp500_quotes", "sp500_rrs", "both"):
+    if source not in ("streamer", "sp500_quotes", "sp500_rs_quotes", "sp500_rrs", "both"):
         console.print(f"[red]Invalid --source:[/red] {source}")
         raise typer.Exit(code=1)
 
@@ -1536,6 +1547,8 @@ def screener_debug(
     streamer_candidates: list = []
     sp500_candidates: list = []
     sp500_rrs_candidates: list = []
+    sp500_rs_candidates: list = []
+    rs_benchmark_net = 0.0
     debug_capture: list[dict] = []
 
     if source in ("streamer", "both"):
@@ -1556,6 +1569,25 @@ def screener_debug(
             f"[bold]SP500 quotes[/bold] candidates={len(sp500_candidates)} (volume-ranked)"
         )
 
+    if source == "sp500_rs_quotes":
+        benchmark = str(config.get("pro_trader_benchmark", "SPY"))
+        bench_quote = get_quotes([benchmark]).get(benchmark.upper())
+        rs_benchmark_net = float(bench_quote.net_change) if bench_quote else 0.0
+        sp500_rs_candidates = fetch_sp500_rs_quote_candidates(
+            limit,
+            direction.strip().lower(),  # type: ignore[arg-type]
+            benchmark=benchmark,
+        )
+        console.print(
+            f"[bold]SP500 RS quotes[/bold] direction={direction} "
+            f"candidates={len(sp500_rs_candidates)} "
+            f"(quote netChange vs {benchmark}; bench_net={rs_benchmark_net:+.2f})"
+        )
+        console.print(
+            "[dim]Table shows quote-level RS spread (stage 1). "
+            "Use --full-rrs for multi-TF RRS (5m/1h/daily).[/dim]"
+        )
+
     if source == "sp500_rrs":
         sp500_rrs_candidates = fetch_sp500_quote_candidates()
         console.print(
@@ -1567,36 +1599,96 @@ def screener_debug(
         console.print("[bold]Raw Streamer capture:[/bold]")
         console.print(json.dumps(debug_capture[0], indent=2, default=str))
 
+    show_rs_spread = bool(sp500_rs_candidates)
     table = Table(title="Screener candidates")
     table.add_column("Source")
     table.add_column("Symbol")
     table.add_column("Last")
+    if show_rs_spread:
+        table.add_column("NetChg")
+        table.add_column("RS Spread")
     table.add_column("Volume")
     table.add_column("TotalVol")
     table.add_column("Trades")
     table.add_column("SP500")
 
-    def _add_rows(label: str, candidates: list) -> None:
+    def _add_rows(label: str, candidates: list, *, rs_bench_net: float | None = None) -> None:
         for c in candidates:
-            table.add_row(
+            row = [
                 label,
                 c.symbol,
                 f"{c.last_price:.2f}" if c.last_price else "",
-                str(c.volume or ""),
-                str(c.total_volume or ""),
-                str(c.trades or ""),
-                "yes" if is_sp500_constituent(c.symbol) else "no",
+            ]
+            if rs_bench_net is not None:
+                spread = rs_quote_spread(c, rs_bench_net)
+                row.extend(
+                    [
+                        f"{c.net_change:+.2f}" if c.net_change else "",
+                        f"{spread:+.2f}",
+                    ]
+                )
+            row.extend(
+                [
+                    str(c.volume or ""),
+                    str(c.total_volume or ""),
+                    str(c.trades or ""),
+                    "yes" if is_sp500_constituent(c.symbol) else "no",
+                ]
             )
+            table.add_row(*row)
 
     if streamer_candidates:
         _add_rows("streamer", streamer_candidates)
     if sp500_candidates:
         _add_rows("sp500_quotes", sp500_candidates)
+    if sp500_rs_candidates:
+        _add_rows("sp500_rs_quotes", sp500_rs_candidates, rs_bench_net=rs_benchmark_net)
     if sp500_rrs_candidates:
         display = sp500_rrs_candidates[:limit] if limit else sp500_rrs_candidates
         _add_rows("sp500_rrs", display)
 
     console.print(table)
+
+    if full_rrs and source in ("sp500_rs_quotes", "sp500_rrs"):
+        from tradingagents.intraday.mtf_validator import MultiTimeframeValidator
+        from tradingagents.intraday.universe_screener import UniverseScreener
+
+        tz = ZoneInfo(str(config.get("intraday_timezone", "America/New_York")))
+        now = MultiTimeframeValidator._naive_market_bar_time(datetime.now(tz), config)
+        config["intraday_screener_source"] = source
+        config["intraday_screener_direction"] = direction.strip().lower()
+        config["intraday_screener_candidate_limit"] = limit
+        config["intraday_screener_prefilter_limit"] = limit
+        config["intraday_screener_filters"] = ["rrs"]
+        screener = UniverseScreener(config)
+        _, screened = screener.refresh_watchlist(now, base_watchlist=[])
+
+        rrs_table = Table(title="Stage 2 — multi-TF RRS filter")
+        rrs_table.add_column("Symbol")
+        rrs_table.add_column("Dir")
+        rrs_table.add_column("Aligned")
+        rrs_table.add_column("RRS 5m")
+        rrs_table.add_column("RRS 1h")
+        rrs_table.add_column("RRS daily")
+        rrs_table.add_column("Rank score")
+        rrs_table.add_column("RVol 5m")
+        for item in screened[:limit]:
+            rrs = item.rrs_by_tf or item.filter_metadata.get("rrs_by_tf", {})
+            if not rrs and item.filter_metadata:
+                rrs = item.filter_metadata.get("rrs_by_tf", {})
+            rrs_table.add_row(
+                item.symbol,
+                item.direction,
+                str(item.aligned_count),
+                f"{float(rrs.get('5m', 0.0)):.4f}" if rrs else "",
+                f"{float(rrs.get('60m', 0.0)):.4f}" if rrs else "",
+                f"{float(rrs.get('daily', 0.0)):.4f}" if rrs else "",
+                f"{item.rank_score:.4f}",
+                f"{item.relative_volume_5m:.2f}",
+            )
+        console.print(rrs_table)
+        if not screened:
+            console.print("[yellow]No symbols passed stage-2 RRS filter.[/yellow]")
 
     if compare and streamer_candidates:
         compare_symbols = [c.symbol for c in streamer_candidates[:5]]
@@ -1635,7 +1727,11 @@ def rrs_debug(
     from tradingagents.dataflows.config import set_config
     from tradingagents.dataflows.schwab import get_intraday_5m_candles
     from tradingagents.intraday.frame_enrichment import enriched_frames_from_5m
-    from tradingagents.intraday.indicators.relative_strength import compute_rrs
+    from tradingagents.intraday.indicators.relative_strength import (
+        compute_rrs,
+        has_sufficient_rrs_bars,
+        rrs_intraday_fetch_start,
+    )
 
     config = dict(DEFAULT_CONFIG)
     set_config(config)
@@ -1653,8 +1749,9 @@ def rrs_debug(
         console.print("[red]No valid timeframes.[/red] Use 5m, 30m, or 60m.")
         raise typer.Exit(code=1)
 
-    sym_5m = get_intraday_5m_candles(symbol.upper(), session_start, now)
-    bench_5m = get_intraday_5m_candles(benchmark.upper(), session_start, now)
+    fetch_start = rrs_intraday_fetch_start(now, session_start, tf_minutes)
+    sym_5m = get_intraday_5m_candles(symbol.upper(), session_start, now, fetch_start=fetch_start)
+    bench_5m = get_intraday_5m_candles(benchmark.upper(), session_start, now, fetch_start=fetch_start)
     sym_enriched = enriched_frames_from_5m(sym_5m, tf_minutes)
     bench_enriched = enriched_frames_from_5m(bench_5m, tf_minutes)
 
@@ -1675,13 +1772,17 @@ def rrs_debug(
             table.add_row(label, "0", "0", "", "n/a")
             continue
         sym_close = float(sym_df["Close"].iloc[-1])
-        rrs_val = compute_rrs(sym_df, bench_df, length=length)
+        if not has_sufficient_rrs_bars(sym_df, length=length):
+            rrs_display = f"n/a (<{length + 2} bars)"
+        else:
+            rrs_val = compute_rrs(sym_df, bench_df, length=length)
+            rrs_display = f"{rrs_val:.4f}"
         table.add_row(
             label,
             str(len(sym_df)),
             str(len(bench_df)),
             f"{sym_close:.2f}",
-            f"{rrs_val:.4f}",
+            rrs_display,
         )
 
     console.print(table)
@@ -1836,6 +1937,26 @@ def intraday(
         "--screener-filter-mode",
         help="Screener filter combine mode: any (union) or all (intersection).",
     ),
+    screener_direction: str | None = typer.Option(
+        None,
+        "--screener-direction",
+        help="Screener hunt direction: long, short, or both (default from config).",
+    ),
+    lazy_bias_on_gate1: bool | None = typer.Option(
+        None,
+        "--lazy-bias-on-gate1/--no-lazy-bias-on-gate1",
+        help="Run a slim daily-bias LLM pass after Gate 1 when bias is still neutral.",
+    ),
+    lazy_bias_analysts: str | None = typer.Option(
+        None,
+        "--lazy-bias-analysts",
+        help="Comma-separated analysts for lazy Gate-1 bias (default: market).",
+    ),
+    gate2_mode: str | None = typer.Option(
+        None,
+        "--gate2-mode",
+        help="Gate 2 mode: off, daily_bias, or supertrend (default: resolver).",
+    ),
 ):
     """Run the intraday watchlist scanner on live Schwab data."""
     import sys
@@ -1856,6 +1977,25 @@ def intraday(
         ]
     if screener_filter_mode is not None:
         config["intraday_screener_filter_mode"] = screener_filter_mode
+    if screener_direction is not None:
+        config["intraday_screener_direction"] = screener_direction.strip().lower()
+    if lazy_bias_on_gate1 is not None:
+        config["intraday_lazy_bias_on_gate1"] = lazy_bias_on_gate1
+    if lazy_bias_analysts is not None:
+        config["intraday_lazy_bias_analysts"] = [
+            part.strip()
+            for part in lazy_bias_analysts.replace(",", " ").split()
+            if part.strip()
+        ]
+    if gate2_mode is not None:
+        normalized = gate2_mode.strip().lower()
+        if normalized not in ("off", "daily_bias", "supertrend"):
+            console.print(
+                "[red]Invalid --gate2-mode:[/red] "
+                "expected off, daily_bias, or supertrend"
+            )
+            raise typer.Exit(code=1)
+        config["intraday_gate2_mode"] = normalized
     resolved_watchlist = _resolve_intraday_watchlist(symbols, watchlist)
     if resolved_watchlist:
         config["watchlist"] = resolved_watchlist
@@ -1886,12 +2026,16 @@ def intraday(
 
     set_config(config)
 
+    from tradingagents.intraday.gating import resolve_gate2_mode
+
+    resolved_gate2_mode = resolve_gate2_mode(config)
     symbols_display = ", ".join(config["watchlist"])
     table = Table(title="Intraday Scanner")
     table.add_column("Setting")
     table.add_column("Value")
     table.add_row("Watchlist", symbols_display)
     table.add_row("Strategy", strategy)
+    table.add_row("Gate 2 mode", resolved_gate2_mode)
     table.add_row("Dry run", str(dry_run))
     table.add_row("Log level", resolved_level)
     table.add_row(
@@ -1910,6 +2054,27 @@ def intraday(
         else:
             restore_label = "disabled"
         table.add_row("Premarket restore", restore_label)
+    lazy_bias_enabled = (
+        resolved_gate2_mode == "daily_bias"
+        and bool(config.get("intraday_lazy_bias_on_gate1", True))
+    )
+    lazy_bias_label = (
+        "enabled"
+        if lazy_bias_enabled
+        else "disabled"
+    )
+    if lazy_bias_on_gate1 is not None:
+        lazy_bias_label = "enabled" if lazy_bias_on_gate1 else "disabled"
+    table.add_row("Lazy Gate-1 bias", lazy_bias_label)
+    if lazy_bias_enabled or lazy_bias_on_gate1 is not False:
+        lazy_analysts = config.get("intraday_lazy_bias_analysts") or ["market"]
+        if lazy_bias_analysts is not None:
+            lazy_analysts = [
+                part.strip()
+                for part in lazy_bias_analysts.replace(",", " ").split()
+                if part.strip()
+            ]
+        table.add_row("Lazy bias analysts", ", ".join(lazy_analysts))
     use_live = live if live is not None else sys.stdout.isatty()
     if not use_live:
         console.print(table)
@@ -1917,10 +2082,14 @@ def intraday(
     if no_restore_premarket:
         config["intraday_restore_premarket_bias"] = False
 
+    stats_handler = StatsCallbackHandler() if use_live else None
+    graph_callbacks = [stats_handler] if stats_handler else []
+
     graph = TradingAgentsGraph(
         selected_analysts=tuple(premarket_analysts or DEFAULT_CONFIG["intraday_premarket_analysts"]),
         config=config,
         debug=False,
+        callbacks=graph_callbacks,
     )
     scanner = WatchlistScanner(
         config,
@@ -1929,6 +2098,7 @@ def intraday(
         skip_premarket=no_premarket,
         restore_premarket=bool(config.get("intraday_restore_premarket_bias", True)),
         force_premarket=force_premarket,
+        callbacks=graph_callbacks,
     )
 
     if use_live:
@@ -1942,7 +2112,6 @@ def intraday(
         )
 
         start_time = datetime.datetime.now()
-        stats_handler = StatsCallbackHandler()
         buffer = IntradayDashboardBuffer(
             session=scanner.session,
             strategy_name=strategy,

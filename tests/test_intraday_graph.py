@@ -17,6 +17,7 @@ def test_propagate_intraday_returns_signal(monkeypatch):
     from tradingagents.graph.propagation import Propagator
 
     graph = IntradayTradingGraph.__new__(IntradayTradingGraph)
+    graph.callbacks = []
     graph.propagator = Propagator()
     graph.graph = MagicMock()
     graph.graph.invoke.return_value = {
@@ -90,6 +91,7 @@ def test_intraday_state_contains_context(monkeypatch):
     from tradingagents.graph.propagation import Propagator
 
     graph = IntradayTradingGraph.__new__(IntradayTradingGraph)
+    graph.callbacks = []
     graph.propagator = Propagator()
     graph.graph = _Graph()
 

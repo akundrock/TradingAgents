@@ -7,10 +7,12 @@ from typing import Any, Literal
 import pandas as pd
 
 from tradingagents.dataflows.schwab import get_intraday_5m_candles
+from tradingagents.dataflows.stockstats_utils import load_ohlcv
 from tradingagents.intraday.frame_enrichment import enriched_frames_from_5m
 from tradingagents.intraday.indicators.relative_strength import (
     compute_rrs_multi_timeframe,
     count_aligned_rrs,
+    rrs_intraday_fetch_start,
 )
 from tradingagents.intraday.indicators.relative_volume import compute_relative_volume
 from tradingagents.intraday.screener_filters.base import FilterResult, ScanContext, ScreenerDirection
@@ -48,21 +50,38 @@ class RrsFilter:
         *,
         session_start: datetime,
         session: object | None = None,
-    ) -> dict[int, pd.DataFrame]:
+    ) -> dict[str, Any]:
         timeframes = list(config.get("intraday_screener_rrs_timeframes") or [5, 30, 60])
         rank_rrs_tf = resolve_rank_rrs_timeframe(config)
         rank_tf_minutes = RANK_RRS_MINUTES[rank_rrs_tf]
         if rank_tf_minutes not in timeframes:
             timeframes = sorted(set(timeframes) | {rank_tf_minutes})
         benchmark = str(config.get("pro_trader_benchmark", "SPY"))
-        df_5m = get_intraday_5m_candles(benchmark, session_start, bar_time)
+        fetch_start = rrs_intraday_fetch_start(bar_time, session_start, timeframes)
+        df_5m = get_intraday_5m_candles(
+            benchmark, session_start, bar_time, fetch_start=fetch_start
+        )
         enriched = enriched_frames_from_5m(df_5m, timeframes)
         logger.info(
-            "RrsFilter: cached benchmark %s 5m bars (%d rows)",
+            "RrsFilter: cached benchmark %s 5m bars (%d rows, fetch_start=%s)",
             benchmark,
             len(df_5m),
+            fetch_start.date(),
         )
-        return enriched
+        prepared: dict[str, Any] = {"intraday": enriched}
+        if bool(config.get("intraday_screener_include_daily_rrs", False)):
+            trade_date = bar_time.strftime("%Y-%m-%d")
+            try:
+                bench_daily = load_ohlcv(benchmark, trade_date).tail(60)
+                prepared["bench_daily"] = bench_daily
+                logger.info(
+                    "RrsFilter: cached benchmark %s daily bars (%d rows)",
+                    benchmark,
+                    len(bench_daily),
+                )
+            except Exception as exc:
+                logger.warning("RrsFilter: failed to load benchmark daily %s: %s", benchmark, exc)
+        return prepared
 
     def evaluate(self, ctx: ScanContext) -> FilterResult:
         config = ctx.config
@@ -77,7 +96,18 @@ class RrsFilter:
 
         direction = str(config.get("intraday_screener_direction", "long"))
         directions = _resolve_directions(direction)
-        bench_enriched = ctx.shared.get(self.name) or ctx.bench_enriched
+        bench_data = ctx.shared.get(self.name) or ctx.bench_enriched
+        bench_enriched: dict = {}
+        bench_daily: pd.DataFrame | None = None
+        if isinstance(bench_data, dict) and "intraday" in bench_data:
+            intraday = bench_data.get("intraday")
+            if isinstance(intraday, dict):
+                bench_enriched = intraday
+            daily = bench_data.get("bench_daily")
+            if isinstance(daily, pd.DataFrame):
+                bench_daily = daily
+        elif isinstance(bench_data, dict):
+            bench_enriched = bench_data
 
         sym_enriched = enriched_frames_from_5m(ctx.df_5m, timeframes)
         sym_frames: dict[int | str, pd.DataFrame] = {}
@@ -87,6 +117,25 @@ class RrsFilter:
                 sym_frames[tf] = sym_enriched[tf]
             if tf in bench_enriched and not bench_enriched[tf].empty:
                 bench_frames[tf] = bench_enriched[tf]
+
+        include_daily = bool(config.get("intraday_screener_include_daily_rrs", False))
+        if include_daily and bench_daily is not None and not bench_daily.empty:
+            daily_cache = ctx.shared.setdefault("rrs_daily_cache", {})
+            if not isinstance(daily_cache, dict):
+                daily_cache = {}
+                ctx.shared["rrs_daily_cache"] = daily_cache
+            sym_daily = daily_cache.get(ctx.symbol)
+            if sym_daily is None:
+                trade_date = ctx.bar_time.strftime("%Y-%m-%d")
+                try:
+                    sym_daily = load_ohlcv(ctx.symbol, trade_date).tail(60)
+                    daily_cache[ctx.symbol] = sym_daily
+                except Exception as exc:
+                    logger.debug("RrsFilter: daily load failed for %s: %s", ctx.symbol, exc)
+                    sym_daily = pd.DataFrame()
+            if sym_daily is not None and not sym_daily.empty:
+                sym_frames["daily"] = sym_daily
+                bench_frames["daily"] = bench_daily
 
         rrs_by_tf = compute_rrs_multi_timeframe(sym_frames, bench_frames)
         if not rrs_by_tf:

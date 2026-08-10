@@ -39,6 +39,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_LOG_LEVEL":                  "log_level",
     "TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS": "intraday_premarket_analysts",
     "TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS": "intraday_restore_premarket_bias",
+    "TRADINGAGENTS_INTRADAY_LAZY_BIAS_ON_GATE1": "intraday_lazy_bias_on_gate1",
     # Pro Trader volume pressure (optional gates; default off in DEFAULT_CONFIG).
     "TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE": "pro_trader_require_buy_pressure",
     "TRADINGAGENTS_PRO_TRADER_REQUIRE_SELL_PRESSURE": "pro_trader_require_sell_pressure",
@@ -49,6 +50,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_INTRADAY_SCREENER_MIN_PRICE": "intraday_screener_min_price",
     "TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_SP500": "intraday_screener_require_sp500",
     "TRADINGAGENTS_INTRADAY_SCREENER_SOURCE": "intraday_screener_source",
+    "TRADINGAGENTS_INTRADAY_SCREENER_PREFILTER_LIMIT": "intraday_screener_prefilter_limit",
+    "TRADINGAGENTS_INTRADAY_SCREENER_INCLUDE_DAILY_RRS": "intraday_screener_include_daily_rrs",
+    "TRADINGAGENTS_INTRADAY_SCREENER_RANK_BY": "intraday_screener_rank_by",
+    "TRADINGAGENTS_INTRADAY_SCREENER_DIRECTION": "intraday_screener_direction",
 }
 
 
@@ -209,9 +214,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_benchmark_cache_per_scan": True,
     "intraday_strategy": "base_momentum",
     "intraday_require_daily_bias_alignment": True,
-    # When orb_breakout runs with the dynamic screener, skip Gate 2 (daily bias vs
-    # 30m trend) unless explicitly re-enabled via intraday_require_daily_bias_alignment.
-    "intraday_orb_breakout_screener_disable_gate2": True,
+    "intraday_gate2_mode": None,
+    "intraday_lazy_bias_on_gate1": True,
+    "intraday_lazy_bias_analysts": ["market"],
+    # When orb_breakout runs with the dynamic screener, Gate 2 defaults to SuperTrend
+    # (no LLM). Set true to skip Gate 2 entirely for that workflow.
+    "intraday_orb_breakout_screener_disable_gate2": False,
     "pro_trader_benchmark": "SPY",
     "pro_trader_entry_mode": "wick_touch",
     "pro_trader_min_rs_timeframes": 3,
@@ -232,14 +240,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_screener_interval_minutes": 5,
     "intraday_screener_keys": ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"],
     "intraday_screener_candidate_limit": 50,
-    "intraday_screener_rrs_timeframes": [5, 30, 60],
-    "intraday_screener_min_rrs_aligned": 0,
+    "intraday_screener_prefilter_limit": 100,
+    "intraday_screener_rrs_timeframes": [5, 60],
+    "intraday_screener_include_daily_rrs": True,
+    "intraday_screener_min_rrs_aligned": 2,
     "intraday_screener_require_relative_volume": False,
     "intraday_screener_min_price": 10.0,
     "intraday_screener_require_sp500": True,
     "intraday_screener_source": "auto",
     "intraday_screener_rank_mode": "pass_only",
     "intraday_screener_rank_rrs_timeframe": "5m",
+    "intraday_screener_rank_by": "aligned",
     "intraday_screener_max_concurrent_symbols": None,
     "intraday_screener_max_watchlist": 12,
     "intraday_screener_direction": "short",

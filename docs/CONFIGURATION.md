@@ -441,8 +441,11 @@ tradingagents  # Fully configured, no interaction
 | `intraday_mtf_fetch_mode` | str | `5m_resample` | — | `5m_resample` (one 5m call per symbol; 15/30/60 derived locally) or `multi` (legacy parallel fetch per TF) |
 | `intraday_benchmark_cache_per_scan` | bool | `True` | — | Fetch SPY/benchmark intraday frames once per scan cycle (shared across watchlist) |
 | `intraday_strategy` | str | `base_momentum` | `TRADINGAGENTS_INTRADAY_STRATEGY` | `base_momentum` or `pro_trader_dashboard` |
-| `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Gate 2: 30m trend vs daily bias |
-| `intraday_orb_breakout_screener_disable_gate2` | bool | `True` | — | When `orb_breakout` + screener, skip Gate 2 unless set to `false` |
+| `intraday_gate2_mode` | str \| null | `None` | — | Gate 2: `off`, `daily_bias`, or `supertrend`. `None` uses resolver (`orb_breakout` + screener → `supertrend`) |
+| `intraday_require_daily_bias_alignment` | bool | `True` | `TRADINGAGENTS_INTRADAY_REQUIRE_DAILY_BIAS_ALIGNMENT` | Legacy; when `gate2_mode` unset, `false` → Gate 2 `off` |
+| `intraday_lazy_bias_on_gate1` | bool | `True` | `TRADINGAGENTS_INTRADAY_LAZY_BIAS_ON_GATE1` | After Gate 1, run slim daily bias when bias is still neutral (`daily_bias` mode only) |
+| `intraday_lazy_bias_analysts` | list[str] | `market` | — | Analyst wire keys for lazy Gate-1 bias |
+| `intraday_orb_breakout_screener_disable_gate2` | bool | `False` | — | When `orb_breakout` + screener and `gate2_mode` unset, `true` skips Gate 2 |
 | `intraday_output_dir` | str | `~/.tradingagents/intraday` | — | Signals CSV and premarket cache root |
 | `intraday_max_concurrent_symbols` | int | `5` | — | Parallel symbol evaluation / screener RRS batch size |
 | `intraday_signal_cooldown_bars` | int | `3` | — | Suppress duplicate same-direction signals within N scan intervals |
@@ -451,18 +454,21 @@ tradingagents  # Fully configured, no interaction
 | `intraday_screener_enabled` | bool | `False` | — | Dynamic volume + RRS watchlist screener |
 | `intraday_screener_interval_minutes` | int | `15` | — | Screener refresh cadence |
 | `intraday_screener_keys` | list[str] | `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0` | — | Schwab Streamer volume rankings (exchange actives; not SPY index) |
-| `intraday_screener_candidate_limit` | int | `50` | — | Max symbols before RRS (`sp500_quotes`/streamer) or **after** RRS ranking (`sp500_rrs`) |
-| `intraday_screener_rrs_timeframes` | list[int] | `[5, 30, 60]` | — | RRS timeframes for screener filter |
-| `intraday_screener_min_rrs_aligned` | int | `3` | — | Min aligned RRS TFs (`0` = pure rank with `rank_all`) |
+| `intraday_screener_candidate_limit` | int | `50` | — | Max symbols before RRS (`sp500_quotes`/streamer) or **after** RRS ranking (`sp500_rrs` / `sp500_rs_quotes`) |
+| `intraday_screener_prefilter_limit` | int | `100` | `TRADINGAGENTS_INTRADAY_SCREENER_PREFILTER_LIMIT` | Quote RS shortlist for `sp500_rs_quotes` (before 5m fetches) |
+| `intraday_screener_rrs_timeframes` | list[int] | `[5, 60]` | — | Intraday RRS TFs (minutes); 60m resampled from 5m |
+| `intraday_screener_include_daily_rrs` | bool | `True` | `TRADINGAGENTS_INTRADAY_SCREENER_INCLUDE_DAILY_RRS` | Include daily RRS in screener alignment |
+| `intraday_screener_min_rrs_aligned` | int | `2` | — | Min aligned RRS TFs (`0` = pure rank with `rank_all`) |
 | `intraday_screener_rank_mode` | str | `pass_only` | — | `pass_only` (reject below min_aligned) or `rank_all` (score all, sort by rank RRS TF) |
 | `intraday_screener_rank_rrs_timeframe` | str | `5m` | — | RRS timeframe for screener sort key: `5m`, `30m`, or `60m` |
+| `intraday_screener_rank_by` | str | `aligned` | `TRADINGAGENTS_INTRADAY_SCREENER_RANK_BY` | `aligned` (TF agreement first) or `magnitude` (RRS score first) |
 | `intraday_screener_require_relative_volume` | bool | `False` | — | Optional 5m rvolume > 1 before RRS ranking |
 | `intraday_screener_min_price` | float | `10.0` | `TRADINGAGENTS_INTRADAY_SCREENER_MIN_PRICE` | Min last price from streamer (0 = no filter) |
 | `intraday_screener_require_sp500` | bool | `True` | `TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_SP500` | Require S&P 500 membership via `sp500_constituents.json` (not `intraday_screener_keys`) |
-| `intraday_screener_source` | str | `auto` | `TRADINGAGENTS_INTRADAY_SCREENER_SOURCE` | `auto`, `sp500_quotes` (volume-ranked), `sp500_rrs` (RRS-ranked full SP500), or `streamer` |
+| `intraday_screener_source` | str | `auto` | `TRADINGAGENTS_INTRADAY_SCREENER_SOURCE` | `auto` (RRS → `sp500_rs_quotes`), `sp500_rs_quotes`, `sp500_rrs`, `sp500_quotes`, or `streamer` |
 | `intraday_screener_max_concurrent_symbols` | int | `None` | — | Screener RRS batch parallelism (defaults to `intraday_max_concurrent_symbols`) |
 | `intraday_screener_max_watchlist` | int | `12` | — | Cap merged watchlist size |
-| `intraday_screener_direction` | str | `long` | — | `long`, `short`, or `both` for RRS alignment |
+| `intraday_screener_direction` | str | `short` | `TRADINGAGENTS_INTRADAY_SCREENER_DIRECTION` | `long` (outperformers), `short` (underperformers), or `both` |
 | `intraday_screener_start_time` | str | `10:00` | — | ET — no screener refresh before OR window ends |
 | `intraday_screener_symbol_cooldown_minutes` | int | `30` | — | Cooldown after symbol removed (config only; enforcement pending) |
 | `intraday_screener_run_premarket_for_new` | bool | `False` | — | Run LLM pre-market for screener-added symbols |
@@ -539,10 +545,69 @@ export AWS_REGION=us-west-2
 ### Example 3: Using Local Ollama Server
 
 ```bash
-# Ollama running on localhost:11434
-export TRADINGAGENTS_LLM_PROVIDER=openai
-export TRADINGAGENTS_DEEP_THINK_LLM=llama2
-export TRADINGAGENTS_LLM_BACKEND_URL=http://localhost:11434/v1
+export TRADINGAGENTS_LLM_PROVIDER=ollama
+export TRADINGAGENTS_DEEP_THINK_LLM=qwen3:latest
+export TRADINGAGENTS_QUICK_THINK_LLM=qwen3:latest
+# Optional remote host:
+# export OLLAMA_BASE_URL=http://your-ollama-host:11434/v1
+```
+
+### Example 3b: Using llama.cpp (llama-server)
+
+```bash
+# Start llama-server (model path and --alias must match model IDs below):
+# llama-server -m /path/to/model.gguf --alias qwen2.5-7b-instruct -ngl 99 -c 8192
+
+export TRADINGAGENTS_LLM_PROVIDER=llama_cpp
+export TRADINGAGENTS_DEEP_THINK_LLM=qwen2.5-7b-instruct
+export TRADINGAGENTS_QUICK_THINK_LLM=qwen2.5-7b-instruct
+# Optional remote host:
+# export LLAMA_CPP_BASE_URL=http://your-llama-server:8080/v1
+```
+
+Docker profile:
+
+```bash
+# Place GGUF files in a volume mounted at /models, set LLAMA_ARG_MODEL in compose.
+docker compose --profile llamacpp run --rm tradingagents-llamacpp
+```
+
+### Local inference: Ollama vs llama.cpp
+
+Both backends use the same LangChain OpenAI-compatible client path. TradingAgents
+also supports llama.cpp via `openai_compatible` + `TRADINGAGENTS_LLM_BACKEND_URL`
+without the dedicated `llama_cpp` provider.
+
+**Tune Ollama first (no code changes):**
+
+```bash
+export OLLAMA_FLASH_ATTENTION=1
+export OLLAMA_KV_CACHE_TYPE=q8_0
+# restart ollama serve
+```
+
+**Config-only llama.cpp trial:**
+
+1. Run `llama-server` with Metal offload on Apple Silicon (`-ngl 99`).
+2. Set `TRADINGAGENTS_LLM_PROVIDER=openai_compatible` and
+   `TRADINGAGENTS_LLM_BACKEND_URL=http://localhost:8080/v1`, or use
+   `TRADINGAGENTS_LLM_PROVIDER=llama_cpp`.
+3. Run the same intraday dry-run or premarket pass on one symbol with each backend.
+4. Compare:
+   - **Throughput:** llama-server logs tok/s; Ollama `ollama run` or server metrics.
+   - **Wall-clock:** intraday live footer elapsed time and LLM call counts.
+   - **Tokens:** live footer `Tokens:` line (wired via `StatsCallbackHandler`).
+
+On Apple Silicon GPU, expect ~10–18% higher throughput from llama.cpp vs default
+Ollama; Ollama can win on warm time-to-first-token when prompt caching helps.
+
+**Alternative without dedicated provider:**
+
+```bash
+export TRADINGAGENTS_LLM_PROVIDER=openai_compatible
+export TRADINGAGENTS_LLM_BACKEND_URL=http://localhost:8080/v1
+export TRADINGAGENTS_QUICK_THINK_LLM=your-model-alias
+export TRADINGAGENTS_DEEP_THINK_LLM=your-model-alias
 ```
 
 ### Example 4: Multi-Analyst Deep Analysis

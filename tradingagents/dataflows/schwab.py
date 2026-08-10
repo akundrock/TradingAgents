@@ -697,20 +697,38 @@ def get_candles_multi_timeframe(
     return result
 
 
+def _naive_market_datetime(dt: datetime, timezone: str = "America/New_York") -> datetime:
+    """Convert to naive wall-clock time in the market timezone (matches candle Date column)."""
+    if dt.tzinfo is None:
+        return dt
+    from zoneinfo import ZoneInfo
+
+    return dt.astimezone(ZoneInfo(timezone)).replace(tzinfo=None)
+
+
 def get_intraday_5m_candles(
     symbol: str,
     session_start: datetime,
     as_of: datetime,
+    *,
+    fetch_start: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch session 5m OHLCV bars (single pricehistory call per symbol)."""
-    if as_of <= session_start:
-        raise ValueError("as_of must be after session_start")
+    """Fetch 5m OHLCV bars (single pricehistory call per symbol).
+
+    By default fetches from ``session_start`` through ``as_of``. Pass ``fetch_start``
+    earlier (e.g. from ``rrs_intraday_fetch_start``) when hourly RRS needs prior sessions.
+    """
+    session_start = _naive_market_datetime(session_start)
+    as_of = _naive_market_datetime(as_of)
+    start_dt = _naive_market_datetime(fetch_start) if fetch_start is not None else session_start
+    if as_of <= start_dt:
+        raise ValueError("as_of must be after fetch start")
 
     curr_date = as_of.strftime("%Y-%m-%d")
     canonical = _normalize_symbol(symbol)
     candles = _fetch_price_history_range(
         symbol=symbol,
-        start_dt=session_start,
+        start_dt=start_dt,
         end_dt=as_of,
         frequency_type="minute",
         frequency=5,
@@ -718,7 +736,7 @@ def get_intraday_5m_candles(
     if not candles:
         raise NoMarketDataError(symbol, canonical, "Schwab returned no 5m candles")
     data = _candles_to_df(candles, symbol, curr_date, session_timezone="America/New_York")
-    mask = (data["Date"] >= pd.to_datetime(session_start)) & (
+    mask = (data["Date"] >= pd.to_datetime(start_dt)) & (
         data["Date"] <= pd.to_datetime(as_of)
     )
     frame = data.loc[mask].copy()

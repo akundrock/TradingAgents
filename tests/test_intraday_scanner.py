@@ -339,6 +339,216 @@ def test_scan_state_populated_on_gate_failure(monkeypatch):
     assert scanner.session.latest_scan_by_symbol["NVDA"].factors_missing == ["rsi_in_range"]
 
 
+def _neutral_bias(symbol: str) -> DailyBiasReport:
+    return DailyBiasReport(
+        symbol=symbol,
+        trade_date="2026-07-27",
+        direction="neutral",
+        key_levels={},
+        summary="neutral bias",
+        computed_at=datetime(2026, 7, 27, 9, 0),
+    )
+
+
+def _bearish_bias(symbol: str) -> DailyBiasReport:
+    return DailyBiasReport(
+        symbol=symbol,
+        trade_date="2026-07-27",
+        direction="bearish",
+        key_levels={},
+        summary="sell bias",
+        computed_at=datetime(2026, 7, 27, 10, 5),
+    )
+
+
+def _mtf_short(symbol: str) -> MTFValidationResult:
+    mtf = _mtf(symbol)
+    mtf.trend_30min = "down"
+    mtf.daily_bias_direction = "neutral"
+    mtf.trends_aligned = False
+    return mtf
+
+
+def _lazy_bias_config() -> dict:
+    config = _config()
+    config["intraday_lazy_bias_on_gate1"] = True
+    config["intraday_lazy_bias_analysts"] = ["market"]
+    config["intraday_gate2_mode"] = "daily_bias"
+    return config
+
+
+@pytest.mark.unit
+def test_lazy_bias_not_called_on_g1_fail(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
+    lazy_graph = MagicMock()
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=False,
+            direction="none",
+            reason="blocked",
+            factors_met=[],
+            factors_missing=["rsi_in_range"],
+        ),
+    )
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    lazy_graph.propagate_daily_bias.assert_not_called()
+
+
+@pytest.mark.unit
+def test_lazy_bias_called_on_g1_pass_with_neutral_bias(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.session_date = "2026-07-27"
+    scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
+    lazy_graph = MagicMock()
+    lazy_graph.propagate_daily_bias.side_effect = (
+        lambda symbol, trade_date: _bearish_bias(symbol)
+    )
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=True,
+            direction="long",
+            reason="Long momentum setup confirmed.",
+            factors_met=["close_above_vwap"],
+            factors_missing=[],
+        ),
+    )
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    lazy_graph.propagate_daily_bias.assert_called_once_with("NVDA", "2026-07-27")
+
+
+@pytest.mark.unit
+def test_lazy_bias_not_called_with_supertrend_gate2_mode(monkeypatch):
+    ta_graph = MagicMock()
+    config = _lazy_bias_config()
+    config["intraday_gate2_mode"] = "supertrend"
+    scanner = WatchlistScanner(
+        config, ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
+    lazy_graph = MagicMock()
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=True,
+            direction="long",
+            reason="Long momentum setup confirmed.",
+            factors_met=["close_above_vwap"],
+            factors_missing=[],
+        ),
+    )
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    lazy_graph.propagate_daily_bias.assert_not_called()
+
+
+@pytest.mark.unit
+def test_lazy_bias_skipped_when_bias_already_set(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.daily_bias_cache["NVDA"] = _bias("NVDA")
+    lazy_graph = MagicMock()
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=True,
+            direction="long",
+            reason="Long momentum setup confirmed.",
+            factors_met=["close_above_vwap"],
+            factors_missing=[],
+        ),
+    )
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    lazy_graph.propagate_daily_bias.assert_not_called()
+
+
+@pytest.mark.unit
+def test_lazy_bias_enables_g2_pass(monkeypatch):
+    ta_graph = MagicMock()
+    config = _lazy_bias_config()
+    config["watchlist"] = ["NVDA"]
+    scanner = WatchlistScanner(
+        config, ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.session_date = "2026-07-27"
+    scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
+    lazy_graph = MagicMock()
+    lazy_graph.propagate_daily_bias.side_effect = (
+        lambda symbol, trade_date: _bearish_bias(symbol)
+    )
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf_short(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=True,
+            direction="short",
+            reason="Short momentum setup confirmed.",
+            factors_met=["close_below_vwap"],
+            factors_missing=[],
+        ),
+    )
+
+    bar_time = datetime(2026, 7, 27, 10, 0)
+    scanner._on_bar_close(bar_time)
+
+    lazy_graph.propagate_daily_bias.assert_called_once_with("NVDA", scanner.session.session_date)
+    assert len(scanner.session.signal_log) == 1
+    assert scanner.session.signal_log[0].direction == "short"
+    assert scanner.session.latest_scan_by_symbol["NVDA"].gate2_passed is True
+
+
 @pytest.mark.unit
 def test_screener_refresh_updates_watchlist(monkeypatch):
     ta_graph = MagicMock()

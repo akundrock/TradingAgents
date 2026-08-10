@@ -30,14 +30,17 @@ from tradingagents.default_config import DEFAULT_CONFIG
 class IntradayTradingGraph:
     """Slim LangGraph for intraday signal generation: Trader → Risk Debate → PM."""
 
-    def __init__(self, config: dict | None = None):
+    def __init__(self, config: dict | None = None, callbacks: list | None = None):
         self.config = config or DEFAULT_CONFIG
+        self.callbacks = callbacks or []
         set_config(self.config)
 
         llm_kwargs: dict[str, Any] = {}
         temperature = self.config.get("temperature")
         if temperature is not None and temperature != "":
             llm_kwargs["temperature"] = float(temperature)
+        if self.callbacks:
+            llm_kwargs["callbacks"] = self.callbacks
 
         quick_client = create_llm_client(
             provider=self.config["llm_provider"],
@@ -125,7 +128,10 @@ class IntradayTradingGraph:
             }
         )
 
-        final_state = self.graph.invoke(init_state, **self.propagator.get_graph_args())
+        graph_args = self.propagator.get_graph_args(
+            callbacks=self.callbacks if self.callbacks else None
+        )
+        final_state = self.graph.invoke(init_state, **graph_args)
         return _state_to_intraday_signal(
             symbol=symbol,
             bar_time=bar_time,
