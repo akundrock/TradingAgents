@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Added
+
+- **MES copilot** (`tradingagents mes`): deterministic /MES 5-minute checklist,
+  sizing, session journal, and morning / gatekeeper / review agents.
+- **TOS-parity market internals** in `tradingagents/mes/internals.py`, ported
+  from the Thinkorswim internals dashboard:
+  - **$TICK**: dynamic threshold `mean(|TICK|, 20) × 1.5` (disable with
+    `TRADINGAGENTS_MES_USE_DYNAMIC_TICK_THRESHOLD=false` to keep ±600);
+    persistent 3-bar same-sign streaks count as confirmation; burst at
+    `1.5 ×` the effective threshold.
+  - **$VOLD**: bar-over-bar divergence vs SPY direction (replaces session
+    change vs 6-bar slope); opposing divergence is a no-trade; 20-bar z-score
+    is display-only. SPY “$VOLD trending with direction” still uses the 6-bar
+    slope.
+
 ## [0.3.1] — 2026-07-05
 
 Correctness and stability patch: data look-ahead, graph-router crash-safety,

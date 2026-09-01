@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 SCREENER_SERVICE = "SCREENER_EQUITY"
 DEFAULT_SCREENER_FIELDS = "0,1,2,3,4"
 
+LEVELONE_EQUITIES_SERVICE = "LEVELONE_EQUITIES"
+CHART_EQUITY_SERVICE = "CHART_EQUITY"
+INTERNAL_LEVELONE_FIELDS = "0,3,17,29,33,34,35"
+INTERNAL_CHART_EQUITY_FIELDS = "0,1,2,3,4,5,6,7"
+INTERNAL_SYMBOLS = ("$ADD", "$TICK", "$VOLD")
+INTERNAL_CHART_SYMBOLS = ("$ADD", "$VOLD")
+
 
 @dataclass
 class ScreenerCandidate:
@@ -111,6 +118,59 @@ def _field_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _is_internal_symbol(symbol: str) -> bool:
+    return str(symbol or "").startswith("$")
+
+
+def _content_symbol(item: dict[str, Any]) -> str:
+    return str(item.get("key") or item.get("0") or "").strip().upper()
+
+
+def _parse_level_one_internal(symbol: str, item: dict[str, Any]) -> float | None:
+    """Parse LEVELONE_EQUITIES update for $ADD / $TICK / $VOLD.
+
+    Index internals often stream 0 in field 3; field 29 is regular-market last.
+    """
+    fields = ["3", "29", "33", "17", "10"] if _is_internal_symbol(symbol) else ["3"]
+    for key in fields:
+        value = _field_float(item.get(key))
+        if _is_internal_symbol(symbol) and value == 0:
+            continue
+        return value
+    return None
+
+
+def _parse_chart_equity_internal(symbol: str, item: dict[str, Any]) -> float | None:
+    """Parse CHART_EQUITY candle close for internals symbols."""
+    value = _field_float(item.get("4"))
+    if _is_internal_symbol(symbol) and value == 0:
+        return None
+    if item.get("4") is None:
+        return None
+    return value
+
+
+def _apply_internal_reading(readings: dict[str, float], symbol: str, value: float | None) -> None:
+    if not symbol or value is None:
+        return
+    if _is_internal_symbol(symbol) and symbol in ("$ADD", "$VOLD") and value == 0:
+        return
+    readings[symbol] = value
+
+
+def _ingest_internals_envelope(envelope: dict[str, Any], readings: dict[str, float]) -> None:
+    for data in envelope.get("data", []):
+        service = data.get("service")
+        for content in data.get("content", []):
+            if not isinstance(content, dict):
+                continue
+            symbol = _content_symbol(content)
+            if service == LEVELONE_EQUITIES_SERVICE:
+                _apply_internal_reading(readings, symbol, _parse_level_one_internal(symbol, content))
+            elif service == CHART_EQUITY_SERVICE:
+                _apply_internal_reading(readings, symbol, _parse_chart_equity_internal(symbol, content))
 
 
 def _parse_screener_item(item: dict[str, Any]) -> ScreenerCandidate | None:
@@ -423,6 +483,98 @@ async def _fetch_screener_candidates_async(
             timeout_seconds=timeout_seconds,
             debug_capture=debug_capture,
         )
+
+
+async def _collect_internals_quotes(
+    ws: Any,
+    session: SchwabStreamerSession,
+    request_id: int,
+    *,
+    timeout_seconds: float,
+) -> dict[str, float]:
+    readings: dict[str, float] = {}
+
+    levelone = _build_request(
+        request_id,
+        LEVELONE_EQUITIES_SERVICE,
+        "SUBS",
+        session,
+        {
+            "keys": ",".join(INTERNAL_SYMBOLS),
+            "fields": INTERNAL_LEVELONE_FIELDS,
+        },
+    )
+    request_id += 1
+    chart = _build_request(
+        request_id,
+        CHART_EQUITY_SERVICE,
+        "SUBS",
+        session,
+        {
+            "keys": ",".join(INTERNAL_CHART_SYMBOLS),
+            "fields": INTERNAL_CHART_EQUITY_FIELDS,
+        },
+    )
+    await ws.send(json.dumps(levelone))
+    await ws.send(json.dumps(chart))
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+        except asyncio.TimeoutError:
+            if all(symbol in readings for symbol in INTERNAL_SYMBOLS):
+                break
+            continue
+
+        _ingest_internals_envelope(json.loads(raw), readings)
+        if all(symbol in readings for symbol in INTERNAL_SYMBOLS):
+            break
+
+    return readings
+
+
+async def _run_internals_session(
+    session: SchwabStreamerSession,
+    *,
+    timeout_seconds: float,
+) -> dict[str, float]:
+    import websockets
+
+    async with websockets.connect(session.socket_url, open_timeout=15) as ws:
+        request_id = await _streamer_login(ws, session, 1)
+        return await _collect_internals_quotes(
+            ws,
+            session,
+            request_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+
+async def _fetch_internals_quotes_async(
+    *,
+    timeout_seconds: float = 5.0,
+) -> dict[str, float]:
+    user_pref = get_user_preference()
+    session = _prepare_streamer_session(user_pref)
+    try:
+        return await _run_internals_session(session, timeout_seconds=timeout_seconds)
+    except StreamerTokenLoginError:
+        logger.info("Streamer internals LOGIN rejected; refreshing OAuth token and retrying")
+        refresh_access_token_if_possible()
+        session = _prepare_streamer_session(user_pref)
+        return await _run_internals_session(session, timeout_seconds=timeout_seconds)
+
+
+def fetch_internals_quotes(*, timeout_seconds: float = 5.0) -> dict[str, float]:
+    """Fetch live $ADD / $TICK / $VOLD readings from the Schwab streamer."""
+    try:
+        return asyncio.run(
+            _fetch_internals_quotes_async(timeout_seconds=timeout_seconds)
+        )
+    except Exception as exc:
+        logger.warning("Schwab streamer internals fetch failed: %s", exc)
+        return {}
 
 
 class SchwabEquityScreener:

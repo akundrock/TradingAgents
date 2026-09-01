@@ -36,6 +36,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAGPIE_SESSION_MODE":     "magpie_session_mode",
     "TRADINGAGENTS_MAGPIE_TIMEZONE":         "magpie_timezone",
     "TRADINGAGENTS_MAGPIE_IMPLIED_MOVE_LOCK_TIME": "magpie_implied_move_lock_time",
+    "TRADINGAGENTS_MES_JOURNAL_DIR":         "mes_journal_dir",
     "TRADINGAGENTS_LOG_LEVEL":                  "log_level",
     "TRADINGAGENTS_INTRADAY_PREMARKET_ANALYSTS": "intraday_premarket_analysts",
     "TRADINGAGENTS_INTRADAY_RESTORE_PREMARKET_BIAS": "intraday_restore_premarket_bias",
@@ -207,6 +208,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "magpie_session_mode": "rth",  # Options: rth, extended
     "magpie_timezone": "America/New_York",
     "magpie_implied_move_lock_time": "10:30",
+    # MES copilot journal location. None derives <results_dir>/mes_journal.
+    "mes_journal_dir": None,
     # Intraday watchlist scanning
     "intraday_enabled": False,
     "watchlist": [],

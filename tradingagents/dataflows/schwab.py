@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
@@ -296,6 +296,19 @@ def _schwab_get_with_retry(
     raise SchwabRateLimitError(rate_limit_message)
 
 
+def _market_epoch_ms(dt: datetime, timezone: str = "America/New_York") -> int:
+    """Convert a naive market wall-clock time to epoch ms in ``timezone``.
+
+    Naive datetimes from the MES snapshot are US/Eastern wall clock. Using
+    ``datetime.timestamp()`` directly would interpret them in the host OS zone
+    and shift the Schwab window for users outside ET.
+    """
+    from zoneinfo import ZoneInfo
+
+    wall = _naive_market_datetime(dt, timezone)
+    return int(wall.replace(tzinfo=ZoneInfo(timezone)).timestamp() * 1000)
+
+
 def _fetch_price_history_range(
     symbol: str,
     start_dt: datetime,
@@ -306,10 +319,12 @@ def _fetch_price_history_range(
     if end_dt <= start_dt:
         raise ValueError("end_dt must be after start_dt")
 
+    start_dt = _naive_market_datetime(start_dt)
+    end_dt = _naive_market_datetime(end_dt)
     params = {
         "symbol": _normalize_symbol(symbol),
-        "startDate": int(start_dt.timestamp() * 1000),
-        "endDate": int(end_dt.timestamp() * 1000),
+        "startDate": _market_epoch_ms(start_dt),
+        "endDate": _market_epoch_ms(end_dt),
         "frequencyType": frequency_type,
         "frequency": frequency,
         "needExtendedHoursData": True,
@@ -619,6 +634,10 @@ _INTRADAY_MINUTE_FREQ_MAP: dict[int, tuple[str, int]] = {
     30: ("minute", 30),
 }
 
+_INTRADAY_MINUTE_FREQ_MAP_BY_LABEL: dict[str, int] = {
+    f"{minutes}m": minutes for minutes in sorted(SCHWAB_INTRADAY_MINUTES)
+}
+
 
 def get_candles_multi_timeframe(
     symbol: str,
@@ -749,17 +768,466 @@ def get_intraday_5m_candles(
     return frame
 
 
+# NYSE breadth internals. Schwab exposes these as index symbols whose value
+# lands in the candle `close` field; open/high/low/volume are not meaningful.
+MARKET_INTERNAL_SYMBOLS: dict[str, str] = {"add": "$ADD", "tick": "$TICK", "vold": "$VOLD"}
+# Schwab often omits live $ADD/$VOLD candles; synthesize from component symbols
+# (see thinkorswim ``ADVN-$DECL`` and $UVOL/$DVOL notes in tos-dual-grid-setup.md).
+SYNTHETIC_ADD_COMPONENTS = ("$ADVN", "$DECN")
+SYNTHETIC_VOLD_COMPONENTS = ("$UVOL", "$DVOL")
+# Thousands-scale $UVOL opens around ~22k; inflated multi-billion opens need this
+# calibration so Δ(UVOL−DVOL) maps to the same $VOLD units as ``diff * 1000``.
+_VOLD_LARGE_BASELINE_CALIBRATION = 1_209_664.0
+_VOLD_LARGE_BASELINE_THRESHOLD = 1e9
+_VOLD_THOUSANDS_SCALE = 1000.0
+_MAX_INTERNAL_PERIOD_DAYS = 10
+
+
+def _internal_candle_value(candle: dict) -> float | None:
+    """Best-effort internals reading from a pricehistory candle.
+
+    Live $TICK candles often report ``close=0`` while ``high``/``low`` carry the
+    actual reading; prefer a non-zero close, then the bar midpoint/high.
+    """
+    close = candle.get("close")
+    high = candle.get("high")
+    low = candle.get("low")
+
+    if close is not None and close != 0:
+        return float(close)
+    if high is not None and low is not None and high != 0 and low != 0:
+        return float((high + low) / 2.0)
+    if high is not None and high != 0:
+        return float(high)
+    if low is not None and low != 0:
+        return float(low)
+    if close is not None:
+        return float(close)
+    return None
+
+
+def _fetch_price_history_period(
+    symbol: str,
+    period_days: int,
+    frequency_type: str,
+    frequency: int,
+) -> list[dict]:
+    params = {
+        "symbol": _normalize_symbol(symbol),
+        "periodType": "day",
+        "period": min(_MAX_INTERNAL_PERIOD_DAYS, max(1, period_days)),
+        "frequencyType": frequency_type,
+        "frequency": frequency,
+        "needExtendedHoursData": True,
+    }
+    response = _schwab_get_with_retry(
+        PRICE_HISTORY_URL,
+        params,
+        rate_limit_message="Schwab price history request was rate-limited",
+    )
+    if response.status_code == 401:
+        raise SchwabNotConfiguredError("Schwab access token unauthorized; re-authorize and retry")
+    if response.status_code >= 400:
+        raise NoMarketDataError(symbol, _normalize_symbol(symbol), f"Schwab HTTP {response.status_code}")
+
+    payload = response.json()
+    candles = payload.get("candles") or []
+    if payload.get("empty") or not candles:
+        raise NoMarketDataError(symbol, _normalize_symbol(symbol), "Schwab returned no candles")
+    return candles
+
+
+def _merge_internal_candles(*groups: list[dict]) -> list[dict]:
+    """Merge candle lists; later groups override earlier ones for the same timestamp."""
+    merged: dict[int, dict] = {}
+    for group in groups:
+        for candle in group:
+            raw_ts = candle.get("datetime")
+            if raw_ts is None:
+                continue
+            merged[int(raw_ts)] = candle
+    return [merged[key] for key in sorted(merged)]
+
+
+def _fetch_internal_series(
+    symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    frequency: int,
+) -> pd.Series:
+    start_dt = _naive_market_datetime(start_dt)
+    end_dt = _naive_market_datetime(end_dt)
+    period_days = max(1, (end_dt.date() - start_dt.date()).days + 1)
+
+    groups: list[list[dict]] = []
+    try:
+        groups.append(
+            _fetch_price_history_period(
+                symbol=symbol,
+                period_days=period_days,
+                frequency_type="minute",
+                frequency=frequency,
+            )
+        )
+    except NoMarketDataError:
+        pass
+    try:
+        groups.append(
+            _fetch_price_history_range(
+                symbol=symbol,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                frequency_type="minute",
+                frequency=frequency,
+            )
+        )
+    except NoMarketDataError:
+        pass
+
+    candles = _merge_internal_candles(*groups) if groups else []
+    rows: dict[pd.Timestamp, float] = {}
+    for candle in candles:
+        raw_ts = candle.get("datetime")
+        value = _internal_candle_value(candle)
+        if raw_ts is None or value is None:
+            continue
+        ts = (
+            pd.to_datetime(raw_ts, unit="ms", utc=True)
+            .tz_convert("America/New_York")
+            .tz_localize(None)
+        )
+        rows[ts] = value
+
+    if not rows:
+        raise NoMarketDataError(symbol, symbol, "Schwab returned no internals candles")
+
+    series = pd.Series(rows).sort_index()
+    series = series[(series.index >= pd.to_datetime(start_dt)) & (series.index <= pd.to_datetime(end_dt))]
+    if series.empty:
+        raise NoMarketDataError(symbol, symbol, "Schwab returned no internals candles in window")
+    return series
+
+
+def _align_internal_component_pair(
+    positive_symbol: str,
+    negative_symbol: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    frequency: int,
+) -> tuple[pd.Series, pd.Series]:
+    positive = _fetch_internal_series(positive_symbol, start_dt, end_dt, frequency)
+    negative = _fetch_internal_series(negative_symbol, start_dt, end_dt, frequency)
+    aligned = pd.concat(
+        [positive.rename("positive"), negative.rename("negative")],
+        axis=1,
+        join="outer",
+    ).sort_index()
+    return aligned["positive"], aligned["negative"]
+
+
+def _session_baseline_timestamp(series: pd.Series, session_start: datetime) -> pd.Timestamp:
+    session_ts = pd.Timestamp(_naive_market_datetime(session_start))
+    candidates = series.index[series.index >= session_ts]
+    if candidates.empty:
+        raise NoMarketDataError("SESSION_BASELINE", "SESSION_BASELINE", "no session baseline bar")
+    return candidates[0]
+
+
+def _vold_component_delta_scale(baseline_uvol: float, baseline_dvol: float) -> float:
+    magnitude = max(abs(baseline_uvol), abs(baseline_dvol), 1.0)
+    if magnitude >= _VOLD_LARGE_BASELINE_THRESHOLD:
+        return _VOLD_LARGE_BASELINE_CALIBRATION / magnitude
+    return _VOLD_THOUSANDS_SCALE
+
+
+def _fetch_synthetic_add_series(
+    session_start: datetime,
+    end_dt: datetime,
+    frequency: int,
+) -> pd.Series:
+    advn, decn = _align_internal_component_pair(
+        SYNTHETIC_ADD_COMPONENTS[0],
+        SYNTHETIC_ADD_COMPONENTS[1],
+        session_start,
+        end_dt,
+        frequency,
+    )
+    series = (advn - decn).dropna()
+    if series.empty:
+        raise NoMarketDataError("$ADD", "$ADD", "no synthetic ADD candles from $ADVN/$DECN")
+    return series
+
+
+def _fetch_synthetic_vold_series(
+    session_start: datetime,
+    end_dt: datetime,
+    frequency: int,
+) -> pd.Series:
+    uvol, dvol = _align_internal_component_pair(
+        SYNTHETIC_VOLD_COMPONENTS[0],
+        SYNTHETIC_VOLD_COMPONENTS[1],
+        session_start,
+        end_dt,
+        frequency,
+    )
+    diff = uvol - dvol
+    baseline_ts = _session_baseline_timestamp(diff, session_start)
+    baseline_uvol = float(uvol.loc[baseline_ts])
+    baseline_dvol = float(dvol.loc[baseline_ts])
+    baseline_diff = float(diff.loc[baseline_ts])
+    scale = _vold_component_delta_scale(baseline_uvol, baseline_dvol)
+    if scale == _VOLD_THOUSANDS_SCALE:
+        series = (diff * scale).dropna()
+    else:
+        series = ((diff - baseline_diff) * scale).dropna()
+    if series.empty:
+        raise NoMarketDataError("$VOLD", "$VOLD", "no synthetic VOLD candles from $UVOL/$DVOL")
+    return series
+
+
+def _fetch_internal_key_series(
+    key: str,
+    session_start: datetime,
+    end_dt: datetime,
+    frequency: int,
+) -> pd.Series:
+    symbol = MARKET_INTERNAL_SYMBOLS[key]
+    try:
+        return _fetch_internal_series(symbol, session_start, end_dt, frequency)
+    except Exception as direct_exc:
+        if key == "add":
+            try:
+                return _fetch_synthetic_add_series(session_start, end_dt, frequency)
+            except Exception:
+                raise direct_exc
+        if key == "vold":
+            try:
+                return _fetch_synthetic_vold_series(session_start, end_dt, frequency)
+            except Exception:
+                raise direct_exc
+        raise
+
+
+def _synthetic_internal_quote(key: str, session_start: datetime) -> float | None:
+    from .schwab_quotes import get_quotes
+
+    if key == "add":
+        quotes = get_quotes(list(SYNTHETIC_ADD_COMPONENTS))
+        advn = quotes.get(_normalize_symbol(SYNTHETIC_ADD_COMPONENTS[0]))
+        decn = quotes.get(_normalize_symbol(SYNTHETIC_ADD_COMPONENTS[1]))
+        if advn is None or decn is None or advn.last_price == 0 or decn.last_price == 0:
+            return None
+        return float(advn.last_price - decn.last_price)
+
+    if key != "vold":
+        return None
+
+    quotes = get_quotes(list(SYNTHETIC_VOLD_COMPONENTS))
+    uvol_quote = quotes.get(_normalize_symbol(SYNTHETIC_VOLD_COMPONENTS[0]))
+    dvol_quote = quotes.get(_normalize_symbol(SYNTHETIC_VOLD_COMPONENTS[1]))
+    if uvol_quote is None or dvol_quote is None:
+        return None
+    if uvol_quote.last_price == 0 and dvol_quote.last_price == 0:
+        return None
+
+    try:
+        baseline_end = session_start + timedelta(minutes=5)
+        uvol_series, dvol_series = _align_internal_component_pair(
+            SYNTHETIC_VOLD_COMPONENTS[0],
+            SYNTHETIC_VOLD_COMPONENTS[1],
+            session_start,
+            baseline_end,
+            frequency=5,
+        )
+        baseline_ts = _session_baseline_timestamp(uvol_series, session_start)
+    except Exception:
+        return None
+
+    baseline_uvol = float(uvol_series.loc[baseline_ts])
+    baseline_dvol = float(dvol_series.loc[baseline_ts])
+    baseline_diff = baseline_uvol - baseline_dvol
+    scale = _vold_component_delta_scale(baseline_uvol, baseline_dvol)
+    current_diff = float(uvol_quote.last_price - dvol_quote.last_price)
+    if scale == _VOLD_THOUSANDS_SCALE:
+        return current_diff * scale
+    return (current_diff - baseline_diff) * scale
+
+
+def _backfill_internals_from_streamer(frame: pd.DataFrame) -> pd.DataFrame:
+    """Patch the latest bar with live streamer readings when REST/quotes are empty."""
+    if frame.empty:
+        return frame
+
+    last_idx = frame.index[-1]
+    needs_backfill = any(
+        key in frame.columns and (pd.isna(frame.at[last_idx, key]) or frame.at[last_idx, key] == 0)
+        for key in MARKET_INTERNAL_SYMBOLS
+    )
+    if not needs_backfill:
+        return frame
+
+    from .schwab_streamer import fetch_internals_quotes
+
+    readings = fetch_internals_quotes(timeout_seconds=5.0)
+    if not readings:
+        return frame
+
+    symbol_to_key = {symbol: key for key, symbol in MARKET_INTERNAL_SYMBOLS.items()}
+    for symbol, value in readings.items():
+        key = symbol_to_key.get(_normalize_symbol(symbol))
+        if key is None or key not in frame.columns:
+            continue
+        current = frame.at[last_idx, key]
+        if not pd.isna(current) and current != 0:
+            continue
+        frame.at[last_idx, key] = float(value)
+    return frame
+
+
+def _backfill_internals_from_quotes(
+    frame: pd.DataFrame,
+    session_start: datetime | None = None,
+) -> pd.DataFrame:
+    """Patch the latest bar with live quote readings when pricehistory is stale."""
+    if frame.empty:
+        return frame
+
+    from .schwab_quotes import get_quotes
+
+    quotes = get_quotes(list(MARKET_INTERNAL_SYMBOLS.values()))
+    if not quotes:
+        quotes = {}
+
+    last_idx = frame.index[-1]
+    for key, symbol in MARKET_INTERNAL_SYMBOLS.items():
+        if key not in frame.columns:
+            continue
+        current = frame.at[last_idx, key]
+        if not pd.isna(current) and current != 0:
+            continue
+        quote = quotes.get(_normalize_symbol(symbol))
+        if quote is not None and quote.last_price != 0:
+            frame.at[last_idx, key] = float(quote.last_price)
+            continue
+        if session_start is None or key not in {"add", "vold"}:
+            continue
+        synthetic = _synthetic_internal_quote(key, session_start)
+        if synthetic is not None:
+            frame.at[last_idx, key] = float(synthetic)
+    return frame
+
+
+def _fetch_internals_series_by_key(
+    session_start: datetime,
+    as_of: datetime,
+    frequency: int,
+) -> tuple[dict[str, pd.Series], list[str], dict[str, Exception]]:
+    """Fetch internals series, isolating breadth pulls from $TICK rate pressure."""
+    series_by_key: dict[str, pd.Series] = {}
+    failures: list[str] = []
+    errors_by_key: dict[str, Exception] = {}
+
+    def capture(key: str) -> bool:
+        symbol = MARKET_INTERNAL_SYMBOLS[key]
+        try:
+            series_by_key[key] = _fetch_internal_key_series(key, session_start, as_of, frequency)
+            errors_by_key.pop(key, None)
+            failures[:] = [entry for entry in failures if not entry.startswith(f"{symbol}:")]
+            return True
+        except Exception as exc:
+            failures.append(f"{symbol}: {exc}")
+            errors_by_key[key] = exc
+            series_by_key.pop(key, None)
+            return False
+
+    # Synthetic $ADD/$VOLD fan out to component symbols; fetch $TICK first so
+    # those calls are not starved when Schwab rate-limits concurrent history pulls.
+    capture("tick")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(capture, key): key
+            for key in ("add", "vold")
+        }
+        for future in as_completed(futures):
+            future.result()
+
+    for key in ("add", "vold"):
+        if key in series_by_key:
+            continue
+        capture(key)
+
+    return series_by_key, failures, errors_by_key
+
+
+def get_internals_frame(
+    session_start: datetime,
+    as_of: datetime,
+    interval: str = "5m",
+) -> pd.DataFrame:
+    """Fetch $ADD / $TICK / $VOLD as a bar-aligned frame.
+
+    Columns: ``Date``, ``add``, ``tick``, ``vold``. Symbols are fetched in
+    parallel and outer-joined on timestamp so a partial outage still yields a
+    frame with NaN in the missing column rather than failing the whole call.
+    """
+    if interval not in _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL:
+        raise ValueError(f"Unsupported internals interval: {interval}")
+    frequency = _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL[interval]
+
+    session_start = _naive_market_datetime(session_start)
+    as_of = _naive_market_datetime(as_of)
+    if as_of <= session_start:
+        raise ValueError("as_of must be after session_start")
+
+    series_by_key, failures, errors_by_key = _fetch_internals_series_by_key(
+        session_start, as_of, frequency
+    )
+
+    if not series_by_key:
+        raise NoMarketDataError(
+            "MARKET_INTERNALS",
+            "MARKET_INTERNALS",
+            f"no internals available ({'; '.join(failures)})",
+        )
+    if failures:
+        # Empty candles mean the cash session has not printed yet; only real
+        # transport/auth errors deserve a warning.
+        empty_only = all(isinstance(exc, NoMarketDataError) for exc in errors_by_key.values())
+        logger.log(
+            logging.INFO if empty_only else logging.WARNING,
+            "Partial market internals fetch: %s",
+            "; ".join(failures),
+        )
+
+    frame = pd.DataFrame(series_by_key)
+    for key in MARKET_INTERNAL_SYMBOLS:
+        if key not in frame.columns:
+            frame[key] = pd.NA
+    frame = frame[list(MARKET_INTERNAL_SYMBOLS)].sort_index()
+    frame = _backfill_internals_from_quotes(frame, session_start=session_start)
+    frame = _backfill_internals_from_streamer(frame)
+    frame.index.name = "Date"
+    return frame.reset_index()
+
+
 def get_market_internals(
     start_datetime: str,
     end_datetime: str,
     interval: str = "5m",
 ) -> str:
-    """Schwab market internals are not currently supported by this adapter."""
-    raise NoMarketDataError(
-        "MARKET_INTERNALS",
-        "MARKET_INTERNALS",
-        "Schwab adapter does not provide $ADD/$TICK/$VOLD internals",
+    """Return $ADD / $TICK / $VOLD as CSV text over the requested window."""
+    start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M:%S")
+    end_dt = datetime.strptime(end_datetime, "%Y-%m-%d %H:%M:%S")
+    frame = get_internals_frame(start_dt, end_dt, interval)
+
+    header = (
+        f"# Market internals ($ADD/$TICK/$VOLD) from {start_datetime} to {end_datetime} "
+        f"at interval {interval}\n"
+        f"# Total records: {len(frame)}\n"
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     )
+    return header + frame.to_csv(index=False)
 
 
 def get_indicator(symbol: str, indicator: str, curr_date: str, look_back_days: int) -> str:

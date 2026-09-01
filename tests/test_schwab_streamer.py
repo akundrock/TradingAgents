@@ -7,8 +7,11 @@ from tradingagents.dataflows.schwab_streamer import (
     ScreenerCandidate,
     StreamerTokenLoginError,
     _fetch_screener_candidates_async,
+    _ingest_internals_envelope,
     _is_login_token_error,
     _merge_candidates,
+    _parse_chart_equity_internal,
+    _parse_level_one_internal,
     _parse_screener_items,
     _prepare_streamer_session,
 )
@@ -60,6 +63,36 @@ def test_is_login_token_error():
     assert _is_login_token_error(1, "token is invalid or has expired.")
     assert not _is_login_token_error(0, "OK")
     assert not _is_login_token_error(5, "service unavailable")
+
+
+def test_parse_level_one_internal_uses_regular_market_last_for_add():
+    assert _parse_level_one_internal("$ADD", {"3": 0, "29": 1175.0}) == 1175.0
+    assert _parse_level_one_internal("$TICK", {"3": -81.0}) == -81.0
+
+
+def test_parse_chart_equity_internal_uses_close():
+    assert _parse_chart_equity_internal("$VOLD", {"4": 4_500_000.0, "7": 1}) == 4_500_000.0
+    assert _parse_chart_equity_internal("$VOLD", {"4": 0.0}) is None
+
+
+def test_ingest_internals_envelope_merges_levelone_and_chart():
+    readings: dict[str, float] = {}
+    _ingest_internals_envelope(
+        {
+            "data": [
+                {
+                    "service": "LEVELONE_EQUITIES",
+                    "content": [{"key": "$ADD", "3": 0, "29": 850.0}],
+                },
+                {
+                    "service": "CHART_EQUITY",
+                    "content": [{"key": "$VOLD", "4": -458_000_000.0, "7": 1}],
+                },
+            ]
+        },
+        readings,
+    )
+    assert readings == {"$ADD": 850.0, "$VOLD": -458_000_000.0}
 
 
 def test_prepare_streamer_session_uses_current_access_token():

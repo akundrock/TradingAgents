@@ -8,6 +8,9 @@ from .analysts.sentiment_analyst import (
 from .managers.fast_bias_rating import create_fast_bias_rating
 from .managers.portfolio_manager import create_portfolio_manager
 from .managers.research_manager import create_research_manager
+from .mes.gatekeeper_agent import create_mes_gatekeeper_agent
+from .mes.morning_agent import create_mes_morning_agent
+from .mes.review_agent import create_mes_review_agent
 from .researchers.bear_researcher import create_bear_researcher
 from .researchers.bull_researcher import create_bull_researcher
 from .risk_mgmt.aggressive_debator import create_aggressive_debator
@@ -30,6 +33,9 @@ __all__ = [
     "create_research_manager",
     "create_fundamentals_analyst",
     "create_market_analyst",
+    "create_mes_gatekeeper_agent",
+    "create_mes_morning_agent",
+    "create_mes_review_agent",
     "create_neutral_debator",
     "create_news_analyst",
     "create_aggressive_debator",

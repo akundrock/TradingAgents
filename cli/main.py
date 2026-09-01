@@ -27,6 +27,7 @@ from cli.display_common import (
     format_tokens,
     update_analyst_statuses,
 )
+from cli.mes import mes_app
 from cli.stats_handler import StatsCallbackHandler
 from cli.utils import (
     ask_anthropic_effort,
@@ -83,6 +84,8 @@ app = typer.Typer(
     help="TradingAgents CLI: Multi-Agents LLM Financial Trading Framework",
     add_completion=True,  # Enable shell completion
 )
+
+app.add_typer(mes_app, name="mes")
 
 
 def _expand_watchlist(values: list[str]) -> list[str]:

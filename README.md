@@ -208,6 +208,28 @@ An interface will appear showing results as they load, letting you track the age
   <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>
 
+### MES copilot
+
+`tradingagents mes` is a deterministic /MES 5-minute checklist (SPY confluence + MES execution score) with optional LLM morning, gatekeeper, and review agents on top. Internals (`$ADD`, `$TICK`, `$VOLD`) come from Schwab and are scored in `tradingagents/mes/` so the gatekeeper cannot widen a hard FAIL.
+
+```bash
+tradingagents mes premarket
+tradingagents mes check
+tradingagents mes review
+```
+
+Thresholds load from defaults, then `TRADINGAGENTS_MES_*` env vars, then CLI overrides. See `tradingagents/mes/config.py`.
+
+#### Market internals ($TICK / $VOLD)
+
+These match the Thinkorswim internals-dashboard panels (`MES_TICK_Panel.tos`, `MES_VOLD_Histogram.tos`), not the mes-tuner entry engine’s fixed ±600 `$TICK` gate.
+
+**$TICK (dynamic width, default on)** — threshold is `mean(|TICK|, 20 bars) × 1.5` instead of a hardcoded 600. That scales with recent tick volatility. `$TICK confirms` also passes on a **persistent** same-sign streak (3+ bars on one side of zero that never quite crosses the dynamic band). Burst coloring uses `1.5 ×` the effective threshold. Set `TRADINGAGENTS_MES_USE_DYNAMIC_TICK_THRESHOLD=false` to fall back to ±600.
+
+**$VOLD (bar-over-bar vs SPY)** — divergence is the current `$VOLD` sign versus the last SPY close (stand-in for SPX). `$VOLD` below zero while SPY prints up is bearish divergence; `$VOLD` above zero while SPY prints down is bullish divergence. Opposing divergence is a no-trade. Histogram magnitude is a 20-bar z-score (display only). The SPY confluence item “$VOLD trending with direction” still uses a 6-bar slope.
+
+`$ADD` is unchanged: MES gate ±250, SPY trend ±1000, chop ±500.
+
 ## TradingAgents Package
 
 ### Implementation Details

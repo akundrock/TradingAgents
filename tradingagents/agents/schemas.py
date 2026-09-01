@@ -339,3 +339,308 @@ def render_sentiment_report(report: SentimentReport) -> str:
         "",
         report.narrative,
     ])
+
+
+# ---------------------------------------------------------------------------
+# MES Morning Agent
+# ---------------------------------------------------------------------------
+
+
+class DayType(str, Enum):
+    """Session character the morning hypothesis commits to for /MES."""
+
+    TREND_UP = "Trend Up"
+    TREND_DOWN = "Trend Down"
+    RANGE = "Range"
+    UNCLEAR = "Unclear"
+
+
+class MarketBias(str, Enum):
+    """Directional lean carried into the session."""
+
+    BULLISH = "Bullish"
+    BEARISH = "Bearish"
+    NEUTRAL = "Neutral"
+
+
+class MorningHypothesis(BaseModel):
+    """Structured morning plan produced by the MES Morning Agent.
+
+    The hypothesis is written before the session develops: it commits to a
+    day type and a bias derived from the market internals ($ADD, $TICK,
+    $VOLD) and the structural levels on /MES and SPY, and it states up front
+    what price action would prove the plan wrong.
+    """
+
+    day_type: DayType = Field(
+        description=(
+            "The expected session character. Exactly one of Trend Up / Trend Down / "
+            "Range / Unclear. Lean on $ADD breadth persistence and $TICK extremes: "
+            "a $ADD that holds one side with $TICK pushing repeated same-side "
+            "extremes argues for a trend day; a $ADD oscillating around zero with "
+            "two-sided $TICK argues for a range day. Use Unclear only when the "
+            "internals genuinely conflict."
+        ),
+    )
+    bias: MarketBias = Field(
+        description=(
+            "Directional lean for /MES. Exactly one of Bullish / Bearish / Neutral. "
+            "Must be consistent with the day_type and with the sign of $ADD and "
+            "$VOLD in the supplied context."
+        ),
+    )
+    one_sentence_thesis: str = Field(
+        description=(
+            "A single sentence stating what you expect /MES to do today and why, "
+            "referencing SPY's direction and the internals that support it."
+        ),
+    )
+    key_levels: str = Field(
+        description=(
+            "The price levels that matter today for /MES (and the SPY equivalents "
+            "where useful): session VWAP, the opening-range high and low, and prior-"
+            "day high/low/close. State each level numerically and say what it means "
+            "if price accepts or rejects there."
+        ),
+    )
+    invalidation: str = Field(
+        description=(
+            "The specific, observable condition that kills this hypothesis, e.g. a "
+            "sustained /MES close back through VWAP against the bias, a failed "
+            "opening-range break, or $ADD flipping sign and holding."
+        ),
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        description=(
+            "Confidence in the hypothesis. Use 'low' when internals conflict or the "
+            "opening range has not resolved; 'medium' when the picture leans one way "
+            "but confirmation is thin; 'high' when $ADD, $TICK, $VOLD, and price "
+            "relative to VWAP all agree."
+        ),
+    )
+    narrative: str = Field(
+        description=(
+            "Full morning plan covering, in order: "
+            "(1) how the internals ($ADD, $TICK, $VOLD) are reading and what that "
+            "implies about participation; "
+            "(2) where /MES and SPY sit relative to VWAP, the opening range, and "
+            "prior-day levels; "
+            "(3) the primary scenario with the trade locations it would offer; "
+            "(4) the alternate scenario if the primary fails; "
+            "(5) what to avoid today. "
+            "Be concrete and numeric; every claim should be traceable to the supplied "
+            "market context."
+        ),
+    )
+
+
+def render_morning_hypothesis(hypothesis: MorningHypothesis) -> str:
+    """Render a MorningHypothesis to the markdown the CLI displays and logs."""
+    return "\n".join([
+        f"**Day Type**: {hypothesis.day_type.value}",
+        f"**Bias**: {hypothesis.bias.value}",
+        f"**Thesis**: {hypothesis.one_sentence_thesis}",
+        f"**Key Levels**: {hypothesis.key_levels}",
+        f"**Invalidation**: {hypothesis.invalidation}",
+        f"**Confidence**: {hypothesis.confidence.capitalize()}",
+        "",
+        hypothesis.narrative,
+    ])
+
+
+# ---------------------------------------------------------------------------
+# MES Gatekeeper Agent
+# ---------------------------------------------------------------------------
+
+
+class TradeVerdict(str, Enum):
+    """Gatekeeper's ruling on whether a trade may be placed right now."""
+
+    TAKE = "Take"
+    WAIT = "Wait"
+    STAND_DOWN = "Stand Down"
+
+
+class TradeGoNoGo(BaseModel):
+    """Structured go/no-go ruling produced by the MES Gatekeeper Agent.
+
+    The deterministic checklist owns the hard thresholds; this schema carries
+    the judgement layer on top of it — whether the current setup is worth
+    risking capital on, in which direction, and what would change the call.
+    """
+
+    verdict: TradeVerdict = Field(
+        description=(
+            "The ruling on this setup. Exactly one of Take / Wait / Stand Down. "
+            "You may never return Take when the deterministic checklist reports "
+            "gates BLOCKED or NOT TRADEABLE — in that case return Stand Down. "
+            "Use Wait when the gates are open but the setup has not yet arrived at "
+            "a location worth paying for."
+        ),
+    )
+    direction: Literal["long", "short", "none"] = Field(
+        description=(
+            "Trade direction. Use 'none' whenever the verdict is Wait or Stand Down, "
+            "and otherwise the side the setup favours."
+        ),
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        description=(
+            "Confidence in this ruling given the checklist state, the internals, and "
+            "how cleanly the setup matches the morning hypothesis."
+        ),
+    )
+    reasoning: str = Field(
+        description=(
+            "The case for the verdict in two to four sentences, citing the specific "
+            "checklist lines and market-context readings that drove it."
+        ),
+    )
+    entry_zone: str | None = Field(
+        default=None,
+        description=(
+            "Optional /MES entry zone as a price range, e.g. '5812.50-5814.00'. Omit "
+            "unless the verdict is Take."
+        ),
+    )
+    stop_level: float | None = Field(
+        default=None,
+        description=(
+            "Optional /MES stop price. Place it beyond the structure that would "
+            "invalidate the trade, not at an arbitrary tick distance. Omit unless the "
+            "verdict is Take."
+        ),
+    )
+    first_target: float | None = Field(
+        default=None,
+        description=(
+            "Optional /MES first-target price, typically the next structural level "
+            "(VWAP, opening-range edge, prior-day level). Omit unless the verdict is Take."
+        ),
+    )
+    suggested_contracts: int | None = Field(
+        default=None,
+        description=(
+            "Optional /MES contract count, never exceeding the size allowed by the "
+            "supplied sizing note. Omit unless the verdict is Take."
+        ),
+    )
+    what_would_change_my_mind: str = Field(
+        description=(
+            "The specific, observable market development that would flip this verdict: "
+            "what would turn a Wait into a Take, or a Take into a Stand Down."
+        ),
+    )
+
+    @field_validator("stop_level", "first_target", mode="before")
+    @classmethod
+    def _nullish_float_to_none(cls, v):
+        return _coerce_optional_float(v)
+
+
+def render_trade_gonogo(verdict: TradeGoNoGo) -> str:
+    """Render a TradeGoNoGo to the markdown the CLI displays and logs."""
+    parts = [
+        f"**Verdict**: {verdict.verdict.value}",
+        f"**Direction**: {verdict.direction.capitalize()}",
+        f"**Confidence**: {verdict.confidence.capitalize()}",
+        "",
+        f"**Reasoning**: {verdict.reasoning}",
+    ]
+    if verdict.entry_zone:
+        parts.extend(["", f"**Entry Zone**: {verdict.entry_zone}"])
+    if verdict.stop_level is not None:
+        parts.extend(["", f"**Stop**: {verdict.stop_level}"])
+    if verdict.first_target is not None:
+        parts.extend(["", f"**First Target**: {verdict.first_target}"])
+    if verdict.suggested_contracts is not None:
+        parts.extend(["", f"**Suggested Contracts**: {verdict.suggested_contracts}"])
+    parts.extend([
+        "",
+        f"**What Would Change My Mind**: {verdict.what_would_change_my_mind}",
+    ])
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# MES Review Agent
+# ---------------------------------------------------------------------------
+
+
+class HypothesisGrade(str, Enum):
+    """How the morning hypothesis held up against the session that followed."""
+
+    CORRECT = "Correct"
+    PARTIAL = "Partial"
+    WRONG = "Wrong"
+
+
+class SessionReview(BaseModel):
+    """Structured end-of-day review produced by the MES Review Agent.
+
+    Grades two separate things that are easy to confuse: whether the morning
+    read of the market was right, and whether the process followed during the
+    session was disciplined. A correct hypothesis traded badly still earns a
+    poor discipline grade, and vice versa.
+    """
+
+    hypothesis_grade: HypothesisGrade = Field(
+        description=(
+            "How well the morning hypothesis described the session that actually "
+            "happened. Exactly one of Correct / Partial / Wrong. Grade the day type "
+            "and bias against the realised session, not against the P&L."
+        ),
+    )
+    discipline_grade: Literal["A", "B", "C", "D", "F"] = Field(
+        description=(
+            "Letter grade for process discipline across the day's logged checks: "
+            "whether gates were respected, sizing stayed within limits, and entries "
+            "matched the plan. Grade the process independently of the outcome — a "
+            "profitable rule-break is still a failing grade."
+        ),
+    )
+    what_worked: str = Field(
+        description=(
+            "The specific reads, waits, and executions that went right, with the "
+            "evidence from the logged checks and outcomes that shows it."
+        ),
+    )
+    what_failed: str = Field(
+        description=(
+            "The specific misreads, rule-breaks, or hesitations that cost money or "
+            "opportunity, again anchored in the logged checks and outcomes."
+        ),
+    )
+    one_improvement: str = Field(
+        description=(
+            "Exactly one concrete, actionable change to apply to the next session. "
+            "One change only — the most valuable one — stated as a rule that can be "
+            "checked tomorrow."
+        ),
+    )
+    narrative: str = Field(
+        description=(
+            "Full review covering, in order: "
+            "(1) what the morning hypothesis predicted and what the session delivered; "
+            "(2) a walk through the day's logged checks and how each decision held up; "
+            "(3) the pattern behind the mistakes, if there is one; "
+            "(4) what to carry into tomorrow's morning plan. "
+            "Be direct and specific; a coach's honest debrief, not a summary."
+        ),
+    )
+
+
+def render_session_review(review: SessionReview) -> str:
+    """Render a SessionReview to the markdown the CLI displays and logs."""
+    return "\n".join([
+        f"**Hypothesis Grade**: {review.hypothesis_grade.value}",
+        f"**Discipline Grade**: {review.discipline_grade}",
+        "",
+        f"**What Worked**: {review.what_worked}",
+        "",
+        f"**What Failed**: {review.what_failed}",
+        "",
+        f"**One Improvement**: {review.one_improvement}",
+        "",
+        review.narrative,
+    ])

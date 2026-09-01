@@ -34,7 +34,7 @@ def test_fetch_returns_both_timeframes(monkeypatch):
         calls.append((frequency_type, frequency))
         return [{"datetime": 1}]  # content ignored by patched _candles_to_df
 
-    def fake_candles_to_df(candles, symbol, curr_date):
+    def fake_candles_to_df(candles, symbol, curr_date, **kwargs):
         # Infer frequency from call order is fragile; use candle count marker.
         return _build_df(session_start, as_of, step_minutes=5 if len(calls) == 1 else 30)
 
@@ -73,7 +73,7 @@ def test_fetch_uses_parallel_requests(monkeypatch):
         call_count += 1
         return [{"datetime": call_count}]
 
-    def fake_candles_to_df(candles, symbol, curr_date):
+    def fake_candles_to_df(candles, symbol, curr_date, **kwargs):
         return _build_df(session_start, as_of, step_minutes=5)
 
     monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_fetch)
