@@ -174,6 +174,48 @@ def test_universe_screener_rrs_filter(monkeypatch):
 
 
 @pytest.mark.unit
+def test_universe_screener_rrs_filter_default_timeframes_include_30m(monkeypatch):
+    """Regression: default config must include 30m or rrs_by_tf["30m"] never gets populated."""
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    config = {
+        **DEFAULT_CONFIG,
+        "intraday_screener_source": "streamer",
+        "intraday_screener_keys": ["NASDAQ_VOLUME_0"],
+        "intraday_screener_candidate_limit": 10,
+        "intraday_screener_max_watchlist": 5,
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_session_start": "09:30",
+        "intraday_max_concurrent_symbols": 2,
+        "pro_trader_benchmark": "SPY",
+    }
+
+    mock_screener = MagicMock()
+    mock_screener.fetch_top_symbols.return_value = [
+        ScreenerCandidate(symbol="NVDA", total_volume=1000000, volume=50000),
+        ScreenerCandidate(symbol="AAPL", total_volume=800000, volume=40000),
+    ]
+
+    _patch_5m_candles(monkeypatch)
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        lambda sym_frames, bench_frames, length=12: {"5m": 1.0, "30m": 0.5, "60m": 0.3},
+    )
+    monkeypatch.setattr(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        lambda df, tf: 1.5,
+    )
+
+    screener = UniverseScreener(config, screener=mock_screener)
+    bar_time = datetime(2026, 7, 27, 10, 30)
+    _watchlist, screened = screener.refresh_watchlist(bar_time, base_watchlist=["SPY"])
+
+    assert len(screened) >= 1
+    assert screened[0].rrs_by_tf.get("30m") == 0.5
+
+
+@pytest.mark.unit
 def test_universe_screener_sp500_rrs_ranks_and_merges_screener_first(monkeypatch):
     config = {
         "intraday_screener_source": "sp500_rrs",

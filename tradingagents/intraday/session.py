@@ -69,6 +69,7 @@ class TradingSession:
             "all_pass": 0,
         }
     )
+    factor_fail_counts: dict[str, int] = field(default_factory=dict)
     latest_scan_by_symbol: dict[str, SymbolScanState] = field(default_factory=dict)
     selected_detail_symbol: str | None = None
     detail_follow_mode: bool = True

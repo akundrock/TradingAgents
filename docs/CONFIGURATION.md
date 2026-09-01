@@ -456,7 +456,7 @@ tradingagents  # Fully configured, no interaction
 | `intraday_screener_keys` | list[str] | `NASDAQ_VOLUME_0`, `NYSE_VOLUME_0` | — | Schwab Streamer volume rankings (exchange actives; not SPY index) |
 | `intraday_screener_candidate_limit` | int | `50` | — | Max symbols before RRS (`sp500_quotes`/streamer) or **after** RRS ranking (`sp500_rrs` / `sp500_rs_quotes`) |
 | `intraday_screener_prefilter_limit` | int | `100` | `TRADINGAGENTS_INTRADAY_SCREENER_PREFILTER_LIMIT` | Quote RS shortlist for `sp500_rs_quotes` (before 5m fetches) |
-| `intraday_screener_rrs_timeframes` | list[int] | `[5, 60]` | — | Intraday RRS TFs (minutes); 60m resampled from 5m |
+| `intraday_screener_rrs_timeframes` | list[int] | `[5, 30, 60]` | — | Intraday RRS TFs (minutes); 30m/60m resampled from 5m |
 | `intraday_screener_include_daily_rrs` | bool | `True` | `TRADINGAGENTS_INTRADAY_SCREENER_INCLUDE_DAILY_RRS` | Include daily RRS in screener alignment |
 | `intraday_screener_min_rrs_aligned` | int | `2` | — | Min aligned RRS TFs (`0` = pure rank with `rank_all`) |
 | `intraday_screener_rank_mode` | str | `pass_only` | — | `pass_only` (reject below min_aligned) or `rank_all` (score all, sort by rank RRS TF) |
@@ -480,10 +480,14 @@ tradingagents  # Fully configured, no interaction
 | `screener_orb_min_range_width` | float | `0.0` | — | Minimum opening range width (0 = no filter) |
 | `pro_trader_benchmark` | str | `SPY` | — | RRS benchmark (`pro_trader_dashboard`) |
 | `pro_trader_entry_mode` | str | `wick_touch` | — | ORB entry: `wick_touch` or `close_above` |
-| `pro_trader_min_rs_timeframes` | int | `4` | — | Min aligned RRS TFs for strategy pass |
-| `pro_trader_require_sector_alignment` | bool | `True` | — | Sector power-index alignment |
-| `pro_trader_require_relative_volume` | bool | `True` | — | 5m relative volume > 1 |
-| `pro_trader_require_daily_rrs` | bool | `True` | — | Daily RRS direction filter |
+| `pro_trader_min_rs_timeframes` | int | `2` | `TRADINGAGENTS_PRO_TRADER_MIN_RS_TIMEFRAMES` | Min aligned RRS TFs for strategy pass |
+| `pro_trader_require_sector_alignment` | bool | `True` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_SECTOR_ALIGNMENT` | Sector power-index alignment |
+| `pro_trader_sector_alignment_mode` | str | `lenient` | `TRADINGAGENTS_PRO_TRADER_SECTOR_ALIGNMENT_MODE` | `strict` also requires the sector ETF to trend with the trade; `lenient` only needs the symbol to lead its sector; `off` disables |
+| `pro_trader_require_relative_volume` | bool | `True` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_RELATIVE_VOLUME` | 5m relative volume gate |
+| `pro_trader_min_relative_volume` | float | `1.0` | `TRADINGAGENTS_PRO_TRADER_MIN_RELATIVE_VOLUME` | Relative volume threshold |
+| `pro_trader_relative_volume_on_missing` | str | `skip` | `TRADINGAGENTS_PRO_TRADER_RELATIVE_VOLUME_ON_MISSING` | `skip` or `fail` when 5m history is too shallow to compute relative volume |
+| `pro_trader_require_daily_rrs` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_DAILY_RRS` | Daily RRS direction filter (regime gate) |
+| `pro_trader_require_price_beyond_or` | bool | `True` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_BEYOND_OR` | Require close still beyond ORH/ORL, not just a latched breakout |
 | `pro_trader_key_level_atr_buffer` | float | `0.5` | — | ATR buffer near daily resistance/support |
 | `pro_trader_require_buy_pressure` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_BUY_PRESSURE` | Long bar buy-pressure gate (default off) |
 | `pro_trader_require_sell_pressure` | bool | `False` | `TRADINGAGENTS_PRO_TRADER_REQUIRE_SELL_PRESSURE` | Short bar sell-pressure gate (default off) |

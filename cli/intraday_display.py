@@ -25,7 +25,7 @@ from cli.display_common import (
 )
 from tradingagents.intraday.session import IntradaySignal, SymbolScanState, TradingSession
 
-DETAIL_MAX_LINES = 40
+DETAIL_MAX_LINES = 60
 LOG_MAX_LINES = 30
 SIGNAL_MAX_LINES = 8
 
@@ -59,10 +59,12 @@ class IntradayDashboardBuffer:
         *,
         session: TradingSession,
         strategy_name: str,
+        rrs_mode: bool = False,
         on_refresh: Callable[[], None] | None = None,
     ):
         self.session = session
         self.strategy_name = strategy_name
+        self.rrs_mode = rrs_mode
         self._on_refresh = on_refresh
         self._lock = threading.Lock()
         self.log_lines: deque[tuple[str, str, str]] = deque(maxlen=LOG_MAX_LINES)
@@ -315,6 +317,23 @@ def _gate_cell(passed: bool | None) -> str:
     return "[green]✓[/green]" if passed else "[red]✗[/red]"
 
 
+def _format_rrs(value: float | str | None) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _tradingview_url(symbol: str, interval: int = 5) -> str:
+    return f"https://www.tradingview.com/chart/?symbol={symbol}&interval={interval}"
+
+
+def _symbol_cell(marker: str, symbol: str) -> Text:
+    return Text(f"{marker}{symbol}", style=f"link {_tradingview_url(symbol)}")
+
+
 def _truncate_text(text: str, max_lines: int = DETAIL_MAX_LINES) -> str:
     lines = text.splitlines()
     if len(lines) <= max_lines:
@@ -372,10 +391,16 @@ def update_intraday_display(
     watchlist_table.add_column("Symbol", style="bold")
     watchlist_table.add_column("Src", style="dim")
     watchlist_table.add_column("Bias")
-    watchlist_table.add_column("G1", justify="center")
-    watchlist_table.add_column("G2", justify="center")
-    watchlist_table.add_column("Score", justify="center")
-    watchlist_table.add_column("Dir")
+    if buffer.rrs_mode:
+        watchlist_table.add_column("RRS 5m", justify="right")
+        watchlist_table.add_column("RRS 30m", justify="right")
+        watchlist_table.add_column("RRS 60m", justify="right")
+        watchlist_table.add_column("Rank", justify="right")
+    else:
+        watchlist_table.add_column("G1", justify="center")
+        watchlist_table.add_column("G2", justify="center")
+        watchlist_table.add_column("Score", justify="center")
+        watchlist_table.add_column("Dir")
     watchlist_table.add_column("Updated", style="dim")
 
     for symbol in session.watchlist:
@@ -384,13 +409,26 @@ def update_intraday_display(
         source = session.symbol_sources.get(symbol, "static")
         scan = snap["latest_scan"].get(symbol)
         marker = "› " if symbol == selected else "  "
-        if scan is not None:
+        bias_cell = f"[{_bias_style(bias_dir)}]{bias_dir}[/]" if bias or scan is not None else "—"
+        if buffer.rrs_mode:
+            rrs_snap = session.screener_snapshots.get(symbol)
+            watchlist_table.add_row(
+                _symbol_cell(marker, symbol),
+                source[:4],
+                bias_cell,
+                _format_rrs(rrs_snap.get("rrs_5m") if rrs_snap else None),
+                _format_rrs(rrs_snap.get("rrs_30m") if rrs_snap else None),
+                _format_rrs(rrs_snap.get("rrs_60m") if rrs_snap else None),
+                _format_rrs(rrs_snap.get("rank_score") if rrs_snap else None),
+                scan.bar_time.strftime("%H:%M") if scan is not None else "—",
+            )
+        elif scan is not None:
             total_factors = len(scan.factors_met) + len(scan.factors_missing)
             score = f"{scan.setup_score}/{total_factors}" if total_factors else str(scan.setup_score)
             watchlist_table.add_row(
-                f"{marker}{symbol}",
+                _symbol_cell(marker, symbol),
                 source[:4],
-                f"[{_bias_style(bias_dir)}]{bias_dir}[/]",
+                bias_cell,
                 _gate_cell(scan.gate1_passed),
                 _gate_cell(scan.gate2_passed if scan.gate1_passed else None),
                 score,
@@ -399,9 +437,9 @@ def update_intraday_display(
             )
         else:
             watchlist_table.add_row(
-                f"{marker}{symbol}",
+                _symbol_cell(marker, symbol),
                 source[:4],
-                f"[{_bias_style(bias_dir)}]{bias_dir}[/]" if bias else "—",
+                bias_cell,
                 "-",
                 "-",
                 "—",
@@ -451,6 +489,13 @@ def update_intraday_display(
         f"pass: {session.gate_stats['all_pass']}",
         f"signals: {len(session.signal_log)}",
     ]
+    if session.factor_fail_counts:
+        ranked = sorted(
+            session.factor_fail_counts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        if ranked:
+            factor, count = ranked[0]
+            footer_parts.append(f"top blocker: {factor} ({count})")
     if stats_handler is not None:
         stats = stats_handler.get_stats()
         footer_parts.extend(

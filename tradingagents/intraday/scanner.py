@@ -544,6 +544,8 @@ class WatchlistScanner:
         )
 
     def _run_premarket_for_symbol(self, symbol: str) -> None:
+        if self.dry_run:
+            return
         analysts = list(self.config.get("intraday_premarket_analysts") or [])
         cache_file = cache_path(self._output_dir, self.session.session_date)
         disk_cache: PremarketCache | None = load_premarket_cache(
@@ -577,6 +579,8 @@ class WatchlistScanner:
     def _lazy_bias_enabled(self) -> bool:
         from tradingagents.intraday.gating import resolve_gate2_mode
 
+        if self.dry_run:
+            return False
         if resolve_gate2_mode(self.config) != "daily_bias":
             return False
         return bool(self.config.get("intraday_lazy_bias_on_gate1", True))
@@ -596,6 +600,7 @@ class WatchlistScanner:
                 config=self.config,
                 debug=False,
                 callbacks=self.callbacks,
+                fast_research=bool(self.config.get("intraday_lazy_bias_fast_mode", True)),
             )
         return self._lazy_bias_graph
 
@@ -684,6 +689,7 @@ class WatchlistScanner:
             symbol, bar_time, daily_bias, mtf, strategy_result, gate_result
         )
         self._record_gate_stats(gate_result)
+        self._record_factor_failures(strategy_result)
         logger.info(
             "%s %s",
             symbol,
@@ -805,6 +811,12 @@ class WatchlistScanner:
         else:
             self.session.gate_stats["gate2_fail"] += 1
 
+    def _record_factor_failures(self, strategy_result: StrategyResult) -> None:
+        for factor in strategy_result.factors_missing:
+            self.session.factor_fail_counts[factor] = (
+                self.session.factor_fail_counts.get(factor, 0) + 1
+            )
+
     def _emit_signal(self, signal: IntradaySignal) -> None:
         self.session.signal_log.append(signal)
         self.session.last_signal_by_symbol[signal.symbol] = signal
@@ -877,8 +889,10 @@ class WatchlistScanner:
                 f"({WatchlistScanner._gate_summary(gate_result)})"
             )
         if not gate_result.gate1_strategy:
+            factors_missing = ",".join(strategy_result.factors_missing) or "none"
             return (
                 f"gates=G1=fail strategy={strategy_name} daily_bias={daily_bias_direction} "
+                f"factors_met=[{factors_met}] factors_missing=[{factors_missing}] "
                 f"blocked: {gate_result.gate1_reason}"
             )
         return (
@@ -897,3 +911,15 @@ class WatchlistScanner:
         for key, value in self.session.gate_stats.items():
             table.add_row(key, str(value))
         console.print(table)
+
+        if not self.session.factor_fail_counts:
+            return
+        factor_table = Table(title="Gate 1 Factor Failures")
+        factor_table.add_column("Factor")
+        factor_table.add_column("Fails", justify="right")
+        ranked = sorted(
+            self.session.factor_fail_counts.items(), key=lambda kv: kv[1], reverse=True
+        )
+        for factor, count in ranked:
+            factor_table.add_row(factor, str(count))
+        console.print(factor_table)

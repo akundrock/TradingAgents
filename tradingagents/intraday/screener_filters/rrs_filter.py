@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -149,10 +150,11 @@ class RrsFilter:
                 reject_reason=f"no_data:{ctx.symbol} empty RRS",
             )
 
-        relative_volume_5m = 0.0
+        relative_volume_5m = float("nan")
         if 5 in sym_enriched and not sym_enriched[5].empty:
             relative_volume_5m = compute_relative_volume(sym_enriched[5], "5m")
-        if require_rvol and relative_volume_5m <= 1.0:
+        # NaN means the frame was too shallow to sample; treat as unknown, not a reject.
+        if require_rvol and not math.isnan(relative_volume_5m) and relative_volume_5m <= 1.0:
             return FilterResult(
                 passed=False,
                 direction="none",

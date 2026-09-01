@@ -47,6 +47,15 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PRO_TRADER_MIN_SELL_PERCENT": "pro_trader_min_sell_percent",
     "TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_VOLUME_TREND": "pro_trader_require_price_volume_trend",
     "TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME": "pro_trader_min_premarket_volume",
+    # Pro Trader Gate 1 thresholds.
+    "TRADINGAGENTS_PRO_TRADER_MIN_RS_TIMEFRAMES": "pro_trader_min_rs_timeframes",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_DAILY_RRS": "pro_trader_require_daily_rrs",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_RELATIVE_VOLUME": "pro_trader_require_relative_volume",
+    "TRADINGAGENTS_PRO_TRADER_MIN_RELATIVE_VOLUME": "pro_trader_min_relative_volume",
+    "TRADINGAGENTS_PRO_TRADER_RELATIVE_VOLUME_ON_MISSING": "pro_trader_relative_volume_on_missing",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_SECTOR_ALIGNMENT": "pro_trader_require_sector_alignment",
+    "TRADINGAGENTS_PRO_TRADER_SECTOR_ALIGNMENT_MODE": "pro_trader_sector_alignment_mode",
+    "TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_BEYOND_OR": "pro_trader_require_price_beyond_or",
     "TRADINGAGENTS_INTRADAY_SCREENER_MIN_PRICE": "intraday_screener_min_price",
     "TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_SP500": "intraday_screener_require_sp500",
     "TRADINGAGENTS_INTRADAY_SCREENER_SOURCE": "intraday_screener_source",
@@ -217,15 +226,27 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_gate2_mode": None,
     "intraday_lazy_bias_on_gate1": True,
     "intraday_lazy_bias_analysts": ["market"],
+    # Skip the Bull/Bear/Research-Manager debate for lazy bias and rate the
+    # analyst report(s) directly in one quick-model call, to keep pace with
+    # the scanner's refresh interval on slower LLM backends.
+    "intraday_lazy_bias_fast_mode": True,
     # When orb_breakout runs with the dynamic screener, Gate 2 defaults to SuperTrend
     # (no LLM). Set true to skip Gate 2 entirely for that workflow.
     "intraday_orb_breakout_screener_disable_gate2": False,
     "pro_trader_benchmark": "SPY",
     "pro_trader_entry_mode": "wick_touch",
-    "pro_trader_min_rs_timeframes": 3,
+    "pro_trader_min_rs_timeframes": 2,
     "pro_trader_require_sector_alignment": True,
+    # ``strict`` also requires the sector ETF itself to trend in the trade direction.
+    "pro_trader_sector_alignment_mode": "lenient",
     "pro_trader_require_relative_volume": True,
-    "pro_trader_require_daily_rrs": True,
+    "pro_trader_min_relative_volume": 1.0,
+    # 5m relative volume needs ~20 prior sessions; ``skip`` ignores the check when the
+    # fetched history is too shallow rather than failing every symbol.
+    "pro_trader_relative_volume_on_missing": "skip",
+    # Daily RRS is a regime filter; off by default so intraday reversals are not blocked.
+    "pro_trader_require_daily_rrs": False,
+    "pro_trader_require_price_beyond_or": True,
     "pro_trader_key_level_atr_buffer": 0.5,
     "pro_trader_require_buy_pressure": False,
     "pro_trader_require_sell_pressure": False,
@@ -241,7 +262,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_screener_keys": ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"],
     "intraday_screener_candidate_limit": 50,
     "intraday_screener_prefilter_limit": 100,
-    "intraday_screener_rrs_timeframes": [5, 60],
+    "intraday_screener_rrs_timeframes": [5, 30, 60],
     "intraday_screener_include_daily_rrs": True,
     "intraday_screener_min_rrs_aligned": 2,
     "intraday_screener_require_relative_volume": False,
@@ -249,10 +270,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_screener_require_sp500": True,
     "intraday_screener_source": "auto",
     "intraday_screener_rank_mode": "pass_only",
-    "intraday_screener_rank_rrs_timeframe": "5m",
+    "intraday_screener_rank_rrs_timeframe": "30m",
     "intraday_screener_rank_by": "aligned",
     "intraday_screener_max_concurrent_symbols": None,
-    "intraday_screener_max_watchlist": 12,
+    "intraday_screener_max_watchlist": 10,
     "intraday_screener_direction": "short",
     "intraday_screener_start_time": "10:00",
     "intraday_screener_symbol_cooldown_minutes": 30,

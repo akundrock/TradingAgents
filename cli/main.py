@@ -1952,10 +1952,35 @@ def intraday(
         "--lazy-bias-analysts",
         help="Comma-separated analysts for lazy Gate-1 bias (default: market).",
     ),
+    lazy_bias_fast_mode: bool | None = typer.Option(
+        None,
+        "--lazy-bias-fast-mode/--no-lazy-bias-fast-mode",
+        help="Skip the Bull/Bear/Research-Manager debate for lazy bias and rate in one quick-model call (default: on).",
+    ),
     gate2_mode: str | None = typer.Option(
         None,
         "--gate2-mode",
         help="Gate 2 mode: off, daily_bias, or supertrend (default: resolver).",
+    ),
+    min_rs_timeframes: int | None = typer.Option(
+        None,
+        "--min-rs-timeframes",
+        help="pro_trader: minimum RRS timeframes aligned for Gate 1.",
+    ),
+    require_daily_rrs: bool | None = typer.Option(
+        None,
+        "--require-daily-rrs/--no-require-daily-rrs",
+        help="pro_trader: require the daily RRS sign to match the trade direction.",
+    ),
+    require_relative_volume: bool | None = typer.Option(
+        None,
+        "--require-relative-volume/--no-require-relative-volume",
+        help="pro_trader: require 5m relative volume above the minimum.",
+    ),
+    sector_alignment_mode: str | None = typer.Option(
+        None,
+        "--sector-alignment-mode",
+        help="pro_trader sector gate: strict, lenient, or off.",
     ),
 ):
     """Run the intraday watchlist scanner on live Schwab data."""
@@ -1987,6 +2012,8 @@ def intraday(
             for part in lazy_bias_analysts.replace(",", " ").split()
             if part.strip()
         ]
+    if lazy_bias_fast_mode is not None:
+        config["intraday_lazy_bias_fast_mode"] = lazy_bias_fast_mode
     if gate2_mode is not None:
         normalized = gate2_mode.strip().lower()
         if normalized not in ("off", "daily_bias", "supertrend"):
@@ -1996,6 +2023,21 @@ def intraday(
             )
             raise typer.Exit(code=1)
         config["intraday_gate2_mode"] = normalized
+    if min_rs_timeframes is not None:
+        config["pro_trader_min_rs_timeframes"] = min_rs_timeframes
+    if require_daily_rrs is not None:
+        config["pro_trader_require_daily_rrs"] = require_daily_rrs
+    if require_relative_volume is not None:
+        config["pro_trader_require_relative_volume"] = require_relative_volume
+    if sector_alignment_mode is not None:
+        normalized_sector = sector_alignment_mode.strip().lower()
+        if normalized_sector not in ("strict", "lenient", "off"):
+            console.print(
+                "[red]Invalid --sector-alignment-mode:[/red] "
+                "expected strict, lenient, or off"
+            )
+            raise typer.Exit(code=1)
+        config["pro_trader_sector_alignment_mode"] = normalized_sector
     resolved_watchlist = _resolve_intraday_watchlist(symbols, watchlist)
     if resolved_watchlist:
         config["watchlist"] = resolved_watchlist
@@ -2110,11 +2152,13 @@ def intraday(
             detach_dashboard_logging,
             update_intraday_display,
         )
+        from tradingagents.intraday.screener_filters import uses_rrs_filter
 
         start_time = datetime.datetime.now()
         buffer = IntradayDashboardBuffer(
             session=scanner.session,
             strategy_name=strategy,
+            rrs_mode=uses_rrs_filter(config),
         )
         scanner.dashboard = buffer
         layout = create_intraday_layout()

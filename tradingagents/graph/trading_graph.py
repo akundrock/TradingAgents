@@ -97,6 +97,7 @@ class TradingAgentsGraph:
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
+        fast_research: bool = False,
     ):
         """Initialize the trading agents graph and components.
 
@@ -105,6 +106,8 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            fast_research: Skip the Bull/Bear/Research-Manager debate in favor of a
+                single fast rating call (used for latency-sensitive bias-only runs)
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
@@ -155,6 +158,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            fast_research=fast_research,
         )
 
         self.propagator = Propagator(
@@ -170,6 +174,7 @@ class TradingAgentsGraph:
 
         # Graph-shape-affecting run choices, kept for the checkpoint signature.
         self.selected_analysts = tuple(selected_analysts)
+        self.fast_research = fast_research
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
         self.workflow = self.graph_setup.setup_graph(selected_analysts)
@@ -382,6 +387,7 @@ class TradingAgentsGraph:
             "analysts=" + ",".join(self.selected_analysts),
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
+            f"fast_research={self.fast_research}",
             f"asset={asset_type}",
         ])
 

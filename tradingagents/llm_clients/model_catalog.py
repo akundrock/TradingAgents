@@ -175,6 +175,19 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
+    # llama.cpp: model ID must match llama-server --alias (or served model id).
+    "llama_cpp": {
+        "quick": [
+            ("Llama 3.1 8B Instruct Q4_K_M", "llama-3.1-8b-instruct"),
+            ("Qwen2.5 7B Instruct Q4_K_M", "qwen2.5-7b-instruct"),
+            ("Custom model ID (--alias)", "custom"),
+        ],
+        "deep": [
+            ("Llama 3.1 8B Instruct Q4_K_M", "llama-3.1-8b-instruct"),
+            ("Qwen2.5 7B Instruct Q4_K_M", "qwen2.5-7b-instruct"),
+            ("Custom model ID (--alias)", "custom"),
+        ],
+    },
     # Generic OpenAI-compatible endpoint: the model is whatever the user's
     # server serves, so only "Custom model ID" is offered.
     "openai_compatible": _CUSTOM_ONLY,

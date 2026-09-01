@@ -58,10 +58,23 @@ def sector_aligned_for_direction(
     symbol_power: float,
     sector_power: float,
     direction: str,
+    *,
+    mode: str = "strict",
 ) -> bool:
-    """Sector confirmation: long needs positive sector momentum, short needs negative."""
+    """Sector confirmation.
+
+    ``strict`` requires the sector itself to trend in the trade direction and the
+    symbol to out-trend it. ``lenient`` drops the sector-sign requirement and only
+    asks that the symbol lead its sector. ``off`` disables the check.
+    """
+    if mode == "off":
+        return True
     if direction == "long":
+        if mode == "lenient":
+            return symbol_power >= sector_power
         return sector_power > 0 and symbol_power >= sector_power
     if direction == "short":
+        if mode == "lenient":
+            return symbol_power <= sector_power
         return sector_power < 0 and symbol_power <= sector_power
     return False

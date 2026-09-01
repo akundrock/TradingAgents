@@ -378,6 +378,40 @@ def _lazy_bias_config() -> dict:
 
 
 @pytest.mark.unit
+def test_get_lazy_bias_graph_defaults_to_fast_research(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "tradingagents.graph.trading_graph.TradingAgentsGraph",
+        lambda **kwargs: captured.update(kwargs) or MagicMock(),
+    )
+
+    scanner._get_lazy_bias_graph()
+
+    assert captured["fast_research"] is True
+
+
+@pytest.mark.unit
+def test_get_lazy_bias_graph_respects_fast_mode_disabled(monkeypatch):
+    ta_graph = MagicMock()
+    config = _lazy_bias_config()
+    config["intraday_lazy_bias_fast_mode"] = False
+    scanner = WatchlistScanner(config, ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False)
+    captured = {}
+    monkeypatch.setattr(
+        "tradingagents.graph.trading_graph.TradingAgentsGraph",
+        lambda **kwargs: captured.update(kwargs) or MagicMock(),
+    )
+
+    scanner._get_lazy_bias_graph()
+
+    assert captured["fast_research"] is False
+
+
+@pytest.mark.unit
 def test_lazy_bias_not_called_on_g1_fail(monkeypatch):
     ta_graph = MagicMock()
     scanner = WatchlistScanner(
@@ -414,6 +448,8 @@ def test_lazy_bias_called_on_g1_pass_with_neutral_bias(monkeypatch):
     scanner = WatchlistScanner(
         _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
     )
+    # dry_run only forbids the LLM calls; force-enable to exercise the lazy-bias mechanism itself.
+    monkeypatch.setattr(scanner, "_lazy_bias_enabled", lambda: True)
     scanner.session.session_date = "2026-07-27"
     scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
     lazy_graph = MagicMock()
@@ -515,6 +551,8 @@ def test_lazy_bias_enables_g2_pass(monkeypatch):
     scanner = WatchlistScanner(
         config, ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
     )
+    # dry_run only forbids the LLM calls; force-enable to exercise the lazy-bias mechanism itself.
+    monkeypatch.setattr(scanner, "_lazy_bias_enabled", lambda: True)
     scanner.session.session_date = "2026-07-27"
     scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
     lazy_graph = MagicMock()
@@ -547,6 +585,62 @@ def test_lazy_bias_enables_g2_pass(monkeypatch):
     assert len(scanner.session.signal_log) == 1
     assert scanner.session.signal_log[0].direction == "short"
     assert scanner.session.latest_scan_by_symbol["NVDA"].gate2_passed is True
+
+
+@pytest.mark.unit
+def test_lazy_bias_disabled_when_dry_run(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    assert scanner._lazy_bias_enabled() is False
+
+
+@pytest.mark.unit
+def test_lazy_bias_not_called_on_g1_pass_when_dry_run(monkeypatch):
+    ta_graph = MagicMock()
+    scanner = WatchlistScanner(
+        _lazy_bias_config(), ta_graph, dry_run=True, skip_premarket=True, restore_premarket=False
+    )
+    scanner.session.session_date = "2026-07-27"
+    scanner.session.daily_bias_cache["NVDA"] = _neutral_bias("NVDA")
+    lazy_graph = MagicMock()
+    scanner._lazy_bias_graph = lazy_graph
+
+    monkeypatch.setattr(
+        scanner.mtf_validator,
+        "evaluate",
+        lambda symbol, as_of, session, config: _mtf(symbol),
+    )
+    monkeypatch.setattr(
+        scanner.strategy,
+        "check_setup",
+        lambda symbol, mtf, daily_bias: StrategyResult(
+            passed=True,
+            direction="long",
+            reason="Long momentum setup confirmed.",
+            factors_met=["close_above_vwap"],
+            factors_missing=[],
+        ),
+    )
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    lazy_graph.propagate_daily_bias.assert_not_called()
+
+
+@pytest.mark.unit
+def test_screener_new_symbol_premarket_skipped_when_dry_run(tmp_path):
+    ta_graph = MagicMock()
+    config = _config()
+    config["intraday_output_dir"] = str(tmp_path)
+    config["intraday_screener_run_premarket_for_new"] = True
+    scanner = WatchlistScanner(config, ta_graph, dry_run=True, skip_premarket=True)
+    scanner.session.session_date = "2026-07-27"
+
+    scanner._add_screener_symbol("TSLA")
+
+    ta_graph.propagate_daily_bias.assert_not_called()
+    assert scanner.session.daily_bias_cache["TSLA"].direction == "neutral"
 
 
 @pytest.mark.unit

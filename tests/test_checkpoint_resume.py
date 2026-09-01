@@ -199,6 +199,7 @@ class TestCheckpointSignature(unittest.TestCase):
         g = object.__new__(TradingAgentsGraph)
         g.selected_analysts = ("market", "news")
         g.config = {"max_debate_rounds": 1, "max_risk_discuss_rounds": 1}
+        g.fast_research = False
         base = g._run_signature("stock")
 
         self.assertNotEqual(base, g._run_signature("crypto"))     # asset mode
@@ -212,6 +213,9 @@ class TestCheckpointSignature(unittest.TestCase):
         # Stable for identical inputs.
         g.config = {"max_debate_rounds": 1, "max_risk_discuss_rounds": 1}
         self.assertEqual(base, g._run_signature("stock"))
+        # fast_research also affects graph shape.
+        g.fast_research = True
+        self.assertNotEqual(base, g._run_signature("stock"))
 
 
 if __name__ == "__main__":

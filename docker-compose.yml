@@ -31,6 +31,36 @@ services:
     profiles:
       - ollama
 
+  llamacpp:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    volumes:
+      - llamacpp_models:/models
+    environment:
+      LLAMA_ARG_HOST: 0.0.0.0
+      LLAMA_ARG_PORT: 8080
+      # Set LLAMA_ARG_MODEL to the GGUF path inside /models, e.g. /models/model.gguf
+    ports:
+      - "8080:8080"
+    profiles:
+      - llamacpp
+
+  tradingagents-llamacpp:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - TRADINGAGENTS_LLM_PROVIDER=llama_cpp
+      - LLAMA_CPP_BASE_URL=http://llamacpp:8080/v1
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    depends_on:
+      - llamacpp
+    tty: true
+    stdin_open: true
+    profiles:
+      - llamacpp
+
 volumes:
   tradingagents_data:
   ollama_data:
+  llamacpp_models:

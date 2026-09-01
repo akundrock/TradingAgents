@@ -33,28 +33,37 @@ def _volume_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series([0.0] * len(df))
 
 
+MIN_RELATIVE_VOLUME_SAMPLES = 5
+
+
 def compute_relative_volume(
     df: pd.DataFrame,
     timeframe: RelativeVolumeTF = "5m",
+    *,
+    min_samples: int = MIN_RELATIVE_VOLUME_SAMPLES,
 ) -> float:
-    """Relative volume matching ThinkScript SMBD rvolume labels."""
+    """Relative volume matching ThinkScript SMBD rvolume labels.
+
+    Returns NaN when the frame is too shallow to sample ``min_samples`` prior
+    sessions, so callers can distinguish "unknown" from "low volume".
+    """
     if df is None or df.empty:
-        return 0.0
+        return float("nan")
 
     offsets = RELATIVE_VOLUME_OFFSETS.get(timeframe)
     n_samples, multiplier = RELATIVE_VOLUME_MULTIPLIERS.get(timeframe, (20, 1.2))
     if offsets is None:
-        return 0.0
+        return float("nan")
 
     volume = _volume_series(df)
-    max_offset = max(offsets)
-    if len(volume) <= max_offset:
-        return 0.0
+    usable = [offset for offset in offsets[:n_samples] if offset < len(volume)]
+    if len(usable) < min_samples:
+        return float("nan")
 
-    cumulative = sum(float(volume.iloc[-1 - offset]) for offset in offsets[:n_samples])
-    avg_volume = (cumulative / n_samples) * multiplier
+    cumulative = sum(float(volume.iloc[-1 - offset]) for offset in usable)
+    avg_volume = (cumulative / len(usable)) * multiplier
     if avg_volume == 0:
-        return 0.0
+        return float("nan")
     return float(volume.iloc[-1]) / avg_volume
 
 

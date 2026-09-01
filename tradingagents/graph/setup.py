@@ -10,6 +10,7 @@ from tradingagents.agents import (
     create_bear_researcher,
     create_bull_researcher,
     create_conservative_debator,
+    create_fast_bias_rating,
     create_fundamentals_analyst,
     create_magpie_signal_node,
     create_market_analyst,
@@ -52,12 +53,17 @@ class GraphSetup:
         deep_thinking_llm: Any,
         tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
+        fast_research: bool = False,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
+        # When true, the last analyst routes straight to a single fast rating
+        # call instead of the Bull/Bear/Research-Manager debate (used by the
+        # intraday scanner's lazy-bias graph to cut latency).
+        self.fast_research = fast_research
 
     def setup_graph(
         self, selected_analysts=("market", "social", "news", "fundamentals")
@@ -84,6 +90,7 @@ class GraphSetup:
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
         bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
         research_manager_node = create_research_manager(self.deep_thinking_llm)
+        fast_bias_rating_node = create_fast_bias_rating(self.quick_thinking_llm)
         magpie_node = create_magpie_signal_node()
         trader_node = create_trader(self.quick_thinking_llm)
 
@@ -106,6 +113,7 @@ class GraphSetup:
         workflow.add_node("Bull Researcher", bull_researcher_node)
         workflow.add_node("Bear Researcher", bear_researcher_node)
         workflow.add_node("Research Manager", research_manager_node)
+        workflow.add_node("Fast Bias Rating", fast_bias_rating_node)
         workflow.add_node("Magpie", magpie_node)
         workflow.add_node("Trader", trader_node)
         workflow.add_node("Aggressive Analyst", aggressive_analyst)
@@ -131,9 +139,11 @@ class GraphSetup:
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
+            # Connect to next analyst or to the debate (or fast-rating) stage if this is the last analyst
             if i < len(plan.specs) - 1:
                 workflow.add_edge(current_clear, plan.specs[i + 1].agent_node)
+            elif self.fast_research:
+                workflow.add_edge(current_clear, "Fast Bias Rating")
             else:
                 workflow.add_edge(current_clear, "Bull Researcher")
 
@@ -144,11 +154,12 @@ class GraphSetup:
                 self.conditional_logic.should_continue_debate,
                 DEBATE_PATH_MAP,
             )
-        workflow.add_conditional_edges(
-            "Research Manager",
-            self.conditional_logic.should_continue_after_research,
-            {"Magpie": "Magpie", "__end__": END},
-        )
+        for research_exit_node in ("Research Manager", "Fast Bias Rating"):
+            workflow.add_conditional_edges(
+                research_exit_node,
+                self.conditional_logic.should_continue_after_research,
+                {"Magpie": "Magpie", "__end__": END},
+            )
         workflow.add_edge("Magpie", "Trader")
         workflow.add_edge("Trader", "Aggressive Analyst")
         # All three risk edges share the complete RISK_ANALYSIS_PATH_MAP (#1088).

@@ -169,6 +169,103 @@ def test_pro_trader_dry_run_config_keys_present():
 
 
 @pytest.mark.unit
+def test_pro_trader_shallow_history_does_not_block_on_relative_volume():
+    """5m rvol needs ~20 sessions; a short frame must skip the check, not fail it."""
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_relative_volume": True,
+    }
+    mtf = _pro_trader_mtf()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    met, missing = strategy._long_conditions("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "relative_volume" not in met
+    assert "relative_volume" not in missing
+
+
+@pytest.mark.unit
+def test_pro_trader_relative_volume_on_missing_fail_blocks():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_relative_volume": True,
+        "pro_trader_relative_volume_on_missing": "fail",
+    }
+    mtf = _pro_trader_mtf()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    _, missing = strategy._long_conditions("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "relative_volume" in missing
+
+
+@pytest.mark.unit
+def test_pro_trader_rs_check_key_is_static():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 99,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    mtf = _pro_trader_mtf()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    _, missing = strategy._long_conditions("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "rs_timeframes_aligned" in missing
+
+
+@pytest.mark.unit
+def test_pro_trader_lenient_sector_mode_skips_when_data_missing():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_sector_alignment": True,
+        "pro_trader_sector_alignment_mode": "lenient",
+    }
+    mtf = _pro_trader_mtf()
+    mtf.sector_daily_df = pd.DataFrame()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    met, missing = strategy._long_conditions("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "sector_aligned" not in met
+    assert "sector_aligned" not in missing
+
+
+@pytest.mark.unit
+def test_pro_trader_strict_sector_mode_fails_when_data_missing():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+        "pro_trader_require_sector_alignment": True,
+        "pro_trader_sector_alignment_mode": "strict",
+    }
+    mtf = _pro_trader_mtf()
+    mtf.sector_daily_df = pd.DataFrame()
+    ctx = strategy._build_context("NVDA", mtf, _bias("bullish"), config)
+    _, missing = strategy._long_conditions("NVDA", mtf, _bias("bullish"), ctx, config)
+    assert "sector_aligned" in missing
+
+
+@pytest.mark.unit
+def test_pro_trader_failed_setup_reports_closest_direction_factors():
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 99,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    result = strategy.check_setup("NVDA", _pro_trader_mtf(), _bias("bullish"), config=config)
+    assert result.passed is False
+    assert result.factors_missing, "gate diagnostics must survive a total failure"
+
+
+@pytest.mark.unit
 def test_pro_trader_snapshot_includes_volume_pressure():
     strategy = ProTraderDashboardStrategy()
     mtf = _pro_trader_mtf()

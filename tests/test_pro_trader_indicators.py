@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, time
 
 import numpy as np
@@ -138,6 +139,23 @@ def test_relative_volume_above_one_on_surge():
     df = pd.DataFrame({"Volume": volume})
     rv = compute_relative_volume(df, "5m")
     assert rv > 1.0
+
+
+@pytest.mark.unit
+def test_relative_volume_uses_available_sessions_on_short_history():
+    """~7 sessions of 5m bars is the real fetch depth; must still yield a value."""
+    volume = [100.0] * 550
+    volume[-1] = 5000.0
+    df = pd.DataFrame({"Volume": volume})
+    rv = compute_relative_volume(df, "5m")
+    assert not math.isnan(rv)
+    assert rv > 1.0
+
+
+@pytest.mark.unit
+def test_relative_volume_nan_when_too_shallow_to_sample():
+    df = pd.DataFrame({"Volume": [100.0] * 100})
+    assert math.isnan(compute_relative_volume(df, "5m"))
 
 
 @pytest.mark.unit

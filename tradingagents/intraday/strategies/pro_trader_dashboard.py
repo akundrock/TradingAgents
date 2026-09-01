@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -50,6 +51,22 @@ class ProTraderContext:
     premarket_volume: float = 0.0
     increasing_price_volume: bool = False
     decreasing_price_volume: bool = False
+    sector_data_available: bool = False
+
+
+def _resolve_sector_mode(config: dict[str, Any] | None) -> str:
+    if not _cfg(config, "pro_trader_require_sector_alignment", True):
+        return "off"
+    mode = str(_cfg(config, "pro_trader_sector_alignment_mode", "lenient")).lower()
+    return mode if mode in ("strict", "lenient", "off") else "lenient"
+
+
+def _relative_volume_check(value: float, config: dict[str, Any] | None) -> bool | None:
+    """Return None to skip the check when relative volume could not be computed."""
+    if math.isnan(value):
+        on_missing = str(_cfg(config, "pro_trader_relative_volume_on_missing", "skip")).lower()
+        return False if on_missing == "fail" else None
+    return value > float(_cfg(config, "pro_trader_min_relative_volume", 1.0))
 
 
 def _cfg(config: dict[str, Any] | None, key: str, default: Any) -> Any:
@@ -106,12 +123,14 @@ class ProTraderDashboardStrategy:
         short_result = self._evaluate_short(symbol, mtf, daily_bias, ctx, config)
         if short_result.passed:
             return short_result
+        # Report the side that came closest so gate diagnostics stay actionable.
+        closer = min(long_result, short_result, key=lambda r: len(r.factors_missing))
         return StrategyResult(
             passed=False,
             direction="none",
-            reason=f"{long_result.reason}; {short_result.reason}",
-            factors_met=[],
-            factors_missing=[],
+            reason=closer.reason,
+            factors_met=list(closer.factors_met),
+            factors_missing=list(closer.factors_missing),
         )
 
     def _build_context(
@@ -170,7 +189,8 @@ class ProTraderDashboardStrategy:
         sector_etf = get_sector_etf(symbol)
         symbol_power = compute_power_index(symbol_frames.get("daily", pd.DataFrame()))
         sector_power = 0.0
-        if sector_etf and not mtf.sector_daily_df.empty:
+        sector_data_available = bool(sector_etf) and not mtf.sector_daily_df.empty
+        if sector_data_available:
             sector_power = compute_power_index(mtf.sector_daily_df)
 
         return ProTraderContext(
@@ -186,6 +206,7 @@ class ProTraderDashboardStrategy:
             premarket_volume=premarket_volume,
             increasing_price_volume=increasing_pv,
             decreasing_price_volume=decreasing_pv,
+            sector_data_available=sector_data_available,
         )
 
     def _evaluate_long(
@@ -241,23 +262,29 @@ class ProTraderDashboardStrategy:
         else:
             checks["orb_breakout"] = or_state.bullish_orb
             checks["entry_window"] = or_state.in_entry_window
-            checks["price_beyond_or"] = close > or_state.opening_range_high
+            if _cfg(config, "pro_trader_require_price_beyond_or", True):
+                checks["price_beyond_or"] = close > or_state.opening_range_high
             checks["supertrend_aligned"] = ctx.supertrend.is_long
 
-        if _cfg(config, "pro_trader_require_daily_rrs", True):
+        if _cfg(config, "pro_trader_require_daily_rrs", False):
             daily_rrs = ctx.rrs_by_tf.get("daily", 0.0)
             checks["daily_rrs_positive"] = daily_rrs > 0
 
-        min_rs = int(_cfg(config, "pro_trader_min_rs_timeframes", 4))
+        min_rs = int(_cfg(config, "pro_trader_min_rs_timeframes", 2))
         aligned = count_aligned_rrs(ctx.rrs_by_tf, "long")
-        checks[f"rs_timeframes_aligned_{aligned}"] = aligned >= min_rs
+        checks["rs_timeframes_aligned"] = aligned >= min_rs
 
         if _cfg(config, "pro_trader_require_relative_volume", True):
-            checks["relative_volume_above_1"] = ctx.relative_volume_5m > 1.0
+            rvol_ok = _relative_volume_check(ctx.relative_volume_5m, config)
+            if rvol_ok is not None:
+                checks["relative_volume"] = rvol_ok
 
-        if _cfg(config, "pro_trader_require_sector_alignment", True) and ctx.sector_etf:
+        sector_mode = _resolve_sector_mode(config)
+        if sector_mode != "off" and ctx.sector_etf and (
+            ctx.sector_data_available or sector_mode == "strict"
+        ):
             checks["sector_aligned"] = sector_aligned_for_direction(
-                ctx.symbol_power, ctx.sector_power, "long"
+                ctx.symbol_power, ctx.sector_power, "long", mode=sector_mode
             )
 
         buffer = float(_cfg(config, "pro_trader_key_level_atr_buffer", 0.5))
@@ -297,23 +324,29 @@ class ProTraderDashboardStrategy:
         else:
             checks["orb_breakout"] = or_state.bearish_orb
             checks["entry_window"] = or_state.in_entry_window
-            checks["price_beyond_or"] = close < or_state.opening_range_low
+            if _cfg(config, "pro_trader_require_price_beyond_or", True):
+                checks["price_beyond_or"] = close < or_state.opening_range_low
             checks["supertrend_aligned"] = ctx.supertrend.is_short
 
-        if _cfg(config, "pro_trader_require_daily_rrs", True):
+        if _cfg(config, "pro_trader_require_daily_rrs", False):
             daily_rrs = ctx.rrs_by_tf.get("daily", 0.0)
             checks["daily_rrs_negative"] = daily_rrs < 0
 
-        min_rs = int(_cfg(config, "pro_trader_min_rs_timeframes", 4))
+        min_rs = int(_cfg(config, "pro_trader_min_rs_timeframes", 2))
         aligned = count_aligned_rrs(ctx.rrs_by_tf, "short")
-        checks[f"rs_timeframes_aligned_{aligned}"] = aligned >= min_rs
+        checks["rs_timeframes_aligned"] = aligned >= min_rs
 
         if _cfg(config, "pro_trader_require_relative_volume", True):
-            checks["relative_volume_above_1"] = ctx.relative_volume_5m > 1.0
+            rvol_ok = _relative_volume_check(ctx.relative_volume_5m, config)
+            if rvol_ok is not None:
+                checks["relative_volume"] = rvol_ok
 
-        if _cfg(config, "pro_trader_require_sector_alignment", True) and ctx.sector_etf:
+        sector_mode = _resolve_sector_mode(config)
+        if sector_mode != "off" and ctx.sector_etf and (
+            ctx.sector_data_available or sector_mode == "strict"
+        ):
             checks["sector_aligned"] = sector_aligned_for_direction(
-                ctx.symbol_power, ctx.sector_power, "short"
+                ctx.symbol_power, ctx.sector_power, "short", mode=sector_mode
             )
 
         buffer = float(_cfg(config, "pro_trader_key_level_atr_buffer", 0.5))
@@ -350,7 +383,9 @@ class ProTraderDashboardStrategy:
 def indicator_snapshot_from_context(ctx: ProTraderContext) -> dict[str, float | str]:
     snapshot: dict[str, float | str] = {
         "supertrend": "long" if ctx.supertrend.is_long else "short",
-        "relative_volume_5m": round(ctx.relative_volume_5m, 2),
+        "relative_volume_5m": (
+            "n/a" if math.isnan(ctx.relative_volume_5m) else round(ctx.relative_volume_5m, 2)
+        ),
         "buy_percent": round(ctx.buy_percent, 1),
         "sell_percent": round(ctx.sell_percent, 1),
         "premarket_volume": round(ctx.premarket_volume, 0),
