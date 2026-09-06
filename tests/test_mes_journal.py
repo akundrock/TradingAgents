@@ -1,11 +1,16 @@
+from datetime import datetime as dt
 from pathlib import Path
 
 import pytest
 
 from tradingagents.mes.checklist import evaluate
 from tradingagents.mes.journal import MesJournal
+from tradingagents.mes.management import OpenTrade
 
 from tests.mes_factories import DEFAULT_AS_OF, make_snapshot
+
+# The brief's test bodies call ``_dt(...)``; alias it to the datetime import.
+_dt = dt
 
 
 @pytest.fixture()
@@ -146,3 +151,75 @@ def test_summarize_checks_contains_score_and_tier(journal):
 @pytest.mark.unit
 def test_summarize_checks_with_no_checks(journal):
     assert journal.summarize_checks("2020-01-01") == "No checks logged for 2020-01-01."
+
+
+def _trade(**overrides) -> OpenTrade:
+    fields = dict(
+        side="long",
+        contracts=1,
+        remaining=1,
+        entry=6500.0,
+        stop=6498.0,
+        initial_stop=6498.0,
+        target=6504.0,
+        entry_time=dt(2026, 3, 30, 10, 7),
+        initial_risk_points=2.0,
+        fired={},
+        manual_events=[],
+        realized_r=0.0,
+    )
+    fields.update(overrides)
+    return OpenTrade(**fields)
+
+
+@pytest.mark.unit
+def test_trade_lifecycle_round_trip(journal):
+    journal.append_trade_opened(_trade(), entry_context={"score": 7, "tier": "standard"})
+    journal.append_trade_adjusted("2026-03-30", stop=6500.25, note="breakeven stop")
+
+    open_trade = journal.find_open_trade("2026-03-30")
+    assert open_trade is not None
+    assert open_trade.entry == pytest.approx(6500.0)
+    assert open_trade.side == "long"
+    assert open_trade.stop == pytest.approx(6500.25)  # adjusted during replay
+    assert open_trade.remaining == 1
+
+    journal.append_trade_closed(
+        _trade(stop=6500.25), exit_price=6503.0, reason="manual", as_of=_dt(2026, 3, 30, 11, 30)
+    )
+    assert journal.find_open_trade("2026-03-30") is None
+
+    closed = [t for t in journal.load_trades("2026-03-30") if t["kind"] == "trade_closed"]
+    assert closed[-1]["exit_price"] == 6503.0
+    assert closed[-1]["reason"] == "manual"
+    # realized: 3.0 pts / 2.0 risk = 1.5R
+    assert closed[-1]["realized_r"] == pytest.approx(1.5)
+
+
+@pytest.mark.unit
+def test_trade_opened_captures_entry_context(journal):
+    journal.append_trade_opened(_trade(), entry_context={"score": 7, "tier": "standard"})
+    opened = [t for t in journal.load_trades("2026-03-30") if t["kind"] == "trade_opened"][0]
+    assert opened["entry_context"] == {"score": 7, "tier": "standard"}
+    assert opened["initial_risk_points"] == 2.0
+
+
+@pytest.mark.unit
+def test_find_open_trade_none_before_any_trade(journal):
+    assert journal.find_open_trade("2020-01-01") is None
+
+
+@pytest.mark.unit
+def test_summarize_trades_lists_closed_results(journal):
+    journal.append_trade_opened(_trade(), entry_context={"score": 7, "tier": "standard"})
+    journal.append_trade_closed(_trade(realized_r=1.5), exit_price=6503.5, reason="manual", as_of=_dt(2026, 3, 30, 11, 0))
+
+    summary = journal.summarize_trades("2026-03-30")
+    assert "| Side | Entry | Exit | Reason | Realized R |" in summary
+    assert "6503.50" in summary
+    assert "manual" in summary
+
+
+@pytest.mark.unit
+def test_summarize_trades_empty(journal):
+    assert journal.summarize_trades("2020-01-01") == "No trades logged for 2020-01-01."
