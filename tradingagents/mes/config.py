@@ -143,6 +143,15 @@ class MesChecklistConfig:
     default_risk_dollars: float = 200.0
     max_contracts: int = 10
 
+    # Trade management ladder (mes trade enter/status/close).
+    breakeven_at_r: float = 1.0
+    breakeven_cushion_ticks: float = 1.0
+    partial_at_r: float = 1.5
+    partial_fraction: float = 0.5
+    trail_atr_multiple: float = 1.0
+    exit_on_confluence_loss: bool = False
+    time_stop_buffer_minutes: int = 10
+
     spy_symbol: str = "SPY"
     mes_symbol: str = "/MES"
     session_timezone: str = "America/New_York"
