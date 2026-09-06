@@ -20,6 +20,7 @@ from .checklist import (
     tier_contract_band,
 )
 from .config import MesChecklistConfig, load_mes_config
+from .config import MesChecklistConfig, load_mes_config
 from .journal import MesJournal
 from .levels import (
     TradeLevels,
@@ -28,6 +29,7 @@ from .levels import (
     suggest_trade_levels,
     suggest_trade_levels_from_snapshot,
 )
+from .management import MgmtEvent, MgmtReport, OpenTrade, evaluate_management
 from .profile import VolumeProfile, volume_profile
 from .radar import LevelDistance, ProximityReport, SetupState, build_proximity
 from .render import render_checklist, render_market_context
@@ -52,6 +54,9 @@ __all__ = [
     "MesChecklistConfig",
     "MesJournal",
     "MesSnapshot",
+    "MgmtEvent",
+    "MgmtReport",
+    "OpenTrade",
     "ProximityReport",
     "SeriesState",
     "SessionLevels",
@@ -63,6 +68,7 @@ __all__ = [
     "build_snapshot",
     "detect_divergence",
     "evaluate",
+    "evaluate_management",
     "load_mes_config",
     "max_achievable_score",
     "normalize_trade_gonogo",

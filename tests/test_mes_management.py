@@ -274,3 +274,11 @@ def test_exit_on_confluence_loss_hard_closes():
     assert report.recommendation == "CLOSED"
     assert updated.remaining == 0
     assert "confluence_exit" in updated.fired
+
+
+@pytest.mark.unit
+def test_management_types_are_public():
+    import tradingagents.mes as pkg
+
+    for name in ("OpenTrade", "MgmtEvent", "MgmtReport", "evaluate_management"):
+        assert hasattr(pkg, name), f"tradingagents.mes.{name} must be re-exported"
