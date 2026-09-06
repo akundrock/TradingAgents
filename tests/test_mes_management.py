@@ -88,7 +88,8 @@ def test_r_now_long_positive_above_entry():
 
 @pytest.mark.unit
 def test_r_now_short_side_sign():
-    trade = make_trade(side="short")
+    # Short fixtures need mirrored levels: stop above entry, target below.
+    trade = make_trade(side="short", stop=102.0, initial_stop=102.0, target=98.0)
     _, report = evaluate_management(snap_at(99.0), result_at(99.0), trade)
     assert report.r_now == pytest.approx(0.5)  # 1.0 favorable pt / 2.0
 
