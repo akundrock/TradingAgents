@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 from typer.testing import CliRunner
 
-from cli.mes import trade_app
+from cli.mes import mes_app, trade_app
 from tests.mes_factories import make_mes_series, make_snapshot
 from tradingagents.mes.journal import MesJournal
 
@@ -105,3 +105,33 @@ def test_adjust_refuses_to_loosen_stop(tmp_path, patched_snapshot):
             "--journal-dir", str(tmp_path))
     loosened = _invoke("adjust", "--stop", "97.00", "--journal-dir", str(tmp_path))
     assert "refus" in loosened.output.lower() or "kept" in loosened.output.lower()
+
+
+@pytest.mark.unit
+def test_review_flags_still_open_trade(tmp_path, patched_snapshot, monkeypatch):
+    from datetime import datetime as _dt
+
+    from cli import mes as mes_cli
+    from tradingagents.mes.management import OpenTrade
+
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    trade = OpenTrade(
+        side="long", contracts=1, remaining=1,
+        entry=100.0, stop=98.0, initial_stop=98.0, target=102.0,
+        entry_time=datetime(2026, 3, 30, 10, 7), initial_risk_points=2.0,
+    )
+    journal.append_trade_opened(trade, entry_context={"score": 7, "tier": "standard"})
+
+    # review builds its journal from DEFAULT_CONFIG; point it at tmp_path so
+    # this test never touches the real journal.
+    import tradingagents.default_config as dc
+    from cli import mes as mes_cli
+
+    monkeypatch.setattr(
+        mes_cli, "DEFAULT_CONFIG",
+        {**dc.DEFAULT_CONFIG, "mes_journal_dir": str(tmp_path)},
+    )
+
+    result = CliRunner().invoke(mes_app, ["review", "--date", "2026-03-30", "--no-llm"])
+    assert result.exit_code == 0
+    assert "still marked open" in result.output.lower()

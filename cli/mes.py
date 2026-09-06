@@ -399,7 +399,7 @@ def review(
 
     checks = journal.load_checks(session_date)
     hypothesis_record = journal.load_hypothesis(session_date)
-    if not checks and not hypothesis_record:
+    if not checks and not hypothesis_record and not journal.load_trades(session_date):
         console.print(f"[yellow]No journal entries for {session_date}.[/yellow]")
         available = journal.available_dates()
         if available:
@@ -407,7 +407,17 @@ def review(
         raise typer.Exit(code=1)
 
     checks_summary = journal.summarize_checks(session_date)
+    trades_summary = journal.summarize_trades(session_date)
+    open_trade = journal.find_open_trade(session_date)
+    if open_trade is not None:
+        console.print(
+            "[yellow]Warning: the trade opened "
+            f"{open_trade.entry_time:%H:%M} is still marked open for {session_date}; "
+            "grading assumes an EOD flatten.[/yellow]"
+        )
     console.print(Panel(Markdown(checks_summary), title=f"Checks — {session_date}", border_style="cyan"))
+    if trades_summary and not trades_summary.startswith("No trades"):
+        console.print(Panel(Markdown(trades_summary), title="Trades", border_style="green"))
 
     hour, minute = divmod(int(cfg.exit_time.replace(":", "")), 100)
     close_stamp = datetime.strptime(session_date, "%Y-%m-%d").replace(hour=hour, minute=minute)
@@ -432,6 +442,7 @@ def review(
             hypothesis=hypothesis,
             checks_summary=checks_summary,
             outcome_summary=outcome_summary,
+            trades_summary=trades_summary,
         )
     except Exception as exc:
         console.print(f"[red]Review generation failed:[/red] {exc}")
