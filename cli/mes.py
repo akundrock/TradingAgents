@@ -17,9 +17,11 @@ from zoneinfo import ZoneInfo
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from tradingagents.agents.mes import (
     create_mes_gatekeeper_agent,
@@ -31,8 +33,12 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.mes import (
     ChecklistResult,
+    LevelDistance,
     MesJournal,
     MesSnapshot,
+    ProximityReport,
+    SetupState,
+    build_proximity,
     build_snapshot,
     evaluate,
     load_mes_config,
@@ -41,6 +47,10 @@ from tradingagents.mes import (
     size_position,
     snapshot_from_csv,
     suggest_stop_points,
+)
+from tradingagents.mes.levels import (
+    render_trade_levels_hint,
+    suggest_trade_levels_from_snapshot,
 )
 
 console = Console()
@@ -321,6 +331,7 @@ def check(
         verdict = ""
         if gatekeeper is not None:
             try:
+                levels_hint = suggest_trade_levels_from_snapshot(result.side, snapshot, result)
                 verdict = gatekeeper(
                     checklist_markdown=render_checklist(result, live=snapshot.rth_started),
                     market_context=render_market_context(snapshot),
@@ -328,6 +339,8 @@ def check(
                     past_context=past_context,
                     tradeable=result.tradeable,
                     sizing_note=sizing_note,
+                    current_price=snapshot.mes.close,
+                    trade_levels_hint=render_trade_levels_hint(levels_hint) if levels_hint else "",
                 )
             except Exception as exc:
                 console.print(f"[yellow]Gatekeeper call failed:[/yellow] {exc}")
@@ -436,3 +449,192 @@ def review(
         console.print("[green]Review appended to the memory log.[/green]")
     else:
         console.print("[dim]Review already present in the memory log; skipped.[/dim]")
+
+
+# ---------------------------------------------------------------------------
+# Radar helpers
+# ---------------------------------------------------------------------------
+
+_STATE_STYLE: dict[SetupState, str] = {
+    SetupState.READY: "bold green",
+    SetupState.CONFLUENCE_OK_WAITING_LOCATION: "bold cyan",
+    SetupState.AT_LEVEL_MISSING_CONFLUENCE: "bold yellow",
+    SetupState.BUILDING: "white",
+    SetupState.BLOCKED: "bold red",
+    SetupState.GATES_CLOSED: "dim",
+}
+
+_STATE_LABEL: dict[SetupState, str] = {
+    SetupState.READY: "READY — run mes check",
+    SetupState.CONFLUENCE_OK_WAITING_LOCATION: "WAITING LOCATION — valid patience",
+    SetupState.AT_LEVEL_MISSING_CONFLUENCE: "AT LEVEL — confluence missing",
+    SetupState.BUILDING: "BUILDING — signals forming",
+    SetupState.BLOCKED: "BLOCKED — no-trade conditions",
+    SetupState.GATES_CLOSED: "GATES CLOSED",
+}
+
+
+def _level_row(ld: LevelDistance) -> Text:
+    sign = "+" if ld.distance >= 0 else ""
+    dist_str = f"{sign}{ld.distance:+.2f} pts"
+    flag = " [dim](cleared)[/dim]" if ld.cleared else ""
+    band_mark = " [bold yellow]◄[/bold yellow]" if ld.within_band else ""
+    return Text.from_markup(
+        f"  {ld.price:.2f}  {ld.label:<22} {dist_str}{flag}{band_mark}"
+    )
+
+
+def _render_radar(report: ProximityReport, as_of: datetime) -> Table:
+    """Build a compact Rich Table displaying the proximity report."""
+    state_style = _STATE_STYLE[report.state]
+    state_label = _STATE_LABEL[report.state]
+    tier_style = _TIER_STYLE.get(report.tier, "white")
+
+    outer = Table.grid(padding=(0, 1))
+
+    # ---- Header row ----
+    header = (
+        f"[bold]/MES {report.price:.2f}[/bold]  "
+        f"{report.side.upper()}  "
+        f"[{tier_style}]{report.tier}[/{tier_style}]  "
+        f"Score [bold]{report.score}/{report.max_score}[/bold]  "
+        f"Conf [bold]{report.confirmations}/{report.required}[/bold]  "
+        f"SPY [bold]{report.spy_confirmations}/5[/bold]  "
+        f"Band ±{report.proximity_band:.1f} pts  "
+        f"[dim]{as_of.strftime('%H:%M')}[/dim]"
+    )
+    outer.add_row(Text.from_markup(header))
+
+    # ---- State banner ----
+    outer.add_row(Text.from_markup(f"[{state_style}]{state_label}[/{state_style}]"))
+
+    # ---- Gates / blockers ----
+    if not report.gates_ok:
+        for r in report.gate_reasons:
+            outer.add_row(Text.from_markup(f"  [dim]gate:[/dim] {r}"))
+    if report.no_trade_reasons:
+        for r in report.no_trade_reasons:
+            outer.add_row(Text.from_markup(f"  [red]blocked:[/red] {r}"))
+
+    # ---- Missing items ----
+    if report.missing_items and not report.tradeable:
+        items_txt = ", ".join(report.missing_items[:4])
+        more = len(report.missing_items) - 4
+        suffix = f" (+{more} more)" if more > 0 else ""
+        outer.add_row(Text.from_markup(f"  [yellow]need:[/yellow] {items_txt}{suffix}"))
+
+    # ---- Level tape ----
+    if report.levels_above or report.levels_below:
+        outer.add_row(Text(""))
+        outer.add_row(Text.from_markup("  [bold]Levels above[/bold]"))
+        if report.levels_above:
+            for ld in report.levels_above:
+                outer.add_row(_level_row(ld))
+        else:
+            outer.add_row(Text("    (none in range)"))
+        outer.add_row(Text.from_markup(f"  [bold dim]── price {report.price:.2f} ──[/bold dim]"))
+        outer.add_row(Text.from_markup("  [bold]Levels below[/bold]"))
+        if report.levels_below:
+            for ld in report.levels_below:
+                outer.add_row(_level_row(ld))
+        else:
+            outer.add_row(Text("    (none in range)"))
+
+    return outer
+
+
+# ---------------------------------------------------------------------------
+# Radar command
+# ---------------------------------------------------------------------------
+
+
+@mes_app.command("radar")
+def radar(
+    side: str = typer.Option("auto", "--side", help="Evaluate 'long', 'short', or 'auto'."),
+    watch: int = typer.Option(60, "--watch", help="Re-run every N seconds. Use --no-watch for one-shot."),
+    no_watch: bool = typer.Option(False, "--no-watch", help="Run once then exit."),
+    within: float | None = typer.Option(
+        None, "--within", help="Proximity band in points (default: min(4.0, 0.5×ATR))."
+    ),
+    alert: bool = typer.Option(
+        False, "--alert", help="Print a bell character when state is READY or AT_LEVEL."
+    ),
+    as_of: str | None = typer.Option(None, "--as-of", help="Bar timestamp to evaluate. Defaults to now."),
+    date: str | None = typer.Option(None, "--date", help="Session date when --as-of is a bare time."),
+    as_json: bool = typer.Option(False, "--json", help="Emit ProximityReport as JSON then exit."),
+    mes_csv: Path | None = typer.Option(None, "--mes-csv", help="Replay from a recorded /MES bar CSV."),
+    spy_csv: Path | None = typer.Option(None, "--spy-csv", help="Replay from a recorded SPY bar CSV."),
+):
+    """Compact live proximity view: how close is a valid MES trade entry?
+
+    Runs without the LLM gatekeeper and does not write to the journal.
+    When state is READY or AT_LEVEL_MISSING_CONFLUENCE, run `mes check` for the
+    full gatekeeper verdict.
+
+    Examples:
+
+        tradingagents mes radar
+
+        tradingagents mes radar --watch 15 --within 3 --side long --alert
+
+        tradingagents mes radar --no-watch --json
+    """
+    if side not in {"auto", "long", "short"}:
+        raise typer.BadParameter("--side must be one of: auto, long, short")
+
+    cfg = load_mes_config()
+    interval = watch if not no_watch else 0
+
+    _ALERT_STATES = {SetupState.READY, SetupState.AT_LEVEL_MISSING_CONFLUENCE}
+
+    import dataclasses as _dc
+
+    def _one_shot(stamp: datetime) -> ProximityReport:
+        snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
+        result = evaluate(snapshot, side)
+        return build_proximity(snapshot, result, proximity_band=within)
+
+    if as_json:
+        stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+        try:
+            report = _one_shot(stamp)
+        except Exception as exc:
+            console.print(f"[red]Snapshot failed:[/red] {exc}")
+            raise typer.Exit(code=1)
+        import dataclasses as _dc2
+        console.print_json(
+            __import__("json").dumps(_dc2.asdict(report), default=str)
+        )
+        return
+
+    if no_watch or interval == 0:
+        stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+        try:
+            report = _one_shot(stamp)
+        except Exception as exc:
+            console.print(f"[red]Snapshot failed:[/red] {exc}")
+            raise typer.Exit(code=1)
+        console.print(Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue"))
+        if alert and report.state in _ALERT_STATES:
+            console.print("\a", end="")
+        return
+
+    # ---- Watch loop with Rich Live ----
+    prev_state: SetupState | None = None
+    with Live(console=console, refresh_per_second=1, screen=False) as live:
+        while True:
+            stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+            try:
+                report = _one_shot(stamp)
+                panel = Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue")
+                live.update(panel)
+                if alert and report.state in _ALERT_STATES and report.state != prev_state:
+                    console.print("\a", end="")
+                prev_state = report.state
+            except Exception as exc:
+                live.update(Panel(f"[red]Snapshot error:[/red] {exc}", border_style="red"))
+
+            try:
+                __import__("time").sleep(interval)
+            except KeyboardInterrupt:
+                break

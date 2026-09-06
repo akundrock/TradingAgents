@@ -21,7 +21,15 @@ from .checklist import (
 )
 from .config import MesChecklistConfig, load_mes_config
 from .journal import MesJournal
+from .levels import (
+    TradeLevels,
+    normalize_trade_gonogo,
+    render_trade_levels_hint,
+    suggest_trade_levels,
+    suggest_trade_levels_from_snapshot,
+)
 from .profile import VolumeProfile, volume_profile
+from .radar import LevelDistance, ProximityReport, SetupState, build_proximity
 from .render import render_checklist, render_market_context
 from .sizing import SizingResult, size_position, suggest_stop_points
 from .snapshot import (
@@ -40,28 +48,37 @@ __all__ = [
     "Bar",
     "CheckItem",
     "ChecklistResult",
+    "LevelDistance",
     "MesChecklistConfig",
     "MesJournal",
     "MesSnapshot",
+    "ProximityReport",
     "SeriesState",
     "SessionLevels",
+    "SetupState",
     "SizingResult",
+    "TradeLevels",
     "VolumeProfile",
+    "build_proximity",
     "build_snapshot",
     "detect_divergence",
     "evaluate",
     "load_mes_config",
     "max_achievable_score",
+    "normalize_trade_gonogo",
     "overnight_range",
     "prior_session_levels",
     "render_checklist",
     "render_market_context",
+    "render_trade_levels_hint",
     "required_confirmations",
     "score_tier",
     "session_bounds",
     "size_position",
     "snapshot_from_csv",
     "suggest_stop_points",
+    "suggest_trade_levels",
+    "suggest_trade_levels_from_snapshot",
     "tier_contract_band",
     "volume_profile",
 ]

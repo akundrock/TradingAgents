@@ -309,6 +309,14 @@ class SentimentReport(BaseModel):
             "'high' when all three sources returned substantive data."
         ),
     )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalise_confidence(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
     narrative: str = Field(
         description=(
             "Full sentiment report covering, in order: "
@@ -418,6 +426,14 @@ class MorningHypothesis(BaseModel):
             "relative to VWAP all agree."
         ),
     )
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _normalise_confidence(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
     narrative: str = Field(
         description=(
             "Full morning plan covering, in order: "
@@ -490,6 +506,14 @@ class TradeGoNoGo(BaseModel):
             "how cleanly the setup matches the morning hypothesis."
         ),
     )
+
+    @field_validator("confidence", "direction", mode="before")
+    @classmethod
+    def _normalise_literals(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.lower()
+        return v
+
     reasoning: str = Field(
         description=(
             "The case for the verdict in two to four sentences, citing the specific "
