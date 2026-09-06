@@ -8,6 +8,7 @@ from datetime import datetime
 import pytest
 
 from tradingagents.mes.checklist import ChecklistResult
+from tradingagents.mes.config import load_mes_config
 from tradingagents.mes.management import (
     MgmtEvent,
     MgmtReport,
@@ -170,3 +171,106 @@ def test_mfe_mae_cover_bars_since_entry():
     _, report = evaluate_management(snap_at(100.5), result_at(100.5), trade)
     assert report.mfe_r >= report.r_now
     assert report.mae_r <= 0.0
+
+
+# ---------------------------------------------------------------------------
+# Ladder triggers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_breakeven_fires_at_1r():
+    """+1.0R close moves the stop to entry + 1 tick cushion (0.25)."""
+    trade = make_trade(target=None)  # target None: otherwise the fill branch closes first
+    updated, report = evaluate_management(snap_at(102.0), result_at(102.0), trade)
+    assert "breakeven" in updated.fired
+    assert updated.stop == pytest.approx(100.25)  # entry + 1 tick
+    assert report.events[0].name == "breakeven"
+    assert "stop 98.00 -> 100.25" in report.events[0].detail
+
+
+@pytest.mark.unit
+def test_breakeven_does_not_refire():
+    trade = make_trade(fired={"breakeven": "2026-03-30T10:30"}, stop=100.25, target=None)
+    updated, report = evaluate_management(snap_at(102.0), result_at(102.0), trade)
+    assert [e.name for e in report.events if e.name == "breakeven"] == []
+    assert updated.stop == 100.25
+
+
+@pytest.mark.unit
+def test_stop_never_loosens_via_trail():
+    """Trail candidate below the current stop never loosens it."""
+    trade = make_trade(
+        fired={"breakeven": "10:30", "partial": "10:35"},
+        stop=101.5, target=None,
+        entry_time=DEFAULT_AS_OF.replace(hour=9, minute=30),
+    )
+    # highest close 101.5 - 1.0 ATR = 100.5 -> candidate looser than current stop 101.5
+    updated, _ = evaluate_management(snap_at(101.5), result_at(101.5), trade)
+    assert updated.stop == pytest.approx(101.5)
+
+
+@pytest.mark.unit
+def test_partial_single_contract_degrades_to_stop_lock():
+    trade = make_trade(fired={"breakeven": "10:30"}, stop=100.25, target=None)
+    # +1.5R exactly: partial fires; 1 contract -> tighten stop, not sell
+    updated, report = evaluate_management(snap_at(103.0), result_at(103.0), trade)
+    assert "partial" in updated.fired
+    assert updated.remaining == 1
+    # lock = entry + r_now(1.5) * 0.5 * risk(2.0) = 101.50
+    assert updated.stop == pytest.approx(101.5)
+    assert any("1-contract" in e.detail for e in report.events)
+
+
+@pytest.mark.unit
+def test_partial_multi_contract_reduces_remaining():
+    trade = make_trade(contracts=2, remaining=2, target=None)
+    updated, report = evaluate_management(snap_at(103.0), result_at(103.0), trade)
+    assert updated.remaining == 1
+    assert updated.realized_r == pytest.approx(1.5)  # 1 closed at +1.5R (per-contract credit)
+    assert "partial" in [e.name for e in report.events]
+
+
+@pytest.mark.unit
+def test_trail_rides_atr_after_partial():
+    trade = make_trade(
+        fired={"breakeven": "10:30", "partial": "10:40"},
+        stop=100.5, target=None,
+        entry_time=DEFAULT_AS_OF.replace(hour=9, minute=30),
+    )
+    # highest close since entry = 103.25; trail = 103.25 - 1.0*1.0 = 102.25
+    updated, _ = evaluate_management(snap_at(103.25), result_at(103.25), trade)
+    assert updated.stop == pytest.approx(102.25)
+
+
+@pytest.mark.unit
+def test_time_stop_flattens_before_exit():
+    cfg = load_mes_config({"exit_time": "11:15", "time_stop_buffer_minutes": 10})
+    as_of = DEFAULT_AS_OF.replace(hour=11, minute=5)  # 11:15 - 10 min
+    updated, report = evaluate_management(
+        snap_at(100.2, as_of=as_of), result_at(100.2), make_trade(target=None), cfg
+    )
+    assert report.recommendation == "FLATTEN"
+    assert report.events[0].name == "time_stop"
+    assert updated.remaining == 0
+
+
+@pytest.mark.unit
+def test_confluence_flip_is_advisory_by_default():
+    trade = make_trade(target=None)
+    result = result_at(100.5)
+    result.spy_confluence_ok = False
+    _, report = evaluate_management(snap_at(100.5), result, trade)
+    assert report.recommendation == "EXIT"
+    assert any("confluence" in r.lower() for r in report.reasons)
+
+
+@pytest.mark.unit
+def test_exit_on_confluence_loss_hard_closes():
+    cfg = load_mes_config({"exit_on_confluence_loss": True})
+    result = result_at(100.5)
+    result.spy_confluence_ok = False
+    updated, report = evaluate_management(snap_at(100.5), result, make_trade(target=None), cfg)
+    assert report.recommendation == "CLOSED"
+    assert updated.remaining == 0
+    assert "confluence_exit" in updated.fired

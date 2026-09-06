@@ -183,11 +183,118 @@ def evaluate_management(
             reasons=[f"target hit at {target_fill:.2f}"],
         )
 
-    # No fill this bar: Task 3's ladder triggers run here. Task 2 reports HOLD.
+    # ---- Ladder triggers, evaluated in order on this bar close ----
+
+    # 1. Breakeven: open profit at or past the configured R.
+    if "breakeven" not in updated.fired and r_now >= cfg.breakeven_at_r:
+        cushion = cfg.breakeven_cushion_ticks * cfg.mes_tick_size
+        be_stop = updated.entry + cushion if updated.side == "long" else updated.entry - cushion
+        new_stop = _tighter(updated.stop, _round_tick(be_stop, cfg.mes_tick_size), updated.side)
+        if new_stop != updated.stop:
+            events.append(MgmtEvent(
+                "breakeven", snapshot.as_of,
+                f"stop {updated.stop:.2f} -> {new_stop:.2f} (BE at +{r_now:.2f}R)",
+            ))
+            updated.stop = new_stop
+        updated.fired["breakeven"] = snapshot.as_of.isoformat(timespec="minutes")
+
+    # 2. Partial: bank a fraction of the position, or lock the gain with 1 contract.
+    if (
+        "breakeven" in updated.fired
+        and "partial" not in updated.fired
+        and r_now >= cfg.partial_at_r
+    ):
+        if updated.remaining > 1:
+            closed = max(1, round(updated.remaining * cfg.partial_fraction))
+            updated.realized_r = round(updated.realized_r + closed * r_now, 4)
+            updated.remaining -= closed
+            events.append(MgmtEvent(
+                "partial", snapshot.as_of,
+                f"closed {closed} contract(s) at +{r_now:g}R; {updated.remaining} remain",
+            ))
+        else:
+            lock = updated.entry + _sign(updated.side) * (
+                r_now * cfg.partial_fraction
+            ) * updated.initial_risk_points
+            new_stop = _tighter(
+                updated.stop, _round_tick(lock, cfg.mes_tick_size), updated.side
+            )
+            if new_stop != updated.stop:
+                events.append(MgmtEvent(
+                    "partial", snapshot.as_of,
+                    f"1-contract degradation: stop -> {new_stop:.2f} "
+                    f"locking {cfg.partial_fraction:.0%} of the open gain",
+                ))
+            updated.stop = new_stop
+        updated.fired["partial"] = snapshot.as_of.isoformat(timespec="minutes")
+
+    # 3. Trail after the partial: every bar, never looser. Gated on the PRE-call
+    # fired dict (trade, not updated) so the trail starts the bar AFTER the
+    # partial fires, never on the same bar as a partial/BE move.
+    if "partial" in trade.fired and updated.remaining > 0 and snapshot.mes.atr_ready:
+        closes_since_entry = [
+            b.close for b in snapshot.mes.bars if b.timestamp >= updated.entry_time
+        ]
+        if updated.side == "long":
+            candidate = max(closes_since_entry) - snapshot.mes.atr * cfg.trail_atr_multiple
+        else:
+            candidate = min(closes_since_entry) + snapshot.mes.atr * cfg.trail_atr_multiple
+        trail_stop = _tighter(updated.stop, _round_tick(candidate, cfg.mes_tick_size), updated.side)
+        if trail_stop != updated.stop:
+            events.append(MgmtEvent(
+                "trail", snapshot.as_of,
+                f"stop {updated.stop:.2f} -> {trail_stop:.2f} ({cfg.trail_atr_multiple:g}xATR)",
+            ))
+            updated.stop = trail_stop
+
+    # 4. Time stop: flatten before session exit regardless of P&L.
+    hour, minute = divmod(int(cfg.exit_time.replace(":", "")), 100)
+    flatten = snapshot.as_of.replace(hour=hour, minute=minute)
+    if snapshot.as_of >= flatten - timedelta(minutes=cfg.time_stop_buffer_minutes):
+        updated.realized_r = round(
+            updated.realized_r + updated.remaining * r_now, 4
+        )
+        updated.remaining = 0
+        updated.fired.setdefault("time_stop", snapshot.as_of.isoformat(timespec="minutes"))
+        return updated, MgmtReport(
+            r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
+            target=updated.target, events=events + [
+                MgmtEvent("time_stop", snapshot.as_of, f"flatten by {cfg.exit_time} ET")
+            ],
+            next_event="", recommendation="FLATTEN",
+            reasons=[f"time stop {cfg.time_stop_buffer_minutes} min before {cfg.exit_time} ET"],
+        )
+
+    # 5. Confluence flip against the position: EXIT advisory (or hard exit).
+    against = (
+        not result.spy_confluence_ok
+        or (not result.tradeable and result.gates_ok)
+        or (result.tradeable and result.side != trade.side)
+    )
+    if against:
+        reasons.append("checklist flipped against the position (SPY confluence lost)")
+        if cfg.exit_on_confluence_loss:
+            updated.realized_r = round(
+                updated.realized_r + updated.remaining * r_now, 4
+            )
+            updated.remaining = 0
+            updated.fired.setdefault(
+                "confluence_exit", snapshot.as_of.isoformat(timespec="minutes")
+            )
+            return updated, MgmtReport(
+                r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
+                target=updated.target, events=events,
+                next_event="", recommendation="CLOSED",
+                reasons=reasons + ["exit_on_confluence_loss=True"],
+            )
+        recommendation = "EXIT"
+    else:
+        recommendation = "HOLD"
+
     return updated, MgmtReport(
         r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
         target=updated.target, events=events,
         next_event=_next_event(cfg, updated),
-        recommendation="HOLD",
+        recommendation=recommendation,
         reasons=reasons,
     )
