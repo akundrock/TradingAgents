@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -25,6 +25,7 @@ from rich.text import Text
 
 from tradingagents.agents.mes import (
     create_mes_gatekeeper_agent,
+    create_mes_manager_agent,
     create_mes_morning_agent,
     create_mes_review_agent,
 )
@@ -51,6 +52,13 @@ from tradingagents.mes import (
 from tradingagents.mes.levels import (
     render_trade_levels_hint,
     suggest_trade_levels_from_snapshot,
+)
+from tradingagents.mes.management import (
+    MgmtReport,
+    OpenTrade,
+    _r_of,
+    _tighter,
+    evaluate_management,
 )
 
 console = Console()
@@ -638,3 +646,276 @@ def radar(
                 __import__("time").sleep(interval)
             except KeyboardInterrupt:
                 break
+
+
+# ---------------------------------------------------------------------------
+# Trade management
+# ---------------------------------------------------------------------------
+
+trade_app = typer.Typer(name="trade", help="Declare and manage an open /MES position.")
+mes_app.add_typer(trade_app, name="trade")
+
+
+def _trade_journal(cfg, journal_dir: Path | None):
+    """Journal for trade commands; --journal-dir (hidden) keeps tests hermetic.
+
+    Never hand MesJournal a dict lacking ``mes_journal_dir``: that silently
+    writes to ``<results_dir>/mes_journal``. ``None`` derives the default.
+    """
+    if journal_dir is not None:
+        return MesJournal(cfg.to_dict() | {"mes_journal_dir": str(journal_dir)})
+    return MesJournal(cfg.to_dict())
+
+
+def _render_mgmt_panel(trade: OpenTrade, report: MgmtReport, price: float) -> Panel:
+    grid = Table.grid(padding=(0, 1))
+    grid.add_row(Text.from_markup(
+        f"[bold]{trade.side.upper()} {trade.contracts} @ {trade.entry:.2f}[/bold]  "
+        f"entry {trade.entry_time:%H:%M}"
+    ))
+    grid.add_row(Text.from_markup(
+        f"Now [bold]{price:.2f}[/bold]  "
+        f"[{'green' if report.r_now >= 0 else 'red'}]{report.r_now:+.2f}R[/{'green' if report.r_now >= 0 else 'red'}]  "
+        f"MFE {report.mfe_r:+.2f}R  MAE {report.mae_r:+.2f}R"
+    ))
+    grid.add_row(Text.from_markup(
+        f"PLAN  stop {report.stop:.2f}  target {report.target if report.target is not None else '-'}"
+    ))
+    grid.add_row(Text.from_markup(f"NEXT  {report.next_event or '-'}"))
+    body = Text("")
+    for event in report.events:
+        body.append(f"✓ {event.name}: {event.detail}\n", style="green")
+    for reason in report.reasons:
+        body.append(f"· {reason}\n", style="yellow")
+    return Panel(Group(grid, body) if body.plain else grid,
+                 title="MES Trade Manager", border_style="blue")
+
+
+@trade_app.command("enter")
+def trade_enter(
+    side: str = typer.Option(..., "--side", help="'long' or 'short'."),
+    contracts: int = typer.Option(1, "--contracts", min=1),
+    entry: float | None = typer.Option(None, "--entry", help="Fill price. Defaults to the latest close."),
+    stop: float | None = typer.Option(None, "--stop", help="Initial stop. Defaults to the structural suggestion."),
+    target: float | None = typer.Option(None, "--target"),
+    as_of: str | None = typer.Option(None, "--as-of"),
+    date: str | None = typer.Option(None, "--date"),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+    mes_csv: Path | None = typer.Option(None, "--mes-csv"),
+    spy_csv: Path | None = typer.Option(None, "--spy-csv"),
+    force: bool = typer.Option(False, "--force", help="Override the single-open-trade guard."),
+):
+    """Declare a filled entry; the copilot starts managing it."""
+    if side not in {"long", "short"}:
+        raise typer.BadParameter("--side must be 'long' or 'short'")
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+
+    existing = journal.find_open_trade(stamp.strftime("%Y-%m-%d"))
+    if existing is not None and not force:
+        console.print("[red]A trade is already open for this date. Close it first.[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
+        result = evaluate(snapshot, side)
+    except Exception as exc:
+        console.print(f"[red]Could not build snapshot:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    entry_px = entry if entry is not None else snapshot.mes.close
+    stop_px = stop if stop is not None else suggest_stop_points(side, entry_px, result.vwap, result.atr)
+    levels = suggest_trade_levels_from_snapshot(side, snapshot, result)
+    target_px = target if target is not None else (levels.first_target if levels else None)
+
+    trade = OpenTrade(
+        side=side,
+        contracts=contracts,
+        remaining=contracts,
+        entry=round(entry_px, 2),
+        stop=round(stop_px, 2),
+        initial_stop=round(stop_px, 2),
+        target=target_px,
+        entry_time=snapshot.as_of,
+        initial_risk_points=round(abs(entry_px - stop_px), 4),
+    )
+    if trade.initial_risk_points <= 0:
+        raise typer.BadParameter("stop must be strictly beyond the entry price")
+
+    journal.append_trade_opened(trade, entry_context={
+        "score": result.score,
+        "tier": result.tier,
+        "confirmations": result.confirmations,
+        "spy_confirmations": result.spy_confirmations,
+        "side": side,
+    })
+    console.print(
+        f"[bold green]Trade opened[/bold green]: {side} {contracts} @ {entry_px:.2f}, "
+        f"stop {stop_px:.2f}, target {target if target is not None else '-'} "
+        f"(1R = {trade.initial_risk_points:.2f} pts)"
+    )
+
+
+@trade_app.command("status")
+def trade_status(
+    watch: int = typer.Option(15, "--watch"),
+    no_watch: bool = typer.Option(False, "--no-watch"),
+    no_llm: bool = typer.Option(False, "--no-llm"),
+    as_json: bool = typer.Option(False, "--json"),
+    alert: bool = typer.Option(False, "--alert"),
+    date: str | None = typer.Option(None, "--date"),
+    as_of: str | None = typer.Option(None, "--as-of"),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+    mes_csv: Path | None = typer.Option(None, "--mes-csv"),
+    spy_csv: Path | None = typer.Option(None, "--spy-csv"),
+):
+    """Live management view of the open trade."""
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    manager = None
+    if not no_llm:
+        try:
+            manager = create_mes_manager_agent(_make_llm(DEFAULT_CONFIG.copy()))
+        except Exception as exc:
+            console.print(f"[yellow]Manager unavailable, mechanical only:[/yellow] {exc}")
+            manager = None
+
+    def _one_shot(stamp):
+        trade = journal.find_open_trade(stamp.strftime("%Y-%m-%d"))
+        if trade is None:
+            return None
+        snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
+        result = evaluate(snapshot, trade.side)
+        updated, report = evaluate_management(snapshot, result, trade, cfg)
+        return snapshot, updated, report
+
+    if no_watch or as_json:
+        stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+        shot = _one_shot(stamp)
+        if shot is None:
+            console.print("[yellow]No open trade for this date. Run `mes trade enter` first.[/yellow]")
+            raise typer.Exit(code=1)
+        snapshot, updated, report = shot
+        if as_json:
+            console.print_json(json.dumps({
+                "as_of": snapshot.as_of.isoformat(),
+                "trade": dataclasses.asdict(updated),
+                "report": dataclasses.asdict(report),
+            }, default=str))
+            return
+        console.print(_render_mgmt_panel(updated, report, snapshot.mes.close))
+        return
+
+    # Watch loop (same skeleton as radar).
+    with Live(console=console, refresh_per_second=1, screen=False) as live:
+        seen: set[str] = set()
+        while True:
+            stamp = _market_now(cfg)
+            try:
+                shot = _one_shot(stamp)
+                if shot is None:
+                    live.update(Panel("[yellow]No open trade.[/yellow]", title="MES Trade Manager"))
+                else:
+                    snapshot, updated, report = shot
+                    live.update(_render_mgmt_panel(updated, report, snapshot.mes.close))
+                    # Persist each ladder event exactly once; advisory LLM text
+                    # below never mutates state.
+                    for event in report.events:
+                        key = f"{event.name}@{event.as_of.isoformat(timespec='minutes')}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        journal.append_trade_adjusted(
+                            stamp.strftime("%Y-%m-%d"),
+                            stop=updated.stop,
+                            note=f"{event.name}: {event.detail}",
+                            as_of=event.as_of.isoformat(timespec="minutes"),
+                        )
+                        if alert and event.name in {"stopped_out", "target", "time_stop"}:
+                            console.print("\a")
+                    if manager is not None:
+                        try:
+                            advisory = manager(
+                                mgmt_summary=(
+                                    f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
+                                    f"{report.r_now:+.2f}R | stop {report.stop:.2f} | "
+                                    f"next: {report.next_event or 'closed'}"
+                                ),
+                                market_context=render_market_context(snapshot),
+                                current_price=snapshot.mes.close,
+                            )
+                            live.update(Panel(Markdown(advisory), title="Manager Advisory",
+                                              border_style="dim"))
+                        except Exception as exc:
+                            console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
+            except Exception as exc:
+                live.update(Panel(f"[red]Snapshot failed:[/red] {exc}", title="MES Trade Manager"))
+            try:
+                time.sleep(watch)
+            except KeyboardInterrupt:
+                break
+
+
+@trade_app.command("close")
+def trade_close(
+    price: float = typer.Option(..., "--price"),
+    reason: str = typer.Option("manual", "--reason", help="manual | stop | target | eod"),
+    date: str | None = typer.Option(None, "--date"),
+    as_of: str | None = typer.Option(None, "--as-of"),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+    mes_csv: Path | None = typer.Option(None, "--mes-csv"),
+    spy_csv: Path | None = typer.Option(None, "--spy-csv"),
+):
+    """Record the exit for the open trade (execution stays in TOS)."""
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+    session_date = stamp.strftime("%Y-%m-%d")
+    trade = journal.find_open_trade(session_date)
+    if trade is None:
+        console.print("[yellow]No open trade for this date.[/yellow]")
+        raise typer.Exit(code=1)
+
+    snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
+    result = evaluate(snapshot, trade.side)
+    updated, report = evaluate_management(snapshot, result, trade, cfg)
+    if updated.remaining > 0:
+        updated.realized_r = round(
+            updated.realized_r + updated.remaining * _r_of(price, updated), 4
+        )
+        updated.remaining = 0
+
+    journal.append_trade_closed(updated, exit_price=price, reason=reason, as_of=stamp)
+    console.print(
+        f"[bold green]Closed[/bold green] {updated.side} @ {price:.2f} ({reason}) — "
+        f"realized {updated.realized_r:+.2f}R, MFE {report.mfe_r:+.2f}R, MAE {report.mae_r:+.2f}R"
+    )
+
+
+@trade_app.command("adjust")
+def trade_adjust(
+    stop: float | None = typer.Option(None, "--stop", help="New stop level (tightens only)."),
+    note: str | None = typer.Option(None, "--note", help="Freeform manual note."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+):
+    """Record a manual adjustment you made at the broker."""
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    stamp = _market_now(cfg)
+    trade = journal.find_open_trade(stamp.strftime("%Y-%m-%d"))
+    if trade is None:
+        console.print("[yellow]No open trade to adjust.[/yellow]")
+        raise typer.Exit(code=1)
+    if stop is not None:
+        tightened = _tighter(trade.stop, stop, trade.side)
+        if tightened != stop:
+            console.print("[yellow]Refusing to loosen the stop; kept the tighter level.[/yellow]")
+        journal.append_trade_adjusted(
+            stamp.strftime("%Y-%m-%d"), stop=tightened, note=note or "manual stop move"
+        )
+        console.print(f"[green]Stop adjusted to {tightened:.2f}.[/green]")
+    elif note:
+        journal.append_trade_adjusted(stamp.strftime("%Y-%m-%d"), note=note)
+        console.print(f"[green]Noted:[/green] {note}")
+
