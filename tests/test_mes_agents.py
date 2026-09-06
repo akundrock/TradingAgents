@@ -4,6 +4,7 @@ import pytest
 
 from tradingagents.agents.mes import (
     create_mes_gatekeeper_agent,
+    create_mes_manager_agent,
     create_mes_morning_agent,
     create_mes_review_agent,
 )
@@ -382,3 +383,40 @@ def test_review_agent_falls_back_to_free_text():
         hypothesis="h", checks_summary="s", outcome_summary="o"
     )
     assert output == "plain review"
+
+
+# ---------------------------------------------------------------------------
+# Trade manager agent (advisory only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_manager_agent_renders_prompt_with_report():
+    llm = FakeLLM(text="Trend intact; $TICK still positive. Hold.")
+    agent = create_mes_manager_agent(llm)
+    agent(
+        mgmt_summary="LONG 1 @ 100.00 | +0.46R | stop 98.00 | next: BE at +1.0R",
+        market_context="SPY above VWAP, $ADD +1200",
+        hypothesis="Trend-up day; SPY holding VWAP.",
+        current_price=100.50,
+    )
+    assert llm.prompts, "manager must receive a prompt"
+    assert "100.00" in llm.prompts[0]
+    assert "SPY above VWAP" in llm.prompts[0]
+
+
+@pytest.mark.unit
+def test_manager_output_is_returned_verbatim():
+    llm = FakeLLM(text="Internals flipped; consider tightening.")
+    agent = create_mes_manager_agent(llm)
+    text = agent(mgmt_summary="HOLD | +0.5R | stop 98.00", market_context="SPY above VWAP")
+    assert text == "Internals flipped; consider tightening."
+
+
+@pytest.mark.unit
+def test_review_agent_accepts_trades_summary():
+    llm = FakeLLM()
+    agent = create_mes_review_agent(llm)
+    agent(hypothesis="h", checks_summary="c", outcome_summary="o",
+          trades_summary="| long | 6500.00 | 6503.50 | manual | +1.75 |")
+    assert "Trades Taken" in llm.prompts[0]
