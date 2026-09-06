@@ -118,6 +118,19 @@ def test_input_trade_is_not_mutated():
 
 
 @pytest.mark.unit
+def test_input_trade_fired_dict_not_mutated_on_fill():
+    """replace() is shallow: fill paths must not write through to the input."""
+    trade = make_trade()
+    evaluate_management(
+        snap_at(97.9, open_=99.5, high=100.2, low=97.9), result_at(97.9), trade
+    )
+    assert trade.fired == {}
+    trade2 = make_trade()
+    evaluate_management(snap_at(102.0, high=102.4), result_at(102.0), trade2)
+    assert trade2.fired == {}
+
+
+@pytest.mark.unit
 def test_stop_touched_closes_at_level_price():
     updated, report = evaluate_management(
         snap_at(97.9, open_=99.5, high=100.2, low=97.9), result_at(97.9), make_trade()

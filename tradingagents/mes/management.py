@@ -134,6 +134,10 @@ def evaluate_management(
     cfg = cfg or snapshot.config
     bar = snapshot.mes.last
     updated = replace(trade)
+    # replace() is a shallow copy: detach the nested mutables so fill-path
+    # writes never leak into the caller's trade.
+    updated.fired = dict(trade.fired)
+    updated.manual_events = list(trade.manual_events)
     events: list[MgmtEvent] = []
     reasons: list[str] = []
 
