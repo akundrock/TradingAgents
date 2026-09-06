@@ -659,12 +659,15 @@ mes_app.add_typer(trade_app, name="trade")
 def _trade_journal(cfg, journal_dir: Path | None):
     """Journal for trade commands; --journal-dir (hidden) keeps tests hermetic.
 
-    Never hand MesJournal a dict lacking ``mes_journal_dir``: that silently
-    writes to ``<results_dir>/mes_journal``. ``None`` derives the default.
+    The default branch must use DEFAULT_CONFIG, not ``cfg.to_dict()``: the
+    checklist config carries neither ``mes_journal_dir`` nor ``results_dir``,
+    so MesJournal would fall back to a CWD-relative ``./mes_journal`` that
+    ``mes review`` (built from DEFAULT_CONFIG) never reads. DEFAULT_CONFIG
+    derives ``<results_dir>/mes_journal``, matching the sibling commands.
     """
     if journal_dir is not None:
         return MesJournal(cfg.to_dict() | {"mes_journal_dir": str(journal_dir)})
-    return MesJournal(cfg.to_dict())
+    return MesJournal(DEFAULT_CONFIG.copy())
 
 
 def _render_mgmt_panel(trade: OpenTrade, report: MgmtReport, price: float) -> Panel:
