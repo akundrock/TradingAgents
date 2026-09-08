@@ -231,6 +231,11 @@ class ProTraderDashboardStrategy:
     ) -> StrategyResult:
         met, missing = self._long_conditions(symbol, mtf, daily_bias, ctx, config)
         passed = len(missing) == 0
+        if not passed and _resolve_sector_mode(config) != "off" and ctx.sector_etf is None:
+            # Unknown sector (no ETF mapping): lenient mode skips the gate, but
+            # say so in diagnostics. Appended after the pass check so it can
+            # never block a setup on its own.
+            missing.append("sector_unknown")
         return StrategyResult(
             passed=passed,
             direction="long" if passed else "none",
@@ -249,6 +254,11 @@ class ProTraderDashboardStrategy:
     ) -> StrategyResult:
         met, missing = self._short_conditions(symbol, mtf, daily_bias, ctx, config)
         passed = len(missing) == 0
+        if not passed and _resolve_sector_mode(config) != "off" and ctx.sector_etf is None:
+            # Unknown sector (no ETF mapping): lenient mode skips the gate, but
+            # say so in diagnostics. Appended after the pass check so it can
+            # never block a setup on its own.
+            missing.append("sector_unknown")
         return StrategyResult(
             passed=passed,
             direction="short" if passed else "none",

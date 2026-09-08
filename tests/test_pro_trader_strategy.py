@@ -5,10 +5,9 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pytest
+from unittest.mock import MagicMock, patch
 
 from tradingagents.intraday.mtf_validator import MTFValidationResult
-from unittest.mock import patch
-
 from tradingagents.intraday.session import DailyBiasReport
 from tradingagents.intraday.strategy import StrategyResult
 from tradingagents.intraday.strategies import get_strategy
@@ -458,7 +457,9 @@ def test_pro_trader_direction_hint_reports_preferred_side_diagnostics():
     def _short_cond(symbol, mtf, daily_bias, ctx, config):
         return ["f1"], ["short_only", "rs_timeframes_aligned"]
 
-    with patch.object(strategy, "_build_context", return_value=None), \
+    # _evaluate_* reads ctx.sector_etf (Task 7 diagnostic), so stub the context
+    # with a MagicMock instead of None — never an unknown-sector scenario.
+    with patch.object(strategy, "_build_context", return_value=MagicMock()), \
          patch.object(strategy, "_long_conditions", side_effect=_long_cond), \
          patch.object(strategy, "_short_conditions", side_effect=_short_cond):
         hinted = strategy.check_setup(
@@ -468,3 +469,26 @@ def test_pro_trader_direction_hint_reports_preferred_side_diagnostics():
 
     assert hinted.factors_missing == ["short_only", "rs_timeframes_aligned"]
     assert no_hint.factors_missing == ["long_only", "rs_timeframes_aligned"]
+
+
+@pytest.mark.unit
+def test_unknown_sector_reports_sector_unknown_in_missing():
+    """A symbol with no sector mapping must surface 'sector_unknown' in the
+    missing-factors diagnostics when the setup fails, so logs explain why the
+    sector check was skipped. It must never block a passing setup."""
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 5,  # unreachable: force both sides to fail
+        "pro_trader_require_sector_alignment": True,
+        "pro_trader_sector_alignment_mode": "lenient",
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    mtf = _pro_trader_mtf()
+    with patch(
+        "tradingagents.intraday.strategies.pro_trader_dashboard.get_sector_etf",
+        return_value=None,
+    ):
+        result = strategy.check_setup("NVDA", mtf, _bias("bullish"), config=config)
+    assert not result.passed
+    assert "sector_unknown" in result.factors_missing
