@@ -735,3 +735,36 @@ def test_screener_refresh_logs_two_lists_for_both_direction(caplog):
     assert "L1" in longs_line and "L2" in longs_line
     assert shorts_line is not None
     assert "S1" in shorts_line
+
+
+@pytest.mark.unit
+def test_screener_snapshot_direction_flows_to_preferred_direction():
+    """The screener direction hint must reach check_setup as
+    preferred_direction for symbols present in screener_snapshots."""
+    ta_graph = MagicMock()
+    config = _config()
+    config["intraday_strategy"] = "pro_trader_dashboard"
+    config["intraday_screener_enabled"] = False  # no refresh; snapshot set directly
+    scanner = WatchlistScanner(config, ta_graph, dry_run=True, skip_premarket=True)
+    scanner.session.watchlist = ["NVDA"]
+    scanner.session.daily_bias_cache["NVDA"] = _bias("NVDA")
+    scanner.session.screener_snapshots["NVDA"] = {"direction": "short"}
+
+    captured: dict = {}
+
+    def _capture(symbol, mtf, daily_bias, preferred_direction=None, **kw):
+        captured["preferred"] = preferred_direction
+        return StrategyResult(
+            passed=False, direction="none", reason="x",
+            factors_met=[], factors_missing=[],
+        )
+
+    mock_strategy = MagicMock()
+    mock_strategy.name = "pro_trader_dashboard"
+    mock_strategy.check_setup.side_effect = _capture
+    scanner.strategy = mock_strategy
+    mtf = MagicMock()
+    scanner.mtf_validator.evaluate = lambda *a, **k: mtf
+
+    scanner._evaluate_symbol("NVDA", datetime(2026, 7, 27, 10, 0))
+    assert captured["preferred"] == "short"
