@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 
 from tradingagents.intraday.mtf_validator import MTFValidationResult
+from unittest.mock import patch
+
 from tradingagents.intraday.session import DailyBiasReport
+from tradingagents.intraday.strategy import StrategyResult
 from tradingagents.intraday.strategies import get_strategy
 from tradingagents.intraday.strategies.pro_trader_dashboard import ProTraderDashboardStrategy
 
@@ -398,42 +401,37 @@ def test_pro_trader_volume_pressure_config_defaults():
 
 
 @pytest.mark.unit
-def test_pro_trader_direction_hint_prefers_short_side():
-    """When a screener direction hint is provided, the strategy should evaluate
-    the preferred side first and return it when it passes — even if the other
-    side would also pass."""
+def test_pro_trader_hint_changes_evaluation_order():
+    """preferred_direction='short' must evaluate _evaluate_short before
+    _evaluate_long (observable via call order)."""
     strategy = ProTraderDashboardStrategy()
-    config = {
-        "pro_trader_min_rs_timeframes": 1,
-        "pro_trader_require_sector_alignment": False,
-        "pro_trader_require_relative_volume": False,
-        "pro_trader_require_daily_rrs": False,
-    }
-    mtf = _pro_trader_mtf()  # bullish-leaning fixture: ORB breakout above ORH
-    # Both sides evaluated; with hint=short, short should be checked first and
-    # win when it passes. Build a scenario where both sides pass is hard, so
-    # instead assert the hint is accepted and short is evaluated first by
-    # checking that a short-passing setup returns short (not blocked by long
-    # evaluation order).
-    mtf.snapshot_5min["Close"] = 99.0
-    mtf.df_5min.loc[mtf.df_5min.index[-1], "Close"] = 99.0
-    mtf.df_5min.loc[mtf.df_5min.index[-1], "High"] = 99.5
-    mtf.df_5min.loc[mtf.df_5min.index[-1], "Low"] = 100.0
-    mtf.df_5min.loc[mtf.df_5min.index[-1], "Open"] = 100.5
-    mtf.snapshot_5min["Close"] = 99.0
+    call_order: list[str] = []
 
-    result = strategy.check_setup(
-        "NVDA", mtf, _bias("bearish"), config=config, preferred_direction="short"
-    )
-    # With hint=short, short side is evaluated first; if it passes, direction=short
-    assert result.direction in ("short", "none")
-    if result.passed:
-        assert result.direction == "short"
+    def _track(side):
+        def _inner(*args, **kwargs):
+            call_order.append(side)
+            return StrategyResult(
+                passed=False,
+                direction="none",
+                reason=f"{side} blocked",
+                factors_met=[],
+                factors_missing=["x"],
+            )
+
+        return _inner
+
+    with patch.object(strategy, "_evaluate_long", side_effect=_track("long")), \
+         patch.object(strategy, "_evaluate_short", side_effect=_track("short")):
+        strategy.check_setup(
+            "NVDA", _pro_trader_mtf(), _bias("bearish"), config={}, preferred_direction="short"
+        )
+    assert call_order == ["short", "long"]
 
 
 @pytest.mark.unit
 def test_pro_trader_direction_hint_falls_back_without_hint():
-    """Without a hint, behavior is unchanged: long evaluated first."""
+    """Without a hint, long is evaluated first — a long-passing fixture must
+    return direction='long'."""
     strategy = ProTraderDashboardStrategy()
     config = {
         "pro_trader_min_rs_timeframes": 1,
@@ -442,4 +440,31 @@ def test_pro_trader_direction_hint_falls_back_without_hint():
         "pro_trader_require_daily_rrs": False,
     }
     result = strategy.check_setup("NVDA", _pro_trader_mtf(), _bias("bullish"), config=config)
-    assert result.direction in ("long", "none")
+    assert result.passed, f"expected long pass, got missing={result.factors_missing}"
+    assert result.direction == "long"
+
+
+@pytest.mark.unit
+def test_pro_trader_direction_hint_reports_preferred_side_diagnostics():
+    """When both sides fail with equal-length missing lists, the hint decides
+    which side's diagnostics are reported: hint=short reports the short side's
+    factors_missing; no hint reports the long side's."""
+    strategy = ProTraderDashboardStrategy()
+    mtf = _pro_trader_mtf()
+
+    def _long_cond(symbol, mtf, daily_bias, ctx, config):
+        return ["f1"], ["long_only", "rs_timeframes_aligned"]
+
+    def _short_cond(symbol, mtf, daily_bias, ctx, config):
+        return ["f1"], ["short_only", "rs_timeframes_aligned"]
+
+    with patch.object(strategy, "_build_context", return_value=None), \
+         patch.object(strategy, "_long_conditions", side_effect=_long_cond), \
+         patch.object(strategy, "_short_conditions", side_effect=_short_cond):
+        hinted = strategy.check_setup(
+            "NVDA", mtf, _bias("bearish"), config={}, preferred_direction="short"
+        )
+        no_hint = strategy.check_setup("NVDA", mtf, _bias("bearish"), config={})
+
+    assert hinted.factors_missing == ["short_only", "rs_timeframes_aligned"]
+    assert no_hint.factors_missing == ["long_only", "rs_timeframes_aligned"]
