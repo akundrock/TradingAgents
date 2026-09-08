@@ -225,3 +225,49 @@ def test_both_direction_nan_rank_tf_falls_back_to_aligned_side():
     assert result.direction == "long"
     assert result.metadata["aligned_count"] == 2
     assert math.isnan(result.score)
+
+
+@pytest.mark.unit
+def test_sort_both_magnitude_keeps_sides_separate():
+    """With rank_by=magnitude and direction=both, each side must be ranked
+    within itself (longs desc by score, shorts desc by -score) — never one
+    mixed abs(score) list."""
+    from tradingagents.intraday.universe_screener import _sort_screened_results
+
+    config = {"intraday_screener_direction": "both", "intraday_screener_rank_by": "magnitude"}
+    results = [
+        _screened("L1", "long", rank_score=1.0, aligned_count=2),
+        _screened("S1", "short", rank_score=-3.0, aligned_count=2),
+        _screened("L2", "long", rank_score=2.0, aligned_count=3),
+        _screened("S2", "short", rank_score=-1.0, aligned_count=1),
+    ]
+    _sort_screened_results(results, config)
+
+    long_symbols = [s.symbol for s in results if s.direction == "long"]
+    short_symbols = [s.symbol for s in results if s.direction == "short"]
+    # Longs desc by score: L2(2.0) before L1(1.0)
+    assert long_symbols == ["L2", "L1"]
+    # Shorts desc by -score: S1(-3.0, most negative = strongest short) first
+    assert short_symbols == ["S1", "S2"]
+
+
+@pytest.mark.unit
+def test_sort_both_aligned_mode_ranks_within_sides():
+    """rank_by=aligned + direction=both: longs ranked by (aligned, score) desc,
+    shorts by (aligned, -score) desc, each within their own side."""
+    from tradingagents.intraday.universe_screener import _sort_screened_results
+
+    config = {"intraday_screener_direction": "both", "intraday_screener_rank_by": "aligned"}
+    results = [
+        _screened("L1", "long", rank_score=1.0, aligned_count=3),
+        _screened("S1", "short", rank_score=-2.0, aligned_count=2),
+        _screened("L2", "long", rank_score=0.5, aligned_count=3),
+        _screened("S2", "short", rank_score=-1.0, aligned_count=2),
+    ]
+    _sort_screened_results(results, config)
+
+    long_symbols = [s.symbol for s in results if s.direction == "long"]
+    short_symbols = [s.symbol for s in results if s.direction == "short"]
+    assert long_symbols == ["L1", "L2"]
+    # Same aligned tier (2): stronger short (-2.0) first
+    assert short_symbols == ["S1", "S2"]

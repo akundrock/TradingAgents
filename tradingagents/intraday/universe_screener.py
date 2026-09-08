@@ -75,19 +75,32 @@ def _sort_screened_results(results: list[ScreenedSymbol], config: dict) -> None:
         # last within their alignment tier, not poison tuple comparisons.
         return 0.0 if math.isnan(value) else value
 
+    if direction == "both":
+        # Rank each side independently: longs best-first (high score), shorts
+        # best-first (most negative score). Longs keep their section before
+        # shorts so the round-robin merge in _merge_watchlist consumes each
+        # side's best-first. Non-long/short entries keep their relative order.
+        longs = [s for s in results if s.direction == "long"]
+        shorts = [s for s in results if s.direction == "short"]
+        others = [s for s in results if s.direction not in ("long", "short")]
+        if rank_by == "aligned":
+            longs.sort(key=lambda s: (s.aligned_count, _safe_score(s.rank_score)), reverse=True)
+            shorts.sort(key=lambda s: (s.aligned_count, -_safe_score(s.rank_score)), reverse=True)
+        else:
+            longs.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count), reverse=True)
+            shorts.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count))
+        results[:] = longs + shorts + others
+        return
+
     if rank_by == "aligned":
         if direction == "short":
             results.sort(key=lambda s: (s.aligned_count, -_safe_score(s.rank_score)), reverse=True)
-        elif direction == "both":
-            results.sort(key=lambda s: (s.aligned_count, abs(_safe_score(s.rank_score))), reverse=True)
         else:
             results.sort(key=lambda s: (s.aligned_count, _safe_score(s.rank_score)), reverse=True)
         return
 
     if direction == "short":
         results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count))
-    elif direction == "both":
-        results.sort(key=lambda s: abs(_safe_score(s.rank_score)), reverse=True)
     else:
         results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count), reverse=True)
 
