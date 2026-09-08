@@ -47,8 +47,9 @@ from tradingagents.mes import (
     render_market_context,
     size_position,
     snapshot_from_csv,
-    suggest_stop_points,
+    suggest_stop_distance_points,
 )
+from tradingagents.mes.stop_quality import build_stop_quality_report
 from tradingagents.mes.levels import (
     render_trade_levels_hint,
     suggest_trade_levels_from_snapshot,
@@ -194,7 +195,7 @@ def _print_result(result: ChecklistResult, snapshot: MesSnapshot) -> None:
 
 
 def _sizing_payload(result: ChecklistResult, cfg, risk: float, stop_points: float | None) -> tuple[dict, str]:
-    stop = stop_points or suggest_stop_points(
+    stop = stop_points or suggest_stop_distance_points(
         result.side, result.last_price, result.vwap, result.atr
     )
     sizing = size_position(risk, stop, result.tier, cfg)
@@ -418,6 +419,15 @@ def review(
     console.print(Panel(Markdown(checks_summary), title=f"Checks — {session_date}", border_style="cyan"))
     if trades_summary and not trades_summary.startswith("No trades"):
         console.print(Panel(Markdown(trades_summary), title="Trades", border_style="green"))
+
+    stop_quality = build_stop_quality_report(
+        journal.load_trades(session_date), checks, cfg
+    )
+    if not stop_quality.is_empty():
+        stop_lines = ["- " + line for line in stop_quality.summary_lines()]
+        if not stop_lines:
+            stop_lines = ["- No stop-quality flags on closed trades."]
+        console.print(Panel(Markdown("\n".join(stop_lines)), title="Stop Quality", border_style="yellow"))
 
     hour, minute = divmod(int(cfg.exit_time.replace(":", "")), 100)
     close_stamp = datetime.strptime(session_date, "%Y-%m-%d").replace(hour=hour, minute=minute)
@@ -747,7 +757,7 @@ def trade_enter(
         stop_px = levels.stop_level
         stop_anchor = levels.level_labels.get(levels.stop_level, "structural level")
     else:
-        stop_distance = suggest_stop_points(side, entry_px, result.vwap, result.atr)
+        stop_distance = suggest_stop_distance_points(side, entry_px, result.vwap, result.atr)
         stop_px = entry_px - stop_distance if side == "long" else entry_px + stop_distance
         stop_anchor = "vwap_atr_distance"
     target_px = target if target is not None else (levels.first_target if levels else None)

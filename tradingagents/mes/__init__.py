@@ -33,7 +33,7 @@ from .management import MgmtEvent, MgmtReport, OpenTrade, evaluate_management
 from .profile import VolumeProfile, volume_profile
 from .radar import LevelDistance, ProximityReport, SetupState, build_proximity
 from .render import render_checklist, render_market_context
-from .sizing import SizingResult, size_position, suggest_stop_points
+from .sizing import SizingResult, size_position, suggest_stop_distance_points
 from .snapshot import (
     Bar,
     MesSnapshot,
@@ -45,6 +45,7 @@ from .snapshot import (
     session_bounds,
     snapshot_from_csv,
 )
+from .stop_quality import StopQualityReport, StopQualityRow, build_stop_quality_report
 
 __all__ = [
     "Bar",
@@ -62,10 +63,13 @@ __all__ = [
     "SessionLevels",
     "SetupState",
     "SizingResult",
+    "StopQualityReport",
+    "StopQualityRow",
     "TradeLevels",
     "VolumeProfile",
     "build_proximity",
     "build_snapshot",
+    "build_stop_quality_report",
     "detect_divergence",
     "evaluate",
     "evaluate_management",
@@ -82,7 +86,7 @@ __all__ = [
     "session_bounds",
     "size_position",
     "snapshot_from_csv",
-    "suggest_stop_points",
+    "suggest_stop_distance_points",
     "suggest_trade_levels",
     "suggest_trade_levels_from_snapshot",
     "tier_contract_band",
