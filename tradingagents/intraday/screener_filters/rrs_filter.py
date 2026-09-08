@@ -138,6 +138,7 @@ class RrsFilter:
                 sym_frames["daily"] = sym_daily
                 bench_frames["daily"] = bench_daily
 
+        daily_available = "daily" in sym_frames and "daily" in bench_frames
         rrs_by_tf = compute_rrs_multi_timeframe(sym_frames, bench_frames)
         if not rrs_by_tf:
             return FilterResult(
@@ -185,6 +186,7 @@ class RrsFilter:
                     "aligned_count": aligned,
                     "relative_volume_5m": relative_volume_5m,
                     "rank_rrs_timeframe": rank_rrs_tf,
+                    "daily_rrs_available": daily_available,
                 },
             )
             if best is None:
@@ -220,7 +222,12 @@ class RrsFilter:
             score=0.0,
             factors_met=[],
             factors_missing=[f"rs_aligned_{best_aligned}"],
-            metadata={"filter": self.name, "rrs_by_tf": rrs_by_tf, "aligned_count": best_aligned},
+            metadata={
+                "filter": self.name,
+                "rrs_by_tf": rrs_by_tf,
+                "aligned_count": best_aligned,
+                "daily_rrs_available": daily_available,
+            },
             reject_reason=(
                 f"rrs:{ctx.symbol} aligned={best_aligned}<{min_aligned} "
                 f"rrs{rank_rrs_tf}={rank_rrs_val:.2f} rvol5m={relative_volume_5m:.2f}"

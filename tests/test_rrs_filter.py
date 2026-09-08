@@ -271,3 +271,32 @@ def test_sort_both_aligned_mode_ranks_within_sides():
     assert long_symbols == ["L1", "L2"]
     # Same aligned tier (2): stronger short (-2.0) first
     assert short_symbols == ["S1", "S2"]
+
+
+@pytest.mark.unit
+def test_daily_requested_but_unavailable_records_metadata():
+    """When include_daily_rrs is on but no daily data made it into the frames
+    (benchmark daily failed in prepare), the pass result must carry
+    daily_rrs_available=False instead of silently evaluating intraday-only."""
+    config = {
+        "intraday_screener_rrs_timeframes": [5, 30],
+        "intraday_screener_min_rrs_aligned": 1,
+        "intraday_screener_direction": "long",
+        "intraday_screener_rank_rrs_timeframe": "5m",
+        "intraday_screener_include_daily_rrs": True,
+        "pro_trader_benchmark": "SPY",
+    }
+    rrs_by_tf = {"5m": 0.5, "30m": 0.4}
+    ctx = _make_ctx("TEST", config, rrs_by_tf)
+
+    with patch(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_rrs_multi_timeframe",
+        return_value={"5m": 0.5, "30m": 0.4},
+    ), patch(
+        "tradingagents.intraday.screener_filters.rrs_filter.compute_relative_volume",
+        return_value=1.5,
+    ):
+        result = RrsFilter().evaluate(ctx)
+
+    assert result.passed is True
+    assert result.metadata.get("daily_rrs_available") is False
