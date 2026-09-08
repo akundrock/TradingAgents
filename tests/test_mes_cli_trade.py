@@ -107,6 +107,73 @@ def test_adjust_refuses_to_loosen_stop(tmp_path, patched_snapshot):
     assert "refus" in loosened.output.lower() or "kept" in loosened.output.lower()
 
 
+# --- Default-stop derivation (units bug regression tests) -------------------
+
+
+def _opened_records(tmp_path) -> list[dict]:
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    return [e for e in journal.load_day("2026-03-30") if e["kind"] == "trade_opened"]
+
+
+@pytest.mark.unit
+def test_enter_default_stop_is_beyond_entry_for_short(tmp_path, patched_snapshot):
+    """Without --stop, a short's default stop must be a PRICE above entry, not a distance."""
+    result = _invoke(
+        "enter", "--side", "short", "--contracts", "1",
+        "--entry", "100.00",
+        "--journal-dir", str(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    records = _opened_records(tmp_path)
+    assert len(records) == 1
+    opened = records[0]
+    assert opened["stop"] > opened["entry"]
+    assert opened["initial_risk_points"] < 50  # sane points, not |100 - 5.04|
+
+
+@pytest.mark.unit
+def test_enter_default_stop_is_beyond_entry_for_long(tmp_path, patched_snapshot):
+    result = _invoke(
+        "enter", "--side", "long", "--contracts", "1",
+        "--entry", "100.00",
+        "--journal-dir", str(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    records = _opened_records(tmp_path)
+    assert len(records) == 1
+    assert records[0]["stop"] < records[0]["entry"]
+    assert records[0]["initial_risk_points"] < 50
+
+
+@pytest.mark.unit
+def test_enter_rejects_stop_on_wrong_side_of_entry(tmp_path, patched_snapshot):
+    result = _invoke(
+        "enter", "--side", "short", "--entry", "100.00", "--stop", "98.00",
+        "--journal-dir", str(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert _opened_records(tmp_path) == []
+
+
+@pytest.mark.unit
+def test_enter_journals_stop_provenance(tmp_path, patched_snapshot):
+    result = _invoke(
+        "enter", "--side", "long", "--contracts", "1",
+        "--entry", "100.00",
+        "--journal-dir", str(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    records = _opened_records(tmp_path)
+    assert len(records) == 1
+    ctx = records[0]["entry_context"]
+    for key in ("atr", "vwap_distance", "stop_distance_points", "stop_atr_multiple", "stop_anchor"):
+        assert key in ctx, key
+    assert ctx["atr"] > 0
+    assert ctx["stop_distance_points"] > 0
+    assert ctx["stop_atr_multiple"] > 0
+    assert ctx["stop_anchor"]
+
+
 @pytest.mark.unit
 def test_review_flags_still_open_trade(tmp_path, patched_snapshot, monkeypatch):
     from datetime import datetime as _dt

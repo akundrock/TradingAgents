@@ -739,8 +739,17 @@ def trade_enter(
         raise typer.Exit(code=1)
 
     entry_px = entry if entry is not None else snapshot.mes.close
-    stop_px = stop if stop is not None else suggest_stop_points(side, entry_px, result.vwap, result.atr)
     levels = suggest_trade_levels_from_snapshot(side, snapshot, result)
+    if stop is not None:
+        stop_px = stop
+        stop_anchor = "manual"
+    elif levels is not None:
+        stop_px = levels.stop_level
+        stop_anchor = levels.level_labels.get(levels.stop_level, "structural level")
+    else:
+        stop_distance = suggest_stop_points(side, entry_px, result.vwap, result.atr)
+        stop_px = entry_px - stop_distance if side == "long" else entry_px + stop_distance
+        stop_anchor = "vwap_atr_distance"
     target_px = target if target is not None else (levels.first_target if levels else None)
 
     trade = OpenTrade(
@@ -754,8 +763,8 @@ def trade_enter(
         entry_time=snapshot.as_of,
         initial_risk_points=round(abs(entry_px - stop_px), 4),
     )
-    if trade.initial_risk_points <= 0:
-        raise typer.BadParameter("stop must be strictly beyond the entry price")
+    if trade.initial_risk_points <= 0 or (side == "long" and stop_px >= entry_px) or (side == "short" and stop_px <= entry_px):
+        raise typer.BadParameter("stop must be strictly beyond the entry price on the trade's side")
 
     journal.append_trade_opened(trade, entry_context={
         "score": result.score,
@@ -763,10 +772,16 @@ def trade_enter(
         "confirmations": result.confirmations,
         "spy_confirmations": result.spy_confirmations,
         "side": side,
+        "atr": result.atr,
+        "vwap_distance": round(abs(entry_px - result.vwap), 4),
+        "stop_distance_points": round(abs(entry_px - stop_px), 4),
+        "stop_atr_multiple": round(abs(entry_px - stop_px) / result.atr, 4) if result.atr > 0 else None,
+        "stop_anchor": stop_anchor,
     })
+    stop_suffix = f" ({stop_anchor})" if stop_anchor != "manual" else ""
     console.print(
         f"[bold green]Trade opened[/bold green]: {side} {contracts} @ {entry_px:.2f}, "
-        f"stop {stop_px:.2f}, target {target if target is not None else '-'} "
+        f"stop {stop_px:.2f}{stop_suffix}, target {target if target is not None else '-'} "
         f"(1R = {trade.initial_risk_points:.2f} pts)"
     )
 
