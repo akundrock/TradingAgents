@@ -272,6 +272,7 @@ class UniverseScreener:
 
         filtered: list[ScreenerCandidate] = []
         reject_price = 0
+        reject_price_missing = 0
         reject_sp500 = 0
         reject_samples: list[str] = []
 
@@ -282,7 +283,12 @@ class UniverseScreener:
                 if len(reject_samples) < 8:
                     reject_samples.append(f"{symbol} not_sp500")
                 continue
-            if min_price > 0 and candidate.last_price > 0 and candidate.last_price < min_price:
+            if min_price > 0 and candidate.last_price <= 0:
+                reject_price_missing += 1
+                if len(reject_samples) < 8:
+                    reject_samples.append(f"{symbol} price_missing")
+                continue
+            if min_price > 0 and candidate.last_price < min_price:
                 reject_price += 1
                 if len(reject_samples) < 8:
                     reject_samples.append(
@@ -291,10 +297,13 @@ class UniverseScreener:
                 continue
             filtered.append(candidate)
 
-        if reject_price == 0 and reject_sp500 == 0:
+        if reject_price == 0 and reject_price_missing == 0 and reject_sp500 == 0:
             return filtered, ""
 
-        summary = f"rejected price<{min_price:.2f}={reject_price} not_sp500={reject_sp500}"
+        summary = (
+            f"rejected price<{min_price:.2f}={reject_price} "
+            f"price_missing={reject_price_missing} not_sp500={reject_sp500}"
+        )
         if reject_samples:
             summary += f"; samples: {', '.join(reject_samples)}"
         return filtered, summary
