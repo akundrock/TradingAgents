@@ -31,7 +31,7 @@ from tradingagents.intraday.session import (
 )
 from tradingagents.intraday.strategies import get_strategy
 from tradingagents.intraday.strategy import StrategyResult
-from tradingagents.intraday.universe_screener import UniverseScreener
+from tradingagents.intraday.universe_screener import ScreenedSymbol, UniverseScreener
 
 if TYPE_CHECKING:
     from cli.intraday_display import IntradayDashboardBuffer
@@ -460,12 +460,25 @@ class WatchlistScanner:
             len(removed),
         )
         if screened:
-            top = ", ".join(
-                f"{s.symbol}({s.direction} aligned={s.aligned_count} "
-                f"rrs{s.rank_rrs_timeframe}={s.rank_score:.2f})"
-                for s in screened[:5]
-            )
-            logger.info("Screener top passed: %s", top)
+            longs = [s for s in screened if s.direction == "long"]
+            shorts = [s for s in screened if s.direction == "short"]
+
+            def _fmt(s: ScreenedSymbol) -> str:
+                return (
+                    f"{s.symbol}(aligned={s.aligned_count} "
+                    f"rrs{s.rank_rrs_timeframe}={s.rank_score:.2f})"
+                )
+
+            if longs:
+                logger.info(
+                    "Screener longs: %s",
+                    ", ".join(_fmt(s) for s in longs[:5]),
+                )
+            if shorts:
+                logger.info(
+                    "Screener shorts: %s",
+                    ", ".join(_fmt(s) for s in shorts[:5]),
+                )
         if added:
             logger.info("Screener added to watchlist: %s", ", ".join(added))
         if removed:
@@ -676,7 +689,18 @@ class WatchlistScanner:
             logger.debug("%s: no daily bias cached", symbol)
             return None
 
-        strategy_result = self.strategy.check_setup(symbol, mtf, daily_bias)
+        screener_snap = self.session.screener_snapshots.get(symbol)
+        preferred_direction = (
+            screener_snap.get("direction") if screener_snap else None
+        )
+        try:
+            strategy_result = self.strategy.check_setup(
+                symbol, mtf, daily_bias, preferred_direction=preferred_direction
+            )
+        except TypeError:
+            # Strategies without a preferred_direction parameter (e.g.
+            # base_momentum) keep the plain signature.
+            strategy_result = self.strategy.check_setup(symbol, mtf, daily_bias)
         if (
             strategy_result.passed
             and strategy_result.direction in ("long", "short")

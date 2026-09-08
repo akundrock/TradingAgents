@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Literal
@@ -68,21 +70,26 @@ def _sort_screened_results(results: list[ScreenedSymbol], config: dict) -> None:
     direction = str(config.get("intraday_screener_direction", "long"))
     rank_by = str(config.get("intraday_screener_rank_by", "magnitude")).strip().lower()
 
+    def _safe_score(value: float) -> float:
+        # NaN rank scores (insufficient RRS data) must sort deterministically
+        # last within their alignment tier, not poison tuple comparisons.
+        return 0.0 if math.isnan(value) else value
+
     if rank_by == "aligned":
         if direction == "short":
-            results.sort(key=lambda s: (s.aligned_count, -s.rank_score), reverse=True)
+            results.sort(key=lambda s: (s.aligned_count, -_safe_score(s.rank_score)), reverse=True)
         elif direction == "both":
-            results.sort(key=lambda s: (s.aligned_count, abs(s.rank_score)), reverse=True)
+            results.sort(key=lambda s: (s.aligned_count, abs(_safe_score(s.rank_score))), reverse=True)
         else:
-            results.sort(key=lambda s: (s.aligned_count, s.rank_score), reverse=True)
+            results.sort(key=lambda s: (s.aligned_count, _safe_score(s.rank_score)), reverse=True)
         return
 
     if direction == "short":
-        results.sort(key=lambda s: (s.rank_score, s.aligned_count))
+        results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count))
     elif direction == "both":
-        results.sort(key=lambda s: abs(s.rank_score), reverse=True)
+        results.sort(key=lambda s: abs(_safe_score(s.rank_score)), reverse=True)
     else:
-        results.sort(key=lambda s: (s.rank_score, s.aligned_count), reverse=True)
+        results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count), reverse=True)
 
 
 class UniverseScreener:
@@ -430,7 +437,18 @@ class UniverseScreener:
         *,
         screener_first: bool,
     ) -> list[str]:
-        screened_symbols = [s.symbol for s in screened]
+        if self.config.get("intraday_screener_direction") == "both":
+            # Interleave longs and shorts round-robin so neither side is
+            # crowded out when the watchlist cap is hit on lopsided days.
+            # Each side is already ranked by _sort_screened_results.
+            longs = [s.symbol for s in screened if s.direction == "long"]
+            shorts = [s.symbol for s in screened if s.direction == "short"]
+            interleaved: list[str] = []
+            for pair in itertools.zip_longest(longs, shorts):
+                interleaved.extend(s for s in pair if s)
+            screened_symbols = interleaved
+        else:
+            screened_symbols = [s.symbol for s in screened]
         if screener_first:
             merged = self._dedupe_symbols(screened_symbols + base_watchlist)
         else:

@@ -265,7 +265,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "intraday_screener_keys": ["NASDAQ_VOLUME_0", "NYSE_VOLUME_0"],
     "intraday_screener_candidate_limit": 50,
     "intraday_screener_prefilter_limit": 100,
-    "intraday_screener_rrs_timeframes": [5, 30, 60],
+    "intraday_screener_rrs_timeframes": [5, 15, 30, 60],
     "intraday_screener_include_daily_rrs": True,
     "intraday_screener_min_rrs_aligned": 2,
     "intraday_screener_require_relative_volume": False,

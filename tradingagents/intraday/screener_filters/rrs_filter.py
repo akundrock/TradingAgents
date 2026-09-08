@@ -195,7 +195,10 @@ class RrsFilter:
             elif "short" in directions and "long" not in directions:
                 if result.score < best.score:
                     best = result
-            elif abs(result.score) > abs(best.score):
+            elif (result.metadata["aligned_count"], abs(result.score)) > (
+                best.metadata["aligned_count"],
+                abs(best.score),
+            ):
                 best = result
 
         if best is not None:

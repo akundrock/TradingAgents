@@ -681,3 +681,57 @@ def test_screener_refresh_updates_watchlist(monkeypatch):
     assert scanner.session.symbol_sources["NVDA"] == "screener"
     assert scanner.session.screener_last_candidate_count == 1
     assert "NVDA" in scanner.session.screener_snapshots
+
+
+@pytest.mark.unit
+def test_screener_refresh_logs_two_lists_for_both_direction(caplog):
+    """With direction=both, the screener log should show separate long and short
+    ranked lists instead of one mixed top-5, so neither side is invisible."""
+    import logging
+
+    ta_graph = MagicMock()
+    config = _config()
+    config["intraday_screener_enabled"] = True
+    config["intraday_screener_interval_minutes"] = 15
+    config["intraday_screener_start_time"] = "09:30"
+    config["watchlist"] = ["SPY"]
+    scanner = WatchlistScanner(config, ta_graph, dry_run=True, skip_premarket=True)
+    scanner.session.daily_bias_cache["SPY"] = _bias("SPY")
+    scanner.session.daily_bias_cache["NVDA"] = _bias("NVDA")
+
+    def _item(symbol, direction, rank_score, aligned):
+        return MagicMock(
+            symbol=symbol,
+            rrs_by_tf={"5m": rank_score, "30m": 0.0, "60m": 0.0},
+            aligned_count=aligned,
+            relative_volume_5m=1.5,
+            direction=direction,
+            rank_score=rank_score,
+            rank_rrs_timeframe="5m",
+            passed_filter="rrs",
+            filter_metadata={},
+        )
+
+    mock_universe = MagicMock()
+    mock_universe.refresh_watchlist.return_value = (
+        ["SPY", "L1", "S1"],
+        [
+            _item("L1", "long", 1.5, 3),
+            _item("L2", "long", 0.8, 2),
+            _item("S1", "short", -1.2, 2),
+            _item("S2", "short", -0.5, 1),
+        ],
+    )
+    scanner.universe_screener = mock_universe
+
+    bar_time = datetime(2026, 7, 27, 10, 0)
+    with caplog.at_level(logging.INFO, logger="tradingagents.intraday.scanner"):
+        scanner._maybe_refresh_watchlist(bar_time)
+
+    messages = [r.message for r in caplog.records]
+    longs_line = next((m for m in messages if "longs" in m), None)
+    shorts_line = next((m for m in messages if "shorts" in m), None)
+    assert longs_line is not None, f"no longs list logged: {messages}"
+    assert "L1" in longs_line and "L2" in longs_line
+    assert shorts_line is not None
+    assert "S1" in shorts_line
