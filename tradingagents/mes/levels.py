@@ -108,11 +108,13 @@ def suggest_trade_levels(
     overnight_high: float | None = None,
     overnight_low: float | None = None,
     tick_size: float = 0.25,
+    stop_atr_multiple: float = 1.0,
 ) -> TradeLevels | None:
     """Return directionally-valid entry/stop/target suggestions, or None if insufficient levels.
 
     For a *long*: target is the nearest structural level **strictly above** last_price;
-    stop is the nearest structural level **strictly below** last_price (floored by 1 ATR).
+    stop is the nearest structural level **strictly below** last_price (floored by
+    ``stop_atr_multiple`` × ATR).
 
     For a *short*: the mirror applies.
 
@@ -156,8 +158,8 @@ def suggest_trade_levels(
     first_target = target_candidates[0]
     stop_level = stop_candidates[0]
 
-    # Safety floor: stop must be at least 1 ATR from entry.
-    min_stop_distance = max(atr, 1.0)
+    # Safety floor: stop must be at least stop_atr_multiple × ATR from entry.
+    min_stop_distance = max(atr * stop_atr_multiple, 1.0)
     if long_side and (last_price - stop_level) < min_stop_distance:
         stop_level = round(last_price - min_stop_distance, 2)
     elif not long_side and (stop_level - last_price) < min_stop_distance:
@@ -201,6 +203,7 @@ def suggest_trade_levels_from_snapshot(side: str, snapshot, result) -> TradeLeve
         overnight_high=overnight[0] if overnight else None,
         overnight_low=overnight[1] if overnight else None,
         tick_size=snapshot.config.mes_tick_size,
+        stop_atr_multiple=snapshot.config.stop_atr_multiple,
     )
 
 

@@ -167,6 +167,24 @@ def test_stop_floored_by_one_atr():
     assert 5000.0 - result.stop_level >= 10.0 - 0.01  # at least 1 ATR
 
 
+@pytest.mark.unit
+def test_stop_floor_scales_with_atr_multiple():
+    """The safety floor is stop_atr_multiple × ATR, not a fixed 1 ATR."""
+    common = dict(
+        side="long",
+        last_price=5000.0,
+        vwap=4999.0,   # only 1 pt below — floor enforcement kicks in
+        atr=4.0,
+        prior_vah=5015.0,
+    )
+    at_default = suggest_trade_levels(**common, stop_atr_multiple=1.0)
+    at_double = suggest_trade_levels(**common, stop_atr_multiple=2.0)
+    assert at_default is not None
+    assert at_double is not None
+    assert 5000.0 - at_default.stop_level == pytest.approx(4.0)  # 1 × ATR
+    assert 5000.0 - at_double.stop_level == pytest.approx(8.0)   # 2 × ATR
+
+
 # ---------------------------------------------------------------------------
 # render_trade_levels_hint
 # ---------------------------------------------------------------------------

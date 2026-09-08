@@ -151,6 +151,7 @@ class MesChecklistConfig:
     trail_atr_multiple: float = 1.0
     exit_on_confluence_loss: bool = False
     time_stop_buffer_minutes: int = 10
+    stop_atr_multiple: float = 1.0
 
     spy_symbol: str = "SPY"
     mes_symbol: str = "/MES"
