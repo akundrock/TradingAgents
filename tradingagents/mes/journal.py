@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .checklist import ChecklistResult
+from .management import OpenTrade, _r_of
 from .snapshot import MesSnapshot
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,135 @@ class MesJournal:
                     tier=check.get("tier", "?"),
                     gates="pass" if check.get("gates_ok") else "fail",
                     tradeable="yes" if check.get("tradeable") else "no",
-                    verdict=_first_line(check.get("verdict", "")) or "-",
+                        verdict=_first_line(check.get("verdict", "")) or "-",
                 )
             )
+        return "\n".join(rows)
+
+    # --- Trade lifecycle ---
+
+    def append_trade_opened(self, trade: OpenTrade, *, entry_context: dict | None = None) -> None:
+        date = trade.entry_time.strftime("%Y-%m-%d")
+        self._append(date, {
+            "kind": "trade_opened",
+            "logged_at": datetime.now().isoformat(),
+            "session_date": date,
+            "side": trade.side,
+            "contracts": trade.contracts,
+            "remaining": trade.remaining,
+            "entry": trade.entry,
+            "stop": trade.stop,
+            "initial_stop": trade.initial_stop,
+            "target": trade.target,
+            "entry_time": trade.entry_time.isoformat(timespec="minutes"),
+            "initial_risk_points": trade.initial_risk_points,
+            "fired": dict(trade.fired),
+            "manual_events": list(trade.manual_events),
+            "realized_r": trade.realized_r,
+            "entry_context": entry_context or {},
+        })
+
+    def append_trade_adjusted(
+        self,
+        date: str,
+        *,
+        stop: float | None = None,
+        note: str | None = None,
+        as_of: str | None = None,
+    ) -> None:
+        self._append(date, {
+            "kind": "trade_adjusted",
+            "logged_at": datetime.now().isoformat(),
+            "session_date": date,
+            "as_of": as_of,
+            "stop": stop,
+            "note": note,
+        })
+
+    def append_trade_closed(
+        self,
+        trade: OpenTrade,
+        *,
+        exit_price: float,
+        reason: str,
+        as_of: datetime,
+        mfe_r: float = 0.0,
+        mae_r: float = 0.0,
+    ) -> None:
+        from .management import _r_of
+
+        realized = round(trade.realized_r + trade.remaining * _r_of(exit_price, trade), 4)
+        self._append(trade.entry_time.strftime("%Y-%m-%d"), {
+            "kind": "trade_closed",
+            "logged_at": datetime.now().isoformat(),
+            "as_of": as_of.isoformat(timespec="minutes"),
+            "side": trade.side,
+            "entry": trade.entry,
+            "stop": trade.stop,
+            "exit_price": exit_price,
+            "reason": reason,
+            "realized_r": realized,
+            "mfe_r": mfe_r,
+            "mae_r": mae_r,
+            "fired": dict(trade.fired),
+            "manual_events": list(trade.manual_events),
+            "entry_time": trade.entry_time.isoformat(timespec="minutes"),
+        })
+
+    def load_trades(self, date: str) -> list[dict]:
+        kinds = {"trade_opened", "trade_adjusted", "trade_closed"}
+        return [e for e in self.load_day(date) if e.get("kind") in kinds]
+
+    def find_open_trade(self, date: str) -> OpenTrade | None:
+        """Replay the day's trade records into the currently-open trade."""
+        trade: OpenTrade | None = None
+        for record in self.load_trades(date):
+            kind = record.get("kind")
+            if kind == "trade_opened":
+                trade = OpenTrade(
+                    side=record["side"],
+                    contracts=int(record["contracts"]),
+                    remaining=int(record["remaining"]),
+                    entry=float(record["entry"]),
+                    stop=float(record["stop"]),
+                    initial_stop=float(record["initial_stop"]),
+                    target=record["target"],
+                    entry_time=datetime.fromisoformat(record["entry_time"]),
+                    initial_risk_points=float(record["initial_risk_points"]),
+                    fired=dict(record.get("fired", {})),
+                    manual_events=list(record.get("manual_events", [])),
+                    realized_r=float(record.get("realized_r", 0.0)),
+                )
+            elif kind == "trade_adjusted" and trade is not None:
+                if record.get("stop") is not None:
+                    trade.stop = float(record["stop"])
+                if record.get("note"):
+                    trade.manual_events.append(record["note"])
+            elif kind == "trade_closed":
+                return None
+        return trade
+
+    def summarize_trades(self, date: str) -> str:
+        """Markdown table of closed trades for the review agent."""
+        trades = self.load_trades(date)
+        if not trades:
+            return f"No trades logged for {date}."
+        rows = [
+            "| Side | Entry | Exit | Reason | Realized R |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for record in self.load_trades(date):
+            if record.get("kind") != "trade_closed":
+                continue
+            rows.append(
+                "| {side} | {entry:.2f} | {exit:.2f} | {reason} | {realized_r:+.2f} |".format(
+                    side=record.get("side", "?"),
+                    entry=float(record.get("entry", 0.0)),
+                    exit=float(record.get("exit_price", 0.0)),
+                    reason=record.get("reason", "?"),
+                    realized_r=float(record.get("realized_r", 0.0)),
+                )
+            )
+        if len(rows) == 2:
+            return f"No closed trades for {date} (an open trade may still be running)."
         return "\n".join(rows)

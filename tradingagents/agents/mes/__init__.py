@@ -6,11 +6,13 @@ that returns rendered markdown.
 """
 
 from .gatekeeper_agent import create_mes_gatekeeper_agent
+from .manager_agent import create_mes_manager_agent
 from .morning_agent import create_mes_morning_agent
 from .review_agent import create_mes_review_agent
 
 __all__ = [
     "create_mes_gatekeeper_agent",
+    "create_mes_manager_agent",
     "create_mes_morning_agent",
     "create_mes_review_agent",
 ]

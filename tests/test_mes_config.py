@@ -104,3 +104,37 @@ def test_to_dict_from_dict_round_trip():
 def test_from_dict_ignores_unknown_keys():
     cfg = MesChecklistConfig.from_dict({"add_threshold": 10.0, "bogus": "x"})
     assert cfg.add_threshold == 10.0
+
+
+@pytest.mark.unit
+def test_management_ladder_defaults():
+    cfg = MesChecklistConfig()
+    assert cfg.breakeven_at_r == 1.0
+    assert cfg.breakeven_cushion_ticks == 1.0
+    assert cfg.partial_at_r == 1.5
+    assert cfg.partial_fraction == 0.5
+    assert cfg.trail_atr_multiple == 1.0
+    assert cfg.exit_on_confluence_loss is False
+    assert cfg.time_stop_buffer_minutes == 10
+    assert cfg.stop_atr_multiple == 1.0
+
+
+@pytest.mark.unit
+def test_management_ladder_env_overrides(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_MES_BREAKEVEN_AT_R", "0.8")
+    monkeypatch.setenv("TRADINGAGENTS_MES_PARTIAL_FRACTION", "0.3")
+    cfg = load_mes_config()
+    assert cfg.breakeven_at_r == 0.8
+    assert cfg.partial_fraction == 0.3  # env override applied over the 0.5 default
+
+
+@pytest.mark.unit
+def test_stop_atr_multiple_default():
+    assert MesChecklistConfig().stop_atr_multiple == 1.0
+
+
+@pytest.mark.unit
+def test_stop_atr_multiple_env_override(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_MES_STOP_ATR_MULTIPLE", "1.5")
+    cfg = load_mes_config()
+    assert cfg.stop_atr_multiple == 1.5

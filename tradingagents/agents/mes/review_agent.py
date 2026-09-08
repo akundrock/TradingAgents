@@ -13,7 +13,13 @@ from tradingagents.agents.utils.structured import (
 def create_mes_review_agent(llm):
     structured_llm = bind_structured(llm, SessionReview, "MES Review Agent")
 
-    def run(*, hypothesis: str, checks_summary: str, outcome_summary: str) -> str:
+    def run(
+        *,
+        hypothesis: str,
+        checks_summary: str,
+        outcome_summary: str,
+        trades_summary: str = "",
+    ) -> str:
         prompt = f"""You are an end-of-day trading coach debriefing a /MES (Micro E-mini S&P 500) discretionary trader. The session is closed and nothing can be changed — your only value is making tomorrow better.
 
 Grade two things, and keep them strictly separate:
@@ -37,7 +43,22 @@ Be direct. Vague encouragement is worthless here; name the specific decisions an
 ---
 
 **Outcomes:**
-{outcome_summary}""" + get_language_instruction()
+{outcome_summary}"""
+
+        if trades_summary.strip():
+            prompt += f"""
+
+---
+
+**Trades Taken (from the journal):**
+{trades_summary}
+
+Grade the execution, not just the hypothesis: entry location quality vs. the
+checklist tier at the time, stop management, whether the exit respected the
+plan (time stop / target / manual), and what the realized R says about the
+tier the entry was taken at."""
+
+        prompt += get_language_instruction()
 
         return invoke_structured_or_freetext(
             structured_llm,

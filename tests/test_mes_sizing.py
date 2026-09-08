@@ -1,7 +1,7 @@
 import pytest
 
 from tradingagents.mes.config import load_mes_config
-from tradingagents.mes.sizing import size_position, suggest_stop_points
+from tradingagents.mes.sizing import size_position, suggest_stop_distance_points
 
 
 @pytest.mark.unit
@@ -75,8 +75,8 @@ def test_non_positive_stop_points_raise(stop_points):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("side", ["long", "short"])
-def test_suggest_stop_points_is_always_positive(side):
-    assert suggest_stop_points(side, 5000.0, 5000.0, 0.0) > 0
+def test_suggest_stop_distance_points_is_always_positive(side):
+    assert suggest_stop_distance_points(side, 5000.0, 5000.0, 0.0) > 0
 
 
 @pytest.mark.unit
@@ -90,4 +90,4 @@ def test_suggest_stop_points_is_always_positive(side):
     ],
 )
 def test_suggest_stop_points_takes_the_furthest_structure(last_price, vwap, atr, expected):
-    assert suggest_stop_points("long", last_price, vwap, atr) == expected
+    assert suggest_stop_distance_points("long", last_price, vwap, atr) == expected

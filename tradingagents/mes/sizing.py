@@ -53,7 +53,8 @@ def size_position(
     )
 
 
-def suggest_stop_points(result_side: str, last_price: float, vwap: float, atr: float) -> float:
-    """Structural stop distance: the further of VWAP invalidation or 1 ATR."""
+def suggest_stop_distance_points(result_side: str, last_price: float, vwap: float, atr: float) -> float:
+    """Structural stop DISTANCE in points (not a price): the further of VWAP
+    invalidation or 1 ATR. Callers convert to a price via ``entry ± distance``."""
     vwap_distance = abs(last_price - vwap)
     return round(max(vwap_distance, atr, 1.0), 2)

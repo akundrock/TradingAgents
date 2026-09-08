@@ -4,6 +4,7 @@ import pytest
 
 from tradingagents.agents.mes import (
     create_mes_gatekeeper_agent,
+    create_mes_manager_agent,
     create_mes_morning_agent,
     create_mes_review_agent,
 )
@@ -260,6 +261,97 @@ def test_gatekeeper_falls_back_to_free_text():
     assert "HARD CONSTRAINT" in llm.prompts[-1]
 
 
+@pytest.mark.unit
+def test_gatekeeper_prompt_includes_current_price():
+    llm = FakeLLM({TradeGoNoGo: _gonogo()})
+    create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="c",
+        market_context="m",
+        tradeable=True,
+        current_price=7678.75,
+    )
+    assert "7678.75" in llm.prompts[0]
+
+
+@pytest.mark.unit
+def test_gatekeeper_prompt_includes_trade_levels_hint():
+    llm = FakeLLM({TradeGoNoGo: _gonogo()})
+    create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="c",
+        market_context="m",
+        tradeable=True,
+        trade_levels_hint="- Entry zone: 5000.00-5000.25\n- Stop: 4990.0 (VWAP)\n- First target: 5010.0 (prior VAH)",
+    )
+    prompt = llm.prompts[0]
+    assert "Suggested Trade Levels" in prompt
+    assert "4990.0" in prompt
+    assert "5010.0" in prompt
+
+
+@pytest.mark.unit
+def test_gatekeeper_prompt_contains_trade_level_rules():
+    llm = FakeLLM({TradeGoNoGo: _gonogo()})
+    create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="c",
+        market_context="m",
+        tradeable=True,
+    )
+    prompt = llm.prompts[0]
+    assert "TRADE LEVEL RULES" in prompt
+    assert "first_target" in prompt
+    assert "strictly above" in prompt.lower()
+
+
+@pytest.mark.unit
+def test_gatekeeper_normalizes_wait_verdict_before_render():
+    """A Wait verdict with populated trade levels must have them stripped by the gatekeeper."""
+    inverted_wait = TradeGoNoGo(
+        verdict=TradeVerdict.WAIT,
+        direction="long",
+        confidence="medium",
+        reasoning="Marginal.",
+        entry_zone="7678.75-7680.00",
+        stop_level=7657.81,
+        first_target=7673.75,  # inverted
+        suggested_contracts=1,
+        what_would_change_my_mind="Volume.",
+    )
+    llm = FakeLLM({TradeGoNoGo: inverted_wait})
+    output = create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="c",
+        market_context="m",
+        tradeable=True,
+    )
+    assert "Entry Zone" not in output
+    assert "Stop" not in output
+    assert "First Target" not in output
+    assert "**Direction**: None" in output
+
+
+@pytest.mark.unit
+def test_gatekeeper_normalizes_inverted_take_target():
+    """A Take verdict with first_target below entry must have the target cleared."""
+    inverted_take = TradeGoNoGo(
+        verdict=TradeVerdict.TAKE,
+        direction="long",
+        confidence="medium",
+        reasoning="Setup.",
+        entry_zone="7678.75-7680.00",
+        stop_level=7657.81,
+        first_target=7673.75,  # below entry high — invalid for long
+        suggested_contracts=1,
+        what_would_change_my_mind="Break below VWAP.",
+    )
+    llm = FakeLLM({TradeGoNoGo: inverted_take})
+    output = create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="c",
+        market_context="m",
+        tradeable=True,
+    )
+    assert "First Target" not in output
+    assert "auto-corrected" in output
+
+
 # ---------------------------------------------------------------------------
 # Review agent
 # ---------------------------------------------------------------------------
@@ -291,3 +383,40 @@ def test_review_agent_falls_back_to_free_text():
         hypothesis="h", checks_summary="s", outcome_summary="o"
     )
     assert output == "plain review"
+
+
+# ---------------------------------------------------------------------------
+# Trade manager agent (advisory only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_manager_agent_renders_prompt_with_report():
+    llm = FakeLLM(text="Trend intact; $TICK still positive. Hold.")
+    agent = create_mes_manager_agent(llm)
+    agent(
+        mgmt_summary="LONG 1 @ 100.00 | +0.46R | stop 98.00 | next: BE at +1.0R",
+        market_context="SPY above VWAP, $ADD +1200",
+        hypothesis="Trend-up day; SPY holding VWAP.",
+        current_price=100.50,
+    )
+    assert llm.prompts, "manager must receive a prompt"
+    assert "100.00" in llm.prompts[0]
+    assert "SPY above VWAP" in llm.prompts[0]
+
+
+@pytest.mark.unit
+def test_manager_output_is_returned_verbatim():
+    llm = FakeLLM(text="Internals flipped; consider tightening.")
+    agent = create_mes_manager_agent(llm)
+    text = agent(mgmt_summary="HOLD | +0.5R | stop 98.00", market_context="SPY above VWAP")
+    assert text == "Internals flipped; consider tightening."
+
+
+@pytest.mark.unit
+def test_review_agent_accepts_trades_summary():
+    llm = FakeLLM()
+    agent = create_mes_review_agent(llm)
+    agent(hypothesis="h", checks_summary="c", outcome_summary="o",
+          trades_summary="| long | 6500.00 | 6503.50 | manual | +1.75 |")
+    assert "Trades Taken" in llm.prompts[0]
