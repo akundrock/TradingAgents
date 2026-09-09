@@ -6,7 +6,12 @@ import functools
 
 from langchain_core.messages import AIMessage
 
-from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
+from tradingagents.agents.schemas import (
+    SwingTradeProposal,
+    TraderProposal,
+    render_swing_trade_proposal,
+    render_trader_proposal,
+)
 from tradingagents.agents.trader.magpie import render_magpie_signal_summary
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
@@ -20,14 +25,13 @@ from tradingagents.intraday.strategy import render_strategy_summary
 
 
 def create_trader(llm):
-    structured_llm = bind_structured(llm, TraderProposal, "Trader")
-
     def trader_node(state, name):
         company_name = state["company_of_interest"]
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
         intraday_context = state.get("intraday_context") or {}
         strategy_block = intraday_context.get("strategy")
+        trade_profile_block = (intraday_context.get("trade_profile") or {}).get("block")
 
         if strategy_block:
             signal_label = "Intraday Strategy Signal"
@@ -45,6 +49,21 @@ def create_trader(llm):
                 "is unavailable or disabled, say so briefly and rely on the rest of the evidence."
             )
 
+        if trade_profile_block:
+            proposal_model = SwingTradeProposal
+            render_fn = render_swing_trade_proposal
+            swing_system_line = (
+                " You are evaluating a swing option trade: reason about the "
+                "underlying's move, then express entry/stop/targets on the "
+                "underlying; the executor maps the move to the ~0.70-delta contract."
+            )
+        else:
+            proposal_model = TraderProposal
+            render_fn = render_trader_proposal
+            swing_system_line = ""
+
+        structured_llm = bind_structured(llm, proposal_model, "Trader")
+
         messages = [
             {
                 "role": "system",
@@ -52,6 +71,7 @@ def create_trader(llm):
                     "You are a trading agent analyzing market data to make investment decisions. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     + system_extra
+                    + swing_system_line
                     + get_language_instruction()
                 ),
             },
@@ -65,6 +85,7 @@ def create_trader(llm):
                     f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
                     f"{signal_label}:\n{signal_summary}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
+                    + (f"\n\n{trade_profile_block}" if trade_profile_block else "")
                 ),
             },
         ]
@@ -73,7 +94,7 @@ def create_trader(llm):
             structured_llm,
             llm,
             messages,
-            render_trader_proposal,
+            render_fn,
             "Trader",
         )
 
