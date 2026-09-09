@@ -2,6 +2,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.agents.utils.profile_prompt import (
+    SWING_RISK_ROLE_LINE,
+    append_trade_profile_block,
+)
 
 
 def create_conservative_debator(llm):
@@ -35,6 +39,9 @@ Company Fundamentals Report: {fundamentals_report}
 Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
 
 Engage by questioning their optimism and emphasizing the potential downsides they may have overlooked. Address each of their counterpoints to showcase why a conservative stance is ultimately the safest path for the firm's assets. Focus on debating and critiquing their arguments to demonstrate the strength of a low-risk strategy over their approaches. Output conversationally as if you are speaking without any special formatting.""" + get_language_instruction()
+
+        profile_block = (state.get("intraday_context") or {}).get("trade_profile", {}).get("block")
+        prompt = append_trade_profile_block(prompt, profile_block, SWING_RISK_ROLE_LINE)
 
         response = llm.invoke(prompt)
 
