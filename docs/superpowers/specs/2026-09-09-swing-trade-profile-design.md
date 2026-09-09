@@ -36,7 +36,7 @@ Non-goals:
   `pro_trader_dashboard`.
 - No dashboard UI changes.
 
-## 1. Architecture
+## 3. Architecture
 
 ### New module: `tradingagents/intraday/trade_profile.py`
 
@@ -59,31 +59,31 @@ def render_trade_profile(profile, symbol, direction) -> str  # markdown block
 ```
 
 `build_trade_profile()` reads the three env tunables with dataclass defaults as
-fallback. Renderer output is the markdown block shown below (Section 2a), which
-all four agents render from, so reasoning vocabulary stays consistent across
-the chain.
+fallback. Renderer output is the markdown block shown in Section 6, which all
+four agents render from, so reasoning vocabulary stays consistent across the
+chain.
 
 ### Activation rule
 
 `propagate_intraday()` attaches `intraday_context["trade_profile"]` **only when
 `strategy_name == "pro_trader_dashboard"`**. `orb_breakout` and
 `base_momentum` chains are byte-identical to today's behavior. The kill-switch
-env var (Section 5) also prevents attachment.
+env var (Section 4.5) also prevents attachment.
 
-## 2. Components
+## 4. Components
 
-### 2.1 `TradeProfile` dataclass + renderer (`tradingagents/intraday/trade_profile.py`)
+### 4.1 `TradeProfile` dataclass + renderer (`tradingagents/intraday/trade_profile.py`)
 
-As described in Section 1. The renderer takes symbol + direction so the profile
+As described in Section 3 (Architecture). The renderer takes symbol + direction so the profile
 block can be phrased per-direction ("long calls" vs "long puts").
 
-### 2.2 `propagate_intraday` injection
+### 4.2 `propagate_intraday` injection
 
 `tradingagents/graph/intraday_graph.py` — in `propagate_intraday`, build
 `trade_profile` only when strategy is pro-trader and kill switch is off, and
 place it inside `intraday_context` next to the existing `strategy` block.
 
-### 2.3 Trader: structured output
+### 4.2 Trader: structured output
 
 `tradingagents/agents/schemas.py` — add:
 
@@ -106,7 +106,7 @@ swing option trade: …"), and append the rendered profile to the user prompt.
 When absent, bind plain `TraderProposal` — `orb_breakout`/`base_momentum`
 behavior unchanged.
 
-### 2.4 Risk debators + Portfolio Manager
+### 4.3 Risk debators + Portfolio Manager
 
 Each of the three debators (`agents/risk_mgmt/*_debator.py`) and the PM
 (`agents/managers/portfolio_manager.py`) get the same rendered profile block
@@ -118,7 +118,7 @@ appended to their user prompt with a one-line role-specific instruction:
 - PM keeps its final-decision output format unchanged; profile block informs
   reasoning only.
 
-### 2.5 Signal persistence
+### 4.4 Signal persistence
 
 `IntradaySignal` (`tradingagents/intraday/session.py`) gains two optional
 fields: `option_structure: str | None = None` and
@@ -130,7 +130,7 @@ and `hold_horizon_days` appended to the fieldname list; append-mode
 `_state_to_intraday_signal` maps the structured fields → signal fields. The
 `reasoning` column continues to carry the full PM/trader text.
 
-### 2.6 Config / kill switch
+### 4.5 Config / kill switch
 
 - `TRADINGAGENTS_PRO_TRADER_SWING_PROFILE` (default `"on"`): when `"off"`, the
   profile is never attached and the pro-trader chain behaves exactly as today.
@@ -142,7 +142,7 @@ and `hold_horizon_days` appended to the fieldname list; append-mode
 Wired through `default_config.py` + the existing env map, with tests extended
 in `tests/test_env_overrides.py`.
 
-## 3. Data flow (end to end)
+## 5. Data flow (end to end)
 
 1. Screener: universe → RRS pre-filter → per-symbol Gate 1 (pro-trader rules)
    → Gate 2 (daily-bias/SuperTrend) — unchanged.
@@ -156,7 +156,7 @@ in `tests/test_env_overrides.py`.
    human executor maps to the ~0.70-delta contract).
 6. `IntradaySignal` + new fields → `signals.csv` (new columns) + dashboard.
 
-## 4. Rendered profile block (prompt text)
+## 6. Rendered profile block (prompt text)
 
 All four agents receive this block (Trader additionally gets the system-line
 role instruction):
@@ -182,7 +182,7 @@ Role-specific lines:
 - PM: weigh the swing thesis against the risk debate for a final decision,
   same output format as today.
 
-## 5. Error handling
+## 7. Error handling
 
 - Missing env vars → dataclass defaults apply.
 - Malformed LLM output → existing `invoke_structured_or_freetext` fallback;
@@ -191,7 +191,7 @@ Role-specific lines:
 - Kill switch `off` → profile never attached; chain identical to current
   behavior.
 
-## 6. Testing
+## 8. Testing
 
 - Unit: `TradeProfile` defaults, renderer content (DTE/delta/hold text,
   direction phrasing), env overrides (`tests/test_env_overrides.py`).
@@ -203,7 +203,7 @@ Role-specific lines:
   `IntradaySignal` fields; `signals.csv` rows include the new columns.
 - TDD per repo convention; run baseline suite (~1174 tests) before and after.
 
-## 7. Explicit decisions (from brainstorming)
+## 9. Explicit decisions (from brainstorming)
 
 - **Approach 1 chosen:** enrich existing chain (Trader + risk + PM), no new
   LLM calls, no topology change.
@@ -214,7 +214,7 @@ Role-specific lines:
 - Persistence extended: new CSV columns; existing behavior otherwise
   unchanged.
 
-## 8. Out of scope
+## 10. Out of scope
 
 - Fetching option chains/IV; option-price-level outputs.
 - Per-strategy prompt registry or prompt templating system.
