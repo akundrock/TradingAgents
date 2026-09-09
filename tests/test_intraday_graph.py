@@ -219,6 +219,73 @@ def test_propagate_intraday_attaches_swing_profile_for_pro_trader():
 
 
 @pytest.mark.unit
+def test_propagate_intraday_no_profile_when_kill_switch_off():
+    captured = {}
+
+    class _Graph:
+        def invoke(self, state, **kwargs):
+            captured.update(state)
+            return {"trader_investment_plan": "", "final_trade_decision": ""}
+
+    from tradingagents.graph.propagation import Propagator
+
+    graph = IntradayTradingGraph.__new__(IntradayTradingGraph)
+    graph.config = {"pro_trader_swing_profile_enabled": False}
+    graph.callbacks = []
+    graph.propagator = Propagator()
+    graph.graph = _Graph()
+
+    mtf = MTFValidationResult(
+        symbol="NVDA",
+        bar_time=datetime(2026, 7, 27, 10, 0),
+        snapshot_5min={"Close": 1.0},
+        snapshot_30min={"Close": 1.0},
+        snapshot_daily={},
+        trend_5min="up",
+        trend_30min="up",
+        daily_bias_direction="bullish",
+        trends_aligned=True,
+        vwap_5min=1.0,
+        atr_5min=1.0,
+    )
+    gate = GateResult(
+        passed=True,
+        gate1_strategy=True,
+        gate1_reason="ok",
+        gate2_mtf_alignment=True,
+        gate2_reason="ok",
+        final_direction="long",
+    )
+    strategy_result = StrategyResult(
+        passed=True,
+        direction="long",
+        reason="ok",
+        factors_met=["orb_breakout"],
+        factors_missing=[],
+    )
+    bias = DailyBiasReport(
+        symbol="NVDA",
+        trade_date="2026-07-27",
+        direction="bullish",
+        key_levels={},
+        summary="buy",
+        computed_at=datetime(2026, 7, 27, 9, 0),
+    )
+
+    graph.propagate_intraday(
+        symbol="NVDA",
+        bar_time=datetime(2026, 7, 27, 10, 0),
+        daily_bias=bias,
+        mtf=mtf,
+        strategy_result=strategy_result,
+        gate_result=gate,
+        strategy_name="pro_trader_dashboard",
+    )
+
+    ctx = captured["intraday_context"]
+    assert "trade_profile" not in ctx
+
+@pytest.mark.unit
 def test_propagate_intraday_no_profile_for_other_strategies():
     captured = {}
 
