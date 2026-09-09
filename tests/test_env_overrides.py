@@ -186,3 +186,18 @@ def test_pro_trader_volume_pressure_env_overrides(monkeypatch):
     assert dc.DEFAULT_CONFIG["pro_trader_require_buy_pressure"] is True
     assert dc.DEFAULT_CONFIG["pro_trader_min_buy_percent"] == 60.0
     assert dc.DEFAULT_CONFIG["pro_trader_min_premarket_volume"] == 50000.0
+
+
+@pytest.mark.unit
+def test_pro_trader_swing_profile_env_overrides(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_PRO_TRADER_SWING_PROFILE="off",
+        TRADINGAGENTS_PRO_TRADER_DTE_WEEKS="5-6",
+        TRADINGAGENTS_PRO_TRADER_TARGET_DELTA="0.65",
+        TRADINGAGENTS_PRO_TRADER_HOLD_HORIZON_DAYS="2",
+    )
+    assert dc.DEFAULT_CONFIG["pro_trader_swing_profile_enabled"] is False
+    assert dc.DEFAULT_CONFIG["pro_trader_swing_dte_weeks"] == "5-6"
+    assert dc.DEFAULT_CONFIG["pro_trader_swing_target_delta"] == "0.65"
+    assert dc.DEFAULT_CONFIG["pro_trader_swing_hold_horizon_days"] == "2"

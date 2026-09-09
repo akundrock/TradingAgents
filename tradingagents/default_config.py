@@ -48,6 +48,12 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_PRO_TRADER_MIN_SELL_PERCENT": "pro_trader_min_sell_percent",
     "TRADINGAGENTS_PRO_TRADER_REQUIRE_PRICE_VOLUME_TREND": "pro_trader_require_price_volume_trend",
     "TRADINGAGENTS_PRO_TRADER_MIN_PREMARKET_VOLUME": "pro_trader_min_premarket_volume",
+    # Swing trade profile injected into the pro-trader post-gate LLM chain
+    # (docs/superpowers/specs/2026-09-09-swing-trade-profile-design.md).
+    "TRADINGAGENTS_PRO_TRADER_SWING_PROFILE": "pro_trader_swing_profile_enabled",
+    "TRADINGAGENTS_PRO_TRADER_DTE_WEEKS": "pro_trader_swing_dte_weeks",
+    "TRADINGAGENTS_PRO_TRADER_TARGET_DELTA": "pro_trader_swing_target_delta",
+    "TRADINGAGENTS_PRO_TRADER_HOLD_HORIZON_DAYS": "pro_trader_swing_hold_horizon_days",
     # Pro Trader Gate 1 thresholds.
     "TRADINGAGENTS_PRO_TRADER_MIN_RS_TIMEFRAMES": "pro_trader_min_rs_timeframes",
     "TRADINGAGENTS_PRO_TRADER_REQUIRE_DAILY_RRS": "pro_trader_require_daily_rrs",
@@ -257,6 +263,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "pro_trader_min_sell_percent": 55.0,
     "pro_trader_require_price_volume_trend": False,
     "pro_trader_min_premarket_volume": 0,
+    # Swing trade profile injected into the pro-trader post-gate LLM chain
+    # (docs/superpowers/specs/2026-09-09-swing-trade-profile-design.md).
+    "pro_trader_swing_profile_enabled": True,
+    "pro_trader_swing_dte_weeks": "3-4",
+    "pro_trader_swing_target_delta": "0.70",
+    "pro_trader_swing_hold_horizon_days": "1",
     "intraday_output_dir": os.path.join(_TRADINGAGENTS_HOME, "intraday"),
     "intraday_max_concurrent_symbols": 5,
     "intraday_signal_cooldown_bars": 3,
