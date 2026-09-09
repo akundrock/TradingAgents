@@ -180,6 +180,61 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
     return "\n".join(parts)
 
 
+class SwingTradeProposal(TraderProposal):
+    """TraderProposal extended for swing option trades (pro-trader screener).
+
+    Field descriptions double as output instructions (repo structured-output
+    pattern); all fields optional so a HOLD or partial answer stays valid.
+    """
+
+    option_structure: str | None = Field(
+        default=None,
+        description=(
+            "The option structure for this swing trade, e.g. "
+            "'Long call, ~0.70 delta, 21 DTE'. Null when action is Hold."
+        ),
+    )
+    hold_horizon_days: str | None = Field(
+        default=None,
+        description=(
+            "Expected holding period in trading days for the option position, "
+            "e.g. '1' (close within about a day)."
+        ),
+    )
+    option_direction: str | None = Field(
+        default=None,
+        description=(
+            "The option leg: exactly 'long call' or 'long put', or null for HOLD."
+        ),
+    )
+
+
+def render_swing_trade_proposal(proposal: SwingTradeProposal) -> str:
+    """Render SwingTradeProposal: base markdown plus swing fields before the FINAL line."""
+    parts = [
+        f"**Action**: {proposal.action.value}",
+        "",
+        f"**Reasoning**: {proposal.reasoning}",
+    ]
+    if proposal.entry_price is not None:
+        parts.extend(["", f"**Entry Price**: {proposal.entry_price}"])
+    if proposal.stop_loss is not None:
+        parts.extend(["", f"**Stop Loss**: {proposal.stop_loss}"])
+    if proposal.position_sizing:
+        parts.extend(["", f"**Position Sizing**: {proposal.position_sizing}"])
+    if proposal.option_structure:
+        parts.extend(["", f"**Option Structure**: {proposal.option_structure}"])
+    if proposal.hold_horizon_days:
+        parts.extend(["", f"**Hold Horizon**: {proposal.hold_horizon_days}"])
+    if proposal.option_direction:
+        parts.extend(["", f"**Option Direction**: {proposal.option_direction}"])
+    parts.extend([
+        "",
+        f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
+    ])
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Portfolio Manager
 # ---------------------------------------------------------------------------
