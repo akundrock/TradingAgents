@@ -122,6 +122,10 @@ For `orb_breakout` with `--screener`, Gate 2 defaults to `supertrend` (Pro Trade
 
 When both gates pass, `IntradayTradingGraph.propagate_intraday()` runs.
 
+### Swing trade profile (pro-trader + screener)
+
+When the `pro_trader_dashboard` strategy gates a screener trade, a **swing trade profile** (options swing: DTE ~3–4 weeks, delta ~0.70, hold ~1 trading day) is injected into the Trader, risk-debator, and PM prompts so all four agents reason in the same swing vocabulary. The Trader additionally binds a `SwingTradeProposal` schema; `signals.csv` gains `option_structure` and `hold_horizon_days` columns. Entry/stop remain underlying-equity levels — the executor maps the underlying move to the ~0.70-delta contract. Disable with `TRADINGAGENTS_PRO_TRADER_SWING_PROFILE=off` (see `.env.example` for tunables: DTE weeks, target delta, hold horizon). Detail: [swing trade profile spec](../superpowers/specs/2026-09-09-swing-trade-profile-design.md).
+
 ---
 
 ## Dynamic Watchlist Screener
@@ -259,7 +263,7 @@ Manual navigation pins the detail panel (`[pinned]` in the title). Press `f` to 
 
 | Path | Content |
 |------|---------|
-| `~/.tradingagents/intraday/YYYY-MM-DD/signals.csv` | Emitted signals |
+| `~/.tradingagents/intraday/YYYY-MM-DD/signals.csv` | Emitted signals (`option_structure` / `hold_horizon_days` populated for pro-trader swing setups) |
 | `~/.tradingagents/intraday/YYYY-MM-DD/premarket_bias.json` | Cached daily bias |
 
 Pre-market cache: restart same day with new symbols — cached symbols restore instantly; only new symbols run LLM pre-market. With `--screener`, watchlist updates in-session without restart.
