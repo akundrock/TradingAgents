@@ -21,6 +21,9 @@ def test_appends_profile_with_role_line_when_present():
     assert "Trade Profile" in result
     assert SWING_RISK_ROLE_LINE in result
     assert "overnight gap risk" in result
+    # Role lines carry no hardcoded tunables; the profile block owns the numbers.
+    assert "0.70" not in SWING_RISK_ROLE_LINE
+    assert "~1 day" not in SWING_RISK_ROLE_LINE
 
 
 @pytest.mark.unit

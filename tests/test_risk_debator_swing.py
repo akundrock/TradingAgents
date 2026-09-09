@@ -50,6 +50,9 @@ def test_debator_prompt_includes_profile_when_present(factory):
     node(_risk_state("SWING-PROFILE-BLOCK"))
     assert "SWING-PROFILE-BLOCK" in llm.prompts[0]
     assert "overnight gap risk" in llm.prompts[0]
+    # Role line must not contradict env-tunable profile numbers.
+    assert "0.70" not in llm.prompts[0]
+    assert "~1 day" not in llm.prompts[0]
 
 
 @pytest.mark.unit

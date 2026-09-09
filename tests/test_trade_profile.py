@@ -62,6 +62,20 @@ def test_render_trade_profile_contains_swing_vocabulary():
 
 
 @pytest.mark.unit
+def test_render_trade_profile_tail_derives_hold_horizon():
+    # Default profile closes the block with the ~1-day tail line.
+    default_text = render_trade_profile(TradeProfile(), symbol="NVDA", direction="long")
+    assert "HOLD" in default_text
+    assert "within ~1 day" in default_text
+
+    # Overridden horizon must flow through to the tail line.
+    overridden = TradeProfile(hold_horizon_days="2")
+    text = render_trade_profile(overridden, symbol="NVDA", direction="long")
+    assert "within ~2 days" in text
+    assert "~1 day" not in text
+
+
+@pytest.mark.unit
 def test_render_trade_profile_direction_phrasing():
     profile = TradeProfile()
     long_text = render_trade_profile(profile, symbol="NVDA", direction="long")

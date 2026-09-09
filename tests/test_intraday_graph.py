@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tradingagents.agents.schemas import SwingTradeProposal, TraderAction, render_swing_trade_proposal
 from tradingagents.graph.intraday_graph import IntradayTradingGraph, _state_to_intraday_signal
 from tradingagents.intraday.gating import GateResult
 from tradingagents.intraday.mtf_validator import MTFValidationResult
@@ -401,6 +402,42 @@ def test_state_to_signal_extracts_swing_fields_from_markdown():
             final_direction="long",
         ),
         final_state=final_state,
+    )
+    assert signal.option_structure == "Long call, ~0.70 delta, 21 DTE"
+    assert signal.hold_horizon_days == "1"
+    assert signal.entry_price == 100.5
+    assert signal.stop_loss == 98.0
+
+
+@pytest.mark.unit
+def test_state_to_signal_round_trips_rendered_swing_proposal():
+    """render_swing_trade_proposal output must be extractable by _state_to_intraday_signal."""
+    proposal = SwingTradeProposal(
+        action=TraderAction.BUY,
+        reasoning="Momentum setup confirmed above VWAP.",
+        entry_price=100.5,
+        stop_loss=98.0,
+        option_structure="Long call, ~0.70 delta, 21 DTE",
+        hold_horizon_days="1",
+        option_direction="long call",
+    )
+    signal = _state_to_intraday_signal(
+        symbol="NVDA",
+        bar_time=datetime(2026, 7, 27, 10, 0),
+        direction="long",
+        strategy_result=StrategyResult(passed=True, direction="long", reason="ok", factors_met=["a"], factors_missing=[]),
+        gate_result=GateResult(
+            passed=True,
+            gate1_strategy=True,
+            gate1_reason="ok",
+            gate2_mtf_alignment=True,
+            gate2_reason="ok",
+            final_direction="long",
+        ),
+        final_state={
+            "trader_investment_plan": render_swing_trade_proposal(proposal),
+            "final_trade_decision": "**Rating**: Buy",
+        },
     )
     assert signal.option_structure == "Long call, ~0.70 delta, 21 DTE"
     assert signal.hold_horizon_days == "1"

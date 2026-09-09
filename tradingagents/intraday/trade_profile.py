@@ -65,5 +65,6 @@ def render_trade_profile(profile: TradeProfile, symbol: str, direction: str) -> 
         f"the underlying move to the ~{profile.target_delta}-delta contract.\n"
         "- Invalidation = stop on the underlying, not option premium.\n"
         '- Time matters: a setup that needs "wait a week" is a **HOLD**. '
-        "A valid swing setup must act within ~1 day."
+        "A valid swing setup must act within "
+        f"~{profile.hold_horizon_days} day{'s' if profile.hold_horizon_days != '1' else ''}."
     )

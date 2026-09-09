@@ -55,7 +55,8 @@ def create_trader(llm):
             swing_system_line = (
                 " You are evaluating a swing option trade: reason about the "
                 "underlying's move, then express entry/stop/targets on the "
-                "underlying; the executor maps the move to the ~0.70-delta contract."
+                "underlying; the executor maps the move to the option contract "
+                "with the profile's stated delta."
             )
         else:
             proposal_model = TraderProposal

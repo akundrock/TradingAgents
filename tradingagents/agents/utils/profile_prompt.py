@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 SWING_RISK_ROLE_LINE = (
-    "Evaluate risk for a swing options position with the stated DTE, ~0.70 "
-    "delta, expected hold ~1 day - focus on overnight gap risk, theta, and "
-    "event risk within the hold window."
+    "Evaluate risk for a swing options position with the stated DTE, delta, "
+    "and hold horizon from the trade profile below - focus on overnight gap "
+    "risk, theta, and event risk within the hold window."
 )
 
 SWING_PM_ROLE_LINE = (
