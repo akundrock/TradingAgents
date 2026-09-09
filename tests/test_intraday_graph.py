@@ -306,3 +306,60 @@ def test_analyst_nodes_not_called(monkeypatch):
     assert "Research Manager" not in node_names
     assert "Trader" in node_names
     assert "Portfolio Manager" in node_names
+
+
+@pytest.mark.unit
+def test_state_to_signal_extracts_swing_fields_from_markdown():
+    final_state = {
+        "trader_investment_plan": (
+            "**Action**: Buy\n\n**Reasoning**: r\n\n**Entry Price**: 100.5\n\n"
+            "**Stop Loss**: 98.0\n\n**Option Structure**: Long call, ~0.70 delta, 21 DTE\n\n"
+            "**Hold Horizon**: 1\n\nFINAL TRANSACTION PROPOSAL: **BUY**"
+        ),
+        "final_trade_decision": "**Rating**: Buy",
+    }
+    signal = _state_to_intraday_signal(
+        symbol="NVDA",
+        bar_time=datetime(2026, 7, 27, 10, 0),
+        direction="long",
+        strategy_result=StrategyResult(
+            passed=True, direction="long", reason="ok", factors_met=["a"], factors_missing=[]
+        ),
+        gate_result=GateResult(
+            passed=True,
+            gate1_strategy=True,
+            gate1_reason="ok",
+            gate2_mtf_alignment=True,
+            gate2_reason="ok",
+            final_direction="long",
+        ),
+        final_state=final_state,
+    )
+    assert signal.option_structure == "Long call, ~0.70 delta, 21 DTE"
+    assert signal.hold_horizon_days == "1"
+    assert signal.entry_price == 100.5
+    assert signal.stop_loss == 98.0
+
+
+@pytest.mark.unit
+def test_state_to_signal_swing_fields_none_without_markers():
+    signal = _state_to_intraday_signal(
+        symbol="NVDA",
+        bar_time=datetime(2026, 7, 27, 10, 0),
+        direction="long",
+        strategy_result=StrategyResult(passed=True, direction="long", reason="ok", factors_met=["a"], factors_missing=[]),
+        gate_result=GateResult(
+            passed=True,
+            gate1_strategy=True,
+            gate1_reason="ok",
+            gate2_mtf_alignment=True,
+            gate2_reason="ok",
+            final_direction="long",
+        ),
+        final_state={
+            "trader_investment_plan": "**Action**: Buy\n**Entry Price**: 100.5\n**Stop Loss**: 98.0",
+            "final_trade_decision": "**Rating**: Buy",
+        },
+    )
+    assert signal.option_structure is None
+    assert signal.hold_horizon_days is None

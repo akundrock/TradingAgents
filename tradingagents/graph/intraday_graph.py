@@ -180,6 +180,8 @@ def _state_to_intraday_signal(
 
     entry_price = _extract_float(r"\*\*Entry Price\*\*:\s*([0-9.]+)", trader_plan)
     stop_loss = _extract_float(r"\*\*Stop Loss\*\*:\s*([0-9.]+)", trader_plan)
+    option_structure = _extract_str(r"\*\*Option Structure\*\*:\s*(.+)", trader_plan)
+    hold_horizon_days = _extract_str(r"\*\*Hold Horizon\*\*:\s*(.+)", trader_plan)
 
     action = _resolve_action(trader_plan, pm_decision, direction)
     confidence = (
@@ -201,6 +203,8 @@ def _state_to_intraday_signal(
             f"G1={gate_result.gate1_strategy} G2={gate_result.gate2_mtf_alignment}"
         ),
         reasoning=reasoning,
+        option_structure=option_structure,
+        hold_horizon_days=hold_horizon_days,
     )
 
 
@@ -212,6 +216,11 @@ def _extract_float(pattern: str, text: str) -> float | None:
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def _extract_str(pattern: str, text: str) -> str | None:
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else None
 
 
 def _resolve_action(trader_plan: str, pm_decision: str, direction: str) -> str:

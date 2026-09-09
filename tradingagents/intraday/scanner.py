@@ -42,6 +42,54 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
+def write_signal_csv(out_dir: Path, signal: IntradaySignal) -> None:
+    """Append a signal row to ``<out_dir>/signals.csv``.
+
+    Header (with the newer ``option_structure``/``hold_horizon_days`` columns) is
+    written only when the file does not already exist, so pre-existing CSVs keep
+    their original 10-column layout when appended to.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "signals.csv"
+    write_header = not csv_path.exists()
+    with csv_path.open("a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "bar_time",
+                "symbol",
+                "action",
+                "direction",
+                "entry_price",
+                "stop_loss",
+                "confidence",
+                "setup_score",
+                "gate_summary",
+                "reasoning",
+                "option_structure",
+                "hold_horizon_days",
+            ],
+        )
+        if write_header:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "bar_time": signal.bar_time.isoformat(),
+                "symbol": signal.symbol,
+                "action": signal.action,
+                "direction": signal.direction,
+                "entry_price": signal.entry_price,
+                "stop_loss": signal.stop_loss,
+                "confidence": signal.confidence,
+                "setup_score": signal.setup_score,
+                "gate_summary": signal.gate_summary,
+                "reasoning": signal.reasoning,
+                "option_structure": signal.option_structure,
+                "hold_horizon_days": signal.hold_horizon_days,
+            }
+        )
+
+
 class WatchlistScanner:
     def __init__(
         self,
@@ -855,40 +903,7 @@ class WatchlistScanner:
 
         out_dir = self._output_dir / self.session.session_date
         out_dir.mkdir(parents=True, exist_ok=True)
-        csv_path = out_dir / "signals.csv"
-        write_header = not csv_path.exists()
-        with csv_path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.DictWriter(
-                fh,
-                fieldnames=[
-                    "bar_time",
-                    "symbol",
-                    "action",
-                    "direction",
-                    "entry_price",
-                    "stop_loss",
-                    "confidence",
-                    "setup_score",
-                    "gate_summary",
-                    "reasoning",
-                ],
-            )
-            if write_header:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "bar_time": signal.bar_time.isoformat(),
-                    "symbol": signal.symbol,
-                    "action": signal.action,
-                    "direction": signal.direction,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                    "confidence": signal.confidence,
-                    "setup_score": signal.setup_score,
-                    "gate_summary": signal.gate_summary,
-                    "reasoning": signal.reasoning,
-                }
-            )
+        write_signal_csv(out_dir, signal)
 
     @staticmethod
     def _gate_summary(gate_result) -> str:

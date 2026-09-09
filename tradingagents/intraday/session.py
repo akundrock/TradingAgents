@@ -6,8 +6,6 @@ from typing import Literal
 
 import pandas as pd
 
-import pandas as pd
-
 
 @dataclass
 class DailyBiasReport:
@@ -50,6 +48,8 @@ class IntradaySignal:
     setup_score: int
     gate_summary: str
     reasoning: str
+    option_structure: str | None = None
+    hold_horizon_days: str | None = None
 
 
 @dataclass
