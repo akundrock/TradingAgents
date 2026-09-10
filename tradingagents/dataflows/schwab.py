@@ -786,8 +786,15 @@ _MAX_INTERNAL_PERIOD_DAYS = 10
 def _internal_candle_value(candle: dict) -> float | None:
     """Best-effort internals reading from a pricehistory candle.
 
-    Live $TICK candles often report ``close=0`` while ``high``/``low`` carry the
-    actual reading; prefer a non-zero close, then the bar midpoint/high.
+    Only a real ``close`` — or the bar midpoint when both ``high`` and ``low``
+    are populated — is trusted. Schwab's live internals candles frequently
+    publish ``close=0`` (and ``low=0``) while only ``high`` carries a value;
+    substituting that single-sided extreme for an oscillating reading like
+    $TICK is positive-biased (the bar maximum can never read below zero) and
+    fabricated persistent-buy streaks that disagree with the TOS panel.
+    Unknown bars are dropped here; the latest bar is recovered from live
+    quotes/streamer by the backfills in ``get_internals_frame``, and earlier
+    gaps carry the last known reading via the snapshot's per-day ffill.
     """
     close = candle.get("close")
     high = candle.get("high")
@@ -797,13 +804,8 @@ def _internal_candle_value(candle: dict) -> float | None:
         return float(close)
     if high is not None and low is not None and high != 0 and low != 0:
         return float((high + low) / 2.0)
-    if high is not None and high != 0:
-        return float(high)
-    if low is not None and low != 0:
-        return float(low)
-    if close is not None:
-        return float(close)
     return None
+
 
 
 def _fetch_price_history_period(

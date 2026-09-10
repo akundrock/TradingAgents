@@ -153,10 +153,20 @@ def test_empty_candles_raise_no_market_data(monkeypatch):
 
 
 @pytest.mark.unit
-def test_internal_candle_value_prefers_close_then_bar_midpoint():
+def test_internal_candle_value_prefers_close_then_two_sided_midpoint():
+    # A real close always wins.
     assert schwab._internal_candle_value({"close": 120.0, "high": 200.0, "low": 100.0}) == 120.0
+    # Both sides populated: the bar midpoint is an unbiased in-bar estimate.
     assert schwab._internal_candle_value({"close": 0.0, "high": 200.0, "low": 100.0}) == 150.0
-    assert schwab._internal_candle_value({"close": 0.0, "high": 81.0, "low": 0.0}) == 81.0
+    # Schwab's live defect: close=0 (or absent) with only ONE side populated.
+    # Substituting the bar maximum is positive-biased for oscillating readings
+    # like $TICK (a bar's high can never read below zero), so these are unknown.
+    assert schwab._internal_candle_value({"close": 0.0, "high": 339.0, "low": 0.0}) is None
+    assert schwab._internal_candle_value({"close": None, "high": 81.0, "low": 0.0}) is None
+    assert schwab._internal_candle_value({"close": 0.0}) is None
+    # A candle with no usable fields is unknown, never 0.0.
+    assert schwab._internal_candle_value({"close": 0.0, "high": 0.0, "low": 0.0}) is None
+
 
 
 @pytest.mark.unit
