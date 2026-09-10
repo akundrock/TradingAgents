@@ -236,3 +236,28 @@ def _vold_read(snapshot: MesSnapshot) -> str:
     if slope < 0:
         return f"falling{z_hint}"
     return f"flat{z_hint}"
+
+
+def format_internals_status(snapshot: MesSnapshot) -> str | None:
+    """Compact $ADD/$TICK/$VOLD status for the radar panel (plain text).
+
+    Returns ``None`` when none of the three internals publish, which the CLI
+    renders as "internals unavailable". Segments report "unavailable"
+    individually so a partial feed stays visible.
+    """
+    add, tick, vold = snapshot.add, snapshot.tick, snapshot.vold
+    if add is None and tick is None and vold is None:
+        return None
+    if tick is None:
+        tick_seg = "TICK unavailable"
+    else:
+        tick_seg = f"TICK {tick:+.0f} (thr ±{snapshot.tick_effective_threshold():.0f})"
+    add_seg = "ADD unavailable" if add is None else f"ADD {add:+.0f}"
+    if vold is None:
+        vold_seg = "VOLD unavailable"
+    else:
+        vold_seg = f"VOLD {vold:+.0f}"
+        slope = snapshot.vold_slope()
+        if slope is not None:
+            vold_seg += f" slope {slope:+.0f}"
+    return "  ".join([tick_seg, add_seg, vold_seg])

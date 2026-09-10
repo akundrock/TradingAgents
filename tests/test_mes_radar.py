@@ -14,6 +14,7 @@ from tradingagents.mes.radar import (
     _missing_items,
     build_proximity,
 )
+from tradingagents.mes.render import format_internals_status
 from tests.mes_factories import (
     DEFAULT_AS_OF,
     make_mes_series,
@@ -465,3 +466,36 @@ def test_near_level_true_when_price_close_to_vwap():
     # Default band: min(4.0, 6.0) = 4.0; VWAP is 2.0 pts away → within band
     report = build_proximity(snap, result)
     assert report.near_level
+
+
+# ---------------------------------------------------------------------------
+# Internals status line (render.format_internals_status)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_internals_status_formats_all_three():
+    snap = _make_snapshot()
+    line = format_internals_status(snap)
+    assert line is not None
+    assert line.startswith("TICK +100 (thr ±")
+    assert "ADD +300" in line
+    assert "VOLD +1000 slope +0" in line
+
+
+@pytest.mark.unit
+def test_internals_status_none_when_all_missing():
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    assert format_internals_status(snap) is None
+
+
+@pytest.mark.unit
+def test_internals_status_marks_unavailable_segments():
+    spy = make_spy_series(internals=[(None, 250.0, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "TICK +250 (thr ±" in line
+    assert "ADD unavailable" in line
+    assert "VOLD unavailable" in line
