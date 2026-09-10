@@ -4,7 +4,10 @@ import pandas as pd
 import pytest
 
 from tradingagents.dataflows import schwab
+from tradingagents.dataflows import schwab_quotes
 from tradingagents.dataflows.errors import NoMarketDataError
+from tradingagents.dataflows.schwab_quotes import EquityQuote
+
 
 SESSION_START = datetime(2026, 3, 30, 9, 30)
 AS_OF = datetime(2026, 3, 30, 10, 0)
@@ -337,3 +340,75 @@ def test_get_market_internals_returns_annotated_csv(recorded_calls, monkeypatch)
     assert "# Total records: 6" in text
     assert "Date,add,tick,vold" in text
     assert "1200.0" in text
+
+
+@pytest.mark.unit
+def test_get_internals_frame_drops_unreadable_candles_and_backfills_last_bar(
+    monkeypatch,
+):
+    """A defective $TICK candle feed must never fabricate a value from `high`."""
+
+    def fake_fetch(*, symbol, start_dt, end_dt, frequency_type, frequency):
+        candles = _candles(symbol, count=3)
+        if symbol == "$TICK":
+            # Schwab's live defect: close=0 and low=0 with only `high` populated.
+            for candle in candles:
+                candle.update({"close": 0.0, "high": 339.0, "low": 0.0})
+        return candles
+
+    monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_fetch)
+    monkeypatch.setattr(
+        schwab,
+        "_fetch_price_history_period",
+        lambda **kwargs: (_ for _ in ()).throw(
+            NoMarketDataError("$TICK", "$TICK", "period disabled")
+        ),
+    )
+
+    def fake_get_quotes(symbols):
+        return {
+            symbol: EquityQuote(symbol=symbol, last_price=-183.0)
+            for symbol in symbols
+        }
+
+    monkeypatch.setattr(schwab_quotes, "get_quotes", fake_get_quotes)
+    monkeypatch.setattr(schwab, "_backfill_internals_from_streamer", lambda frame: frame)
+
+    frame = schwab.get_internals_frame(SESSION_START, AS_OF, "5m")
+
+    # Defective history is unknown (NaN) — never the fabricated candle highs.
+    assert frame["tick"].iloc[:-1].isna().all()
+    # The last bar carries the true live quote, matching the TOS panel,
+    # and valid candle closes are never overwritten by quotes.
+    assert frame["tick"].iloc[-1] == -183.0
+    assert frame["add"].iloc[-1] == 1202.0
+    assert frame["vold"].iloc[-1] == 4_500_002.0
+
+
+@pytest.mark.unit
+def test_quote_backfill_never_overrides_a_valid_candle_close(monkeypatch):
+    monkeypatch.setattr(
+        schwab_quotes,
+        "get_quotes",
+        lambda symbols: {
+            symbol: EquityQuote(symbol=symbol, last_price=-999.0)
+            for symbol in symbols
+        },
+    )
+    frame = pd.DataFrame(
+        {
+            "Date": [
+                pd.Timestamp(SESSION_START),
+                pd.Timestamp(SESSION_START) + pd.Timedelta(minutes=5),
+            ],
+            "add": [1200.0, 1210.0],
+            "tick": [650.0, 655.0],
+            "vold": [4_500_000.0, 4_510_000.0],
+        }
+    )
+    patched = schwab._backfill_internals_from_quotes(frame, session_start=SESSION_START)
+    assert patched["tick"].iloc[-1] == 655.0
+    assert patched["add"].iloc[-1] == 1210.0
+    assert patched["vold"].iloc[-1] == 4_510_000.0
+
+
