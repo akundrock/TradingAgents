@@ -222,5 +222,9 @@ __marimo__/
 .env.enterprise
 reports/
 
+
 # Local trade exports (not part of the repo)
 mes-order-history.csv
+
+# Git worktrees (isolated dev workspaces)
+.worktrees/
