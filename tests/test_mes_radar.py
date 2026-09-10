@@ -499,3 +499,48 @@ def test_internals_status_marks_unavailable_segments():
     assert "TICK +250 (thr ±" in line
     assert "ADD unavailable" in line
     assert "VOLD unavailable" in line
+
+
+# ---------------------------------------------------------------------------
+# Snapshot warnings + internals status on ProximityReport
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_warnings_carried_from_snapshot():
+    snap = _make_snapshot()
+    snap.warnings = ["$TICK data sparse: only 2/78 5m bars readable"]
+    report = build_proximity(snap, _make_result())
+    assert report.warnings == ["$TICK data sparse: only 2/78 5m bars readable"]
+
+
+@pytest.mark.unit
+def test_warnings_is_a_copy_not_a_live_reference():
+    snap = _make_snapshot()
+    snap.warnings = ["first"]
+    report = build_proximity(snap, _make_result())
+    snap.warnings.append("appended later")
+    assert report.warnings == ["first"]
+
+
+@pytest.mark.unit
+def test_warnings_empty_by_default():
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    assert report.warnings == []
+
+
+@pytest.mark.unit
+def test_internals_status_carried_on_report():
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    assert report.internals_status is not None
+    assert report.internals_status.startswith("TICK +100 (thr ±")
+
+
+@pytest.mark.unit
+def test_report_internals_status_none_when_all_missing():
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    report = build_proximity(snap, _make_result())
+    assert report.internals_status is None
