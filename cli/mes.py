@@ -537,6 +537,12 @@ def _render_radar(report: ProximityReport, as_of: datetime) -> Table:
     # ---- State banner ----
     outer.add_row(Text.from_markup(f"[{state_style}]{state_label}[/{state_style}]"))
 
+    # ---- Internals status ----
+    if report.internals_status is not None:
+        outer.add_row(Text.from_markup(f"  [dim]internals:[/dim] {report.internals_status}"))
+    else:
+        outer.add_row(Text.from_markup("  [dim]internals unavailable[/dim]"))
+
     # ---- Gates / blockers ----
     if not report.gates_ok:
         for r in report.gate_reasons:
@@ -551,6 +557,10 @@ def _render_radar(report: ProximityReport, as_of: datetime) -> Table:
         more = len(report.missing_items) - 4
         suffix = f" (+{more} more)" if more > 0 else ""
         outer.add_row(Text.from_markup(f"  [yellow]need:[/yellow] {items_txt}{suffix}"))
+
+    # ---- Snapshot data warnings ----
+    for warning in report.warnings:
+        outer.add_row(Text.from_markup(f"  [yellow]warn:[/yellow] {warning}"))
 
     # ---- Level tape ----
     if report.levels_above or report.levels_below:
@@ -596,7 +606,9 @@ def radar(
 ):
     """Compact live proximity view: how close is a valid MES trade entry?
 
-    Runs without the LLM gatekeeper and does not write to the journal.
+    Shows the live $ADD/$TICK/$VOLD readings and any snapshot data warnings
+    (e.g. sparse $TICK coverage) alongside the setup state. Runs without the
+    LLM gatekeeper and does not write to the journal.
     When state is READY or AT_LEVEL_MISSING_CONFLUENCE, run `mes check` for the
     full gatekeeper verdict.
 

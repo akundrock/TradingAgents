@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
+import io
 
+import pytest
+from rich.console import Console
+from typer.testing import CliRunner
+
+from cli import mes as mes_cli
 from tradingagents.mes.checklist import CheckItem, ChecklistResult
 from tradingagents.mes.radar import (
     LevelDistance,
@@ -21,6 +26,15 @@ from tests.mes_factories import (
     make_snapshot,
     make_spy_series,
 )
+
+radar_runner = CliRunner()
+
+
+def _render_table_to_text(table) -> str:
+    """Render a Rich table/grid to plain text for substring assertions."""
+    console = Console(file=io.StringIO(), width=160, legacy_windows=False)
+    console.print(table)
+    return console.file.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +558,54 @@ def test_report_internals_status_none_when_all_missing():
     snap = make_snapshot(spy=spy)
     report = build_proximity(snap, _make_result())
     assert report.internals_status is None
+
+
+# ---------------------------------------------------------------------------
+# Radar panel rendering: internals status + snapshot warnings
+# ---------------------------------------------------------------------------
+
+
+def _invoke_radar(snapshot, monkeypatch):
+    from tests.mes_factories import DEFAULT_AS_OF
+
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: DEFAULT_AS_OF)
+    return radar_runner.invoke(mes_cli.mes_app, ["radar", "--no-watch"])
+
+
+@pytest.mark.unit
+def test_radar_panel_shows_internals_status(monkeypatch):
+    snap = _make_snapshot()
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "internals:" in result.output
+    assert "TICK +100" in result.output
+    assert "ADD +300" in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_shows_snapshot_warnings(monkeypatch):
+    snap = _make_snapshot()
+    snap.warnings = ["$TICK data sparse: only 2/78 5m bars readable"]
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "warn:" in result.output
+    assert "$TICK data sparse" in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_internals_unavailable_row(monkeypatch):
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(mes=make_mes_series(), spy=spy)
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "internals unavailable" in result.output
+    assert "warn:" not in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_renders_report_without_warnings_cleanly(monkeypatch):
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    text = _render_table_to_text(mes_cli._render_radar(report, snap.as_of))
+    assert "warn:" not in text
