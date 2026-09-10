@@ -110,11 +110,15 @@ def compute_rrs(
     benchmark_df: pd.DataFrame,
     length: int = 12,
 ) -> float:
-    """Real Relative Strength vs benchmark (ThinkScript SMBD / Comparative RS)."""
+    """Real Relative Strength vs benchmark (ThinkScript SMBD / Comparative RS).
+
+    Returns NaN when there is insufficient data (< length+2 bars) or either ATR
+    is zero — a missing reading must not be mistaken for a neutral 0.0.
+    """
     sym = _normalize_columns(symbol_df)
     bench = _normalize_columns(benchmark_df)
     if len(sym) < length + 2 or len(bench) < length + 2:
-        return 0.0
+        return float("nan")
 
     sym_close = sym["Close"]
     bench_close = bench["Close"]
@@ -133,7 +137,7 @@ def compute_rrs(
     compared_atr_val = float(compared_atr.iloc[-1])
     symbol_atr_val = float(symbol_atr.iloc[-1])
     if compared_atr_val == 0 or symbol_atr_val == 0:
-        return 0.0
+        return float("nan")
 
     power_index = compared_move / compared_atr_val
     expected_move = power_index * symbol_atr_val

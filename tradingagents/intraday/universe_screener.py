@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Literal
@@ -68,21 +70,39 @@ def _sort_screened_results(results: list[ScreenedSymbol], config: dict) -> None:
     direction = str(config.get("intraday_screener_direction", "long"))
     rank_by = str(config.get("intraday_screener_rank_by", "magnitude")).strip().lower()
 
+    def _safe_score(value: float) -> float:
+        # NaN rank scores (insufficient RRS data) must sort deterministically
+        # last within their alignment tier, not poison tuple comparisons.
+        return 0.0 if math.isnan(value) else value
+
+    if direction == "both":
+        # Rank each side independently: longs best-first (high score), shorts
+        # best-first (most negative score). Longs keep their section before
+        # shorts so the round-robin merge in _merge_watchlist consumes each
+        # side's best-first. Non-long/short entries keep their relative order.
+        longs = [s for s in results if s.direction == "long"]
+        shorts = [s for s in results if s.direction == "short"]
+        others = [s for s in results if s.direction not in ("long", "short")]
+        if rank_by == "aligned":
+            longs.sort(key=lambda s: (s.aligned_count, _safe_score(s.rank_score)), reverse=True)
+            shorts.sort(key=lambda s: (s.aligned_count, -_safe_score(s.rank_score)), reverse=True)
+        else:
+            longs.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count), reverse=True)
+            shorts.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count))
+        results[:] = longs + shorts + others
+        return
+
     if rank_by == "aligned":
         if direction == "short":
-            results.sort(key=lambda s: (s.aligned_count, -s.rank_score), reverse=True)
-        elif direction == "both":
-            results.sort(key=lambda s: (s.aligned_count, abs(s.rank_score)), reverse=True)
+            results.sort(key=lambda s: (s.aligned_count, -_safe_score(s.rank_score)), reverse=True)
         else:
-            results.sort(key=lambda s: (s.aligned_count, s.rank_score), reverse=True)
+            results.sort(key=lambda s: (s.aligned_count, _safe_score(s.rank_score)), reverse=True)
         return
 
     if direction == "short":
-        results.sort(key=lambda s: (s.rank_score, s.aligned_count))
-    elif direction == "both":
-        results.sort(key=lambda s: abs(s.rank_score), reverse=True)
+        results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count))
     else:
-        results.sort(key=lambda s: (s.rank_score, s.aligned_count), reverse=True)
+        results.sort(key=lambda s: (_safe_score(s.rank_score), s.aligned_count), reverse=True)
 
 
 class UniverseScreener:
@@ -252,6 +272,7 @@ class UniverseScreener:
 
         filtered: list[ScreenerCandidate] = []
         reject_price = 0
+        reject_price_missing = 0
         reject_sp500 = 0
         reject_samples: list[str] = []
 
@@ -262,7 +283,12 @@ class UniverseScreener:
                 if len(reject_samples) < 8:
                     reject_samples.append(f"{symbol} not_sp500")
                 continue
-            if min_price > 0 and candidate.last_price > 0 and candidate.last_price < min_price:
+            if min_price > 0 and candidate.last_price <= 0:
+                reject_price_missing += 1
+                if len(reject_samples) < 8:
+                    reject_samples.append(f"{symbol} price_missing")
+                continue
+            if min_price > 0 and candidate.last_price < min_price:
                 reject_price += 1
                 if len(reject_samples) < 8:
                     reject_samples.append(
@@ -271,10 +297,13 @@ class UniverseScreener:
                 continue
             filtered.append(candidate)
 
-        if reject_price == 0 and reject_sp500 == 0:
+        if reject_price == 0 and reject_price_missing == 0 and reject_sp500 == 0:
             return filtered, ""
 
-        summary = f"rejected price<{min_price:.2f}={reject_price} not_sp500={reject_sp500}"
+        summary = (
+            f"rejected price<{min_price:.2f}={reject_price} "
+            f"price_missing={reject_price_missing} not_sp500={reject_sp500}"
+        )
         if reject_samples:
             summary += f"; samples: {', '.join(reject_samples)}"
         return filtered, summary
@@ -430,7 +459,18 @@ class UniverseScreener:
         *,
         screener_first: bool,
     ) -> list[str]:
-        screened_symbols = [s.symbol for s in screened]
+        if self.config.get("intraday_screener_direction") == "both":
+            # Interleave longs and shorts round-robin so neither side is
+            # crowded out when the watchlist cap is hit on lopsided days.
+            # Each side is already ranked by _sort_screened_results.
+            longs = [s.symbol for s in screened if s.direction == "long"]
+            shorts = [s.symbol for s in screened if s.direction == "short"]
+            interleaved: list[str] = []
+            for pair in itertools.zip_longest(longs, shorts):
+                interleaved.extend(s for s in pair if s)
+            screened_symbols = interleaved
+        else:
+            screened_symbols = [s.symbol for s in screened]
         if screener_first:
             merged = self._dedupe_symbols(screened_symbols + base_watchlist)
         else:

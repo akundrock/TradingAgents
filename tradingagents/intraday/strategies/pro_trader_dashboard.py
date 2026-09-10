@@ -115,16 +115,28 @@ class ProTraderDashboardStrategy:
         mtf: MTFValidationResult,
         daily_bias: DailyBiasReport,
         config: dict[str, Any] | None = None,
+        preferred_direction: str | None = None,
     ) -> StrategyResult:
         ctx = self._build_context(symbol, mtf, daily_bias, config)
-        long_result = self._evaluate_long(symbol, mtf, daily_bias, ctx, config)
-        if long_result.passed:
-            return long_result
-        short_result = self._evaluate_short(symbol, mtf, daily_bias, ctx, config)
-        if short_result.passed:
-            return short_result
+        # Screener hint: evaluate the preferred side first so its diagnostics
+        # win when both sides fail; a passing preferred side is returned
+        # immediately. Order only matters when both sides pass or both fail.
+        if preferred_direction == "short":
+            first, second = (
+                self._evaluate_short(symbol, mtf, daily_bias, ctx, config),
+                self._evaluate_long(symbol, mtf, daily_bias, ctx, config),
+            )
+        else:
+            first, second = (
+                self._evaluate_long(symbol, mtf, daily_bias, ctx, config),
+                self._evaluate_short(symbol, mtf, daily_bias, ctx, config),
+            )
+        if first.passed:
+            return first
+        if second.passed:
+            return second
         # Report the side that came closest so gate diagnostics stay actionable.
-        closer = min(long_result, short_result, key=lambda r: len(r.factors_missing))
+        closer = min(first, second, key=lambda r: len(r.factors_missing))
         return StrategyResult(
             passed=False,
             direction="none",
@@ -219,6 +231,11 @@ class ProTraderDashboardStrategy:
     ) -> StrategyResult:
         met, missing = self._long_conditions(symbol, mtf, daily_bias, ctx, config)
         passed = len(missing) == 0
+        if not passed and _resolve_sector_mode(config) != "off" and ctx.sector_etf is None:
+            # Unknown sector (no ETF mapping): lenient mode skips the gate, but
+            # say so in diagnostics. Appended after the pass check so it can
+            # never block a setup on its own.
+            missing.append("sector_unknown")
         return StrategyResult(
             passed=passed,
             direction="long" if passed else "none",
@@ -237,6 +254,11 @@ class ProTraderDashboardStrategy:
     ) -> StrategyResult:
         met, missing = self._short_conditions(symbol, mtf, daily_bias, ctx, config)
         passed = len(missing) == 0
+        if not passed and _resolve_sector_mode(config) != "off" and ctx.sector_etf is None:
+            # Unknown sector (no ETF mapping): lenient mode skips the gate, but
+            # say so in diagnostics. Appended after the pass check so it can
+            # never block a setup on its own.
+            missing.append("sector_unknown")
         return StrategyResult(
             passed=passed,
             direction="short" if passed else "none",

@@ -396,6 +396,7 @@ def update_intraday_display(
         watchlist_table.add_column("RRS 30m", justify="right")
         watchlist_table.add_column("RRS 60m", justify="right")
         watchlist_table.add_column("Rank", justify="right")
+        watchlist_table.add_column("Dir")
     else:
         watchlist_table.add_column("G1", justify="center")
         watchlist_table.add_column("G2", justify="center")
@@ -412,6 +413,12 @@ def update_intraday_display(
         bias_cell = f"[{_bias_style(bias_dir)}]{bias_dir}[/]" if bias or scan is not None else "—"
         if buffer.rrs_mode:
             rrs_snap = session.screener_snapshots.get(symbol)
+            direction = (rrs_snap.get("direction") if rrs_snap else None) or "—"
+            dir_cell = (
+                f"[green]long[/green]"
+                if direction == "long"
+                else f"[red]short[/red]" if direction == "short" else "—"
+            )
             watchlist_table.add_row(
                 _symbol_cell(marker, symbol),
                 source[:4],
@@ -420,6 +427,7 @@ def update_intraday_display(
                 _format_rrs(rrs_snap.get("rrs_30m") if rrs_snap else None),
                 _format_rrs(rrs_snap.get("rrs_60m") if rrs_snap else None),
                 _format_rrs(rrs_snap.get("rank_score") if rrs_snap else None),
+                dir_cell,
                 scan.bar_time.strftime("%H:%M") if scan is not None else "—",
             )
         elif scan is not None:

@@ -15,6 +15,10 @@ from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
 )
+from tradingagents.agents.utils.profile_prompt import (
+    SWING_PM_ROLE_LINE,
+    append_trade_profile_block,
+)
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -62,6 +66,10 @@ def create_portfolio_manager(llm):
 ---
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
+
+        profile_block = (state.get("intraday_context") or {}).get("trade_profile", {}).get("block")
+        if profile_block:
+            prompt = append_trade_profile_block(prompt, profile_block, SWING_PM_ROLE_LINE)
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,

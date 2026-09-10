@@ -5,9 +5,11 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pytest
+from unittest.mock import MagicMock, patch
 
 from tradingagents.intraday.mtf_validator import MTFValidationResult
 from tradingagents.intraday.session import DailyBiasReport
+from tradingagents.intraday.strategy import StrategyResult
 from tradingagents.intraday.strategies import get_strategy
 from tradingagents.intraday.strategies.pro_trader_dashboard import ProTraderDashboardStrategy
 
@@ -395,3 +397,98 @@ def test_pro_trader_volume_pressure_config_defaults():
     assert DEFAULT_CONFIG["pro_trader_min_sell_percent"] == 55.0
     assert DEFAULT_CONFIG["pro_trader_require_price_volume_trend"] is False
     assert DEFAULT_CONFIG["pro_trader_min_premarket_volume"] == 0
+
+
+@pytest.mark.unit
+def test_pro_trader_hint_changes_evaluation_order():
+    """preferred_direction='short' must evaluate _evaluate_short before
+    _evaluate_long (observable via call order)."""
+    strategy = ProTraderDashboardStrategy()
+    call_order: list[str] = []
+
+    def _track(side):
+        def _inner(*args, **kwargs):
+            call_order.append(side)
+            return StrategyResult(
+                passed=False,
+                direction="none",
+                reason=f"{side} blocked",
+                factors_met=[],
+                factors_missing=["x"],
+            )
+
+        return _inner
+
+    with patch.object(strategy, "_evaluate_long", side_effect=_track("long")), \
+         patch.object(strategy, "_evaluate_short", side_effect=_track("short")):
+        strategy.check_setup(
+            "NVDA", _pro_trader_mtf(), _bias("bearish"), config={}, preferred_direction="short"
+        )
+    assert call_order == ["short", "long"]
+
+
+@pytest.mark.unit
+def test_pro_trader_direction_hint_falls_back_without_hint():
+    """Without a hint, long is evaluated first — a long-passing fixture must
+    return direction='long'."""
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 1,
+        "pro_trader_require_sector_alignment": False,
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    result = strategy.check_setup("NVDA", _pro_trader_mtf(), _bias("bullish"), config=config)
+    assert result.passed, f"expected long pass, got missing={result.factors_missing}"
+    assert result.direction == "long"
+
+
+@pytest.mark.unit
+def test_pro_trader_direction_hint_reports_preferred_side_diagnostics():
+    """When both sides fail with equal-length missing lists, the hint decides
+    which side's diagnostics are reported: hint=short reports the short side's
+    factors_missing; no hint reports the long side's."""
+    strategy = ProTraderDashboardStrategy()
+    mtf = _pro_trader_mtf()
+
+    def _long_cond(symbol, mtf, daily_bias, ctx, config):
+        return ["f1"], ["long_only", "rs_timeframes_aligned"]
+
+    def _short_cond(symbol, mtf, daily_bias, ctx, config):
+        return ["f1"], ["short_only", "rs_timeframes_aligned"]
+
+    # _evaluate_* reads ctx.sector_etf (Task 7 diagnostic), so stub the context
+    # with a MagicMock instead of None — never an unknown-sector scenario.
+    with patch.object(strategy, "_build_context", return_value=MagicMock()), \
+         patch.object(strategy, "_long_conditions", side_effect=_long_cond), \
+         patch.object(strategy, "_short_conditions", side_effect=_short_cond):
+        hinted = strategy.check_setup(
+            "NVDA", mtf, _bias("bearish"), config={}, preferred_direction="short"
+        )
+        no_hint = strategy.check_setup("NVDA", mtf, _bias("bearish"), config={})
+
+    assert hinted.factors_missing == ["short_only", "rs_timeframes_aligned"]
+    assert no_hint.factors_missing == ["long_only", "rs_timeframes_aligned"]
+
+
+@pytest.mark.unit
+def test_unknown_sector_reports_sector_unknown_in_missing():
+    """A symbol with no sector mapping must surface 'sector_unknown' in the
+    missing-factors diagnostics when the setup fails, so logs explain why the
+    sector check was skipped. It must never block a passing setup."""
+    strategy = ProTraderDashboardStrategy()
+    config = {
+        "pro_trader_min_rs_timeframes": 5,  # unreachable: force both sides to fail
+        "pro_trader_require_sector_alignment": True,
+        "pro_trader_sector_alignment_mode": "lenient",
+        "pro_trader_require_relative_volume": False,
+        "pro_trader_require_daily_rrs": False,
+    }
+    mtf = _pro_trader_mtf()
+    with patch(
+        "tradingagents.intraday.strategies.pro_trader_dashboard.get_sector_etf",
+        return_value=None,
+    ):
+        result = strategy.check_setup("NVDA", mtf, _bias("bullish"), config=config)
+    assert not result.passed
+    assert "sector_unknown" in result.factors_missing

@@ -150,8 +150,8 @@ def test_universe_screener_rrs_filter(monkeypatch):
 
     mock_screener = MagicMock()
     mock_screener.fetch_top_symbols.return_value = [
-        ScreenerCandidate(symbol="NVDA", total_volume=1000000, volume=50000),
-        ScreenerCandidate(symbol="AAPL", total_volume=800000, volume=40000),
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=1000000, volume=50000),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=800000, volume=40000),
     ]
 
     _patch_5m_candles(monkeypatch)
@@ -193,8 +193,8 @@ def test_universe_screener_rrs_filter_default_timeframes_include_30m(monkeypatch
 
     mock_screener = MagicMock()
     mock_screener.fetch_top_symbols.return_value = [
-        ScreenerCandidate(symbol="NVDA", total_volume=1000000, volume=50000),
-        ScreenerCandidate(symbol="AAPL", total_volume=800000, volume=40000),
+        ScreenerCandidate(symbol="NVDA", last_price=120.0, total_volume=1000000, volume=50000),
+        ScreenerCandidate(symbol="AAPL", last_price=190.0, total_volume=800000, volume=40000),
     ]
 
     _patch_5m_candles(monkeypatch)
@@ -475,3 +475,41 @@ def test_universe_screener_sp500_rs_quotes_source(monkeypatch):
 
     assert "FAST" in watchlist
     assert len(screened) >= 1
+
+
+@pytest.mark.unit
+def test_zero_price_quote_is_rejected():
+    """A quote with last_price == 0 (missing quote) must be rejected, not
+    silently passed through the min-price gate."""
+    from tradingagents.dataflows.schwab_streamer import ScreenerCandidate
+    from tradingagents.intraday.universe_screener import UniverseScreener
+
+    config = {"intraday_screener_min_price": 10.0, "intraday_screener_require_sp500": False}
+    screener = UniverseScreener(config)
+    candidates = [
+        ScreenerCandidate(symbol="GOOD", last_price=50.0, total_volume=1000),
+        ScreenerCandidate(symbol="ZERO", last_price=0.0, total_volume=1000),
+        ScreenerCandidate(symbol="CHEAP", last_price=5.0, total_volume=1000),
+    ]
+    filtered, summary = screener._filter_volume_candidates(candidates)
+
+    assert [c.symbol for c in filtered] == ["GOOD"]
+    assert "price_missing=1" in summary
+
+
+@pytest.mark.unit
+def test_screener_tf_set_is_superset_of_strategy_effective_timeframes():
+    """Screener RRS alignment must cover every TF the strategy checks, else a
+    screener pass would not imply strategy rs_timeframes_aligned on the same
+    data."""
+    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.intraday.frame_enrichment import effective_requested_timeframes
+
+    fetch_tfs, need_60m = effective_requested_timeframes(DEFAULT_CONFIG)
+    strategy_tfs = set(fetch_tfs) | ({60} if need_60m else set())
+    screener_tfs = set(DEFAULT_CONFIG["intraday_screener_rrs_timeframes"])
+    missing = strategy_tfs - screener_tfs
+    assert not missing, (
+        f"strategy needs TFs {sorted(missing)} that the screener doesn't score; "
+        "a screener pass would not guarantee strategy rs_timeframes_aligned"
+    )

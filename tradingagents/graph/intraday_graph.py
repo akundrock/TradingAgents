@@ -23,6 +23,7 @@ from tradingagents.intraday.gating import GateResult
 from tradingagents.intraday.mtf_validator import MTFValidationResult
 from tradingagents.intraday.session import DailyBiasReport, IntradaySignal
 from tradingagents.intraday.strategy import StrategyResult
+from tradingagents.intraday.trade_profile import build_trade_profile, render_trade_profile
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -96,6 +97,34 @@ class IntradayTradingGraph:
     ) -> IntradaySignal:
         trade_date = bar_time.strftime("%Y-%m-%d")
         init_state = self.propagator.create_initial_state(symbol, trade_date)
+        intraday_context = {
+            "scan_time": bar_time.isoformat(),
+            "mtf_5min_snapshot": mtf.snapshot_5min,
+            "mtf_30min_snapshot": mtf.snapshot_30min,
+            "daily_bias": daily_bias.direction,
+            "daily_bias_report": daily_bias.summary,
+            "trends_aligned": mtf.trends_aligned,
+            "vwap": mtf.vwap_5min,
+            "atr": mtf.atr_5min,
+            "strategy": {
+                "name": strategy_name,
+                "direction": strategy_result.direction,
+                "factors_met": strategy_result.factors_met,
+                "factors_missing": strategy_result.factors_missing,
+                "reason": strategy_result.reason,
+            },
+            "gate_results": {
+                "gate1": gate_result.gate1_strategy,
+                "gate2": gate_result.gate2_mtf_alignment,
+            },
+        }
+        trade_profile = self._build_trade_profile_block(
+            symbol=symbol,
+            strategy_name=strategy_name,
+            direction=strategy_result.direction,
+        )
+        if trade_profile is not None:
+            intraday_context["trade_profile"] = trade_profile
         init_state.update(
             {
                 "market_report": daily_bias.summary,
@@ -104,27 +133,7 @@ class IntradayTradingGraph:
                 "news_report": "",
                 "investment_plan": daily_bias.summary,
                 "magpie_signal": build_default_magpie_signal(enabled=False),
-                "intraday_context": {
-                    "scan_time": bar_time.isoformat(),
-                    "mtf_5min_snapshot": mtf.snapshot_5min,
-                    "mtf_30min_snapshot": mtf.snapshot_30min,
-                    "daily_bias": daily_bias.direction,
-                    "daily_bias_report": daily_bias.summary,
-                    "trends_aligned": mtf.trends_aligned,
-                    "vwap": mtf.vwap_5min,
-                    "atr": mtf.atr_5min,
-                    "strategy": {
-                        "name": strategy_name,
-                        "direction": strategy_result.direction,
-                        "factors_met": strategy_result.factors_met,
-                        "factors_missing": strategy_result.factors_missing,
-                        "reason": strategy_result.reason,
-                    },
-                    "gate_results": {
-                        "gate1": gate_result.gate1_strategy,
-                        "gate2": gate_result.gate2_mtf_alignment,
-                    },
-                },
+                "intraday_context": intraday_context,
             }
         )
 
@@ -140,6 +149,20 @@ class IntradayTradingGraph:
             gate_result=gate_result,
             final_state=final_state,
         )
+
+    def _build_trade_profile_block(
+        self, *, symbol: str, strategy_name: str, direction: str
+    ) -> dict | None:
+        """Swing profile block for pro-trader runs; None when off/other strategy."""
+        if strategy_name != "pro_trader_dashboard":
+            return None
+        profile = build_trade_profile(self.config)
+        if profile is None:
+            return None
+        return {
+            "enabled": True,
+            "block": render_trade_profile(profile, symbol=symbol, direction=direction),
+        }
 
 
 def _state_to_intraday_signal(
@@ -157,6 +180,8 @@ def _state_to_intraday_signal(
 
     entry_price = _extract_float(r"\*\*Entry Price\*\*:\s*([0-9.]+)", trader_plan)
     stop_loss = _extract_float(r"\*\*Stop Loss\*\*:\s*([0-9.]+)", trader_plan)
+    option_structure = _extract_str(r"\*\*Option Structure\*\*:\s*(.+)", trader_plan)
+    hold_horizon_days = _extract_str(r"\*\*Hold Horizon\*\*:\s*(.+)", trader_plan)
 
     action = _resolve_action(trader_plan, pm_decision, direction)
     confidence = (
@@ -178,6 +203,8 @@ def _state_to_intraday_signal(
             f"G1={gate_result.gate1_strategy} G2={gate_result.gate2_mtf_alignment}"
         ),
         reasoning=reasoning,
+        option_structure=option_structure,
+        hold_horizon_days=hold_horizon_days,
     )
 
 
@@ -189,6 +216,11 @@ def _extract_float(pattern: str, text: str) -> float | None:
         return float(match.group(1))
     except ValueError:
         return None
+
+
+def _extract_str(pattern: str, text: str) -> str | None:
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else None
 
 
 def _resolve_action(trader_plan: str, pm_decision: str, direction: str) -> str:

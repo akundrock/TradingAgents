@@ -293,7 +293,7 @@ def test_hourly_rrs_zero_with_session_only_bars():
 
 
 @pytest.mark.unit
-def test_hourly_rrs_insufficient_session_bars_returns_zero():
+def test_hourly_rrs_insufficient_session_bars_returns_nan():
     start = datetime(2026, 7, 27, 9, 30)
     sym = _make_intraday_bars(
         [(100 + i, 101 + i, 99 + i, 100 + i) for i in range(7)],
@@ -307,4 +307,33 @@ def test_hourly_rrs_insufficient_session_bars_returns_zero():
     )
     assert len(sym) < min_rrs_bars()
     assert not has_sufficient_rrs_bars(sym)
-    assert compute_rrs(sym, bench) == 0.0
+    # Insufficient data must yield NaN (not 0.0) so it can't be mistaken for a
+    # neutral-but-valid reading; NaN compares False both ways in alignment counts.
+    assert math.isnan(compute_rrs(sym, bench))
+
+
+@pytest.mark.unit
+def test_compute_rrs_zero_atr_returns_nan():
+    sym = pd.DataFrame(
+        {
+            "High": [100.0] * 20,
+            "Low": [100.0] * 20,
+            "Close": [100.0] * 20,
+        }
+    )
+    bench = pd.DataFrame(
+        {
+            "High": np.linspace(101, 110, 20),
+            "Low": np.linspace(99, 108, 20),
+            "Close": np.linspace(100, 105, 20),
+        }
+    )
+    assert math.isnan(compute_rrs(sym, bench, length=12))
+
+
+@pytest.mark.unit
+def test_count_aligned_rrs_ignores_nan():
+    """NaN RRS values must not count toward either direction's alignment."""
+    rrs = {"5m": float("nan"), "30m": 0.5, "60m": -0.3}
+    assert count_aligned_rrs(rrs, "long") == 1
+    assert count_aligned_rrs(rrs, "short") == 1
