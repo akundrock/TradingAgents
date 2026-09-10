@@ -404,6 +404,44 @@ def session_bounds(as_of: datetime, cfg: MesChecklistConfig) -> tuple[datetime, 
 # warnings and wasted API calls.
 INTERNALS_FIRST_BAR = timedelta(minutes=5)
 
+# Schwab frequently publishes internals candles with close=0; those bars are
+# dropped (never fabricated), so measure how much of the session's $TICK
+# history is actually readable and warn when streak/threshold math runs on a
+# sparse, mostly-carried-forward series.
+_TICK_BAR_SPACING = pd.Timedelta(minutes=5)
+TICK_COVERAGE_MIN_BARS = 4
+TICK_COVERAGE_WARN_RATIO = 0.5
+
+
+def _tick_coverage_warning(
+    internals: pd.DataFrame | None,
+    session_start: datetime,
+    as_of: datetime,
+) -> str | None:
+    """Warn when too few of the session's $TICK bars were readable from Schwab."""
+    if internals is None or internals.empty or "tick" not in internals.columns:
+        return None
+    start = pd.Timestamp(session_start)
+    end = pd.Timestamp(as_of)
+    expected = int((end - start) / _TICK_BAR_SPACING) + 1
+    if expected < TICK_COVERAGE_MIN_BARS:
+        return None
+    known = int(
+        (
+            (internals["Date"] >= start)
+            & (internals["Date"] <= end)
+            & internals["tick"].notna()
+        ).sum()
+    )
+    if known >= expected * TICK_COVERAGE_WARN_RATIO:
+        return None
+    return (
+        f"$TICK data sparse: only {known}/{expected} 5m bars readable from Schwab "
+        "candles (defective close=0 bars are dropped, never fabricated). Tick "
+        "streaks and thresholds may be stale — cross-check the TOS $TICK panel."
+    )
+
+
 
 def build_snapshot(
     as_of: datetime,
@@ -475,7 +513,12 @@ def build_snapshot(
                 "TRADINGAGENTS_MES_ALLOW_MISSING_INTERNALS=true."
             )
             snapshot.warnings = warnings
+        sparse = _tick_coverage_warning(internals, session_start, as_of)
+        if sparse:
+            warnings.append(sparse)
+            snapshot.warnings = warnings
     return snapshot
+
 
 
 def snapshot_from_csv(

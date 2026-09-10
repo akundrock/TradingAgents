@@ -264,6 +264,35 @@ def test_build_snapshot_records_a_warning_when_internals_fail():
 
 
 @pytest.mark.unit
+def test_build_snapshot_warns_when_tick_coverage_is_sparse():
+    cfg = load_mes_config()
+    frame = _internals_frame()
+    # 16 of 20 session bars have no readable $TICK (Schwab close=0 candles).
+    frame.loc[frame.index[4:], "tick"] = pd.NA
+
+    snapshot = build_snapshot(
+        AS_OF,
+        cfg,
+        fetch_bars=lambda *a, **k: _bar_frame(),
+        fetch_internals=lambda *a, **k: frame,
+    )
+
+    # Unreadable bars carry the last KNOWN reading forward (653.0) — never a
+    # fabricated one-sided candle value — and the sparseness is surfaced.
+    assert snapshot.tick == 653.0
+
+    assert any("$TICK data sparse" in w for w in snapshot.warnings)
+
+
+@pytest.mark.unit
+def test_tick_coverage_warning_tolerates_healthy_coverage():
+    from tradingagents.mes.snapshot import _tick_coverage_warning
+
+    start = datetime(2026, 3, 30, 9, 30)
+    assert _tick_coverage_warning(_internals_frame(), start, AS_OF) is None
+
+
+@pytest.mark.unit
 def test_build_snapshot_raises_when_a_symbol_has_no_bars():
     cfg = load_mes_config()
     empty = pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
