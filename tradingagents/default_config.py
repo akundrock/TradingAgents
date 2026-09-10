@@ -70,6 +70,18 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_INTRADAY_SCREENER_INCLUDE_DAILY_RRS": "intraday_screener_include_daily_rrs",
     "TRADINGAGENTS_INTRADAY_SCREENER_RANK_BY": "intraday_screener_rank_by",
     "TRADINGAGENTS_INTRADAY_SCREENER_DIRECTION": "intraday_screener_direction",
+    "TRADINGAGENTS_INTRADAY_SCREENER_CANDIDATE_LIMIT": "intraday_screener_candidate_limit",
+    "TRADINGAGENTS_INTRADAY_SCREENER_ENABLED": "intraday_screener_enabled",
+    "TRADINGAGENTS_INTRADAY_SCREENER_FILTERS": "intraday_screener_filters",
+    "TRADINGAGENTS_INTRADAY_SCREENER_FILTER_MODE": "intraday_screener_filter_mode",
+    "TRADINGAGENTS_INTRADAY_SCREENER_INTERVAL_MINUTES": "intraday_screener_interval_minutes",
+    "TRADINGAGENTS_INTRADAY_SCREENER_MAX_WATCHLIST": "intraday_screener_max_watchlist",
+    "TRADINGAGENTS_INTRADAY_SCREENER_MIN_RRS_ALIGNED": "intraday_screener_min_rrs_aligned",
+    "TRADINGAGENTS_INTRADAY_SCREENER_RANK_MODE": "intraday_screener_rank_mode",
+    "TRADINGAGENTS_INTRADAY_SCREENER_RANK_RRS_TIMEFRAME": "intraday_screener_rank_rrs_timeframe",
+    "TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_RELATIVE_VOLUME": "intraday_screener_require_relative_volume",
+    "TRADINGAGENTS_INTRADAY_SCREENER_START_TIME": "intraday_screener_start_time",
+    "TRADINGAGENTS_INTRADAY_SCREENER_SYMBOL_COOLDOWN_MINUTES": "intraday_screener_symbol_cooldown_minutes",
 }
 
 

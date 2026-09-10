@@ -189,6 +189,30 @@ def test_pro_trader_volume_pressure_env_overrides(monkeypatch):
 
 
 @pytest.mark.unit
+def test_screener_env_overrides_registered(monkeypatch):
+    """Screener keys in .env must apply via _ENV_OVERRIDES (not silently ignored)."""
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_INTRADAY_SCREENER_MAX_WATCHLIST="15",
+        TRADINGAGENTS_INTRADAY_SCREENER_MIN_RRS_ALIGNED="3",
+        TRADINGAGENTS_INTRADAY_SCREENER_DIRECTION="both",
+        TRADINGAGENTS_INTRADAY_SCREENER_FILTERS="rrs",
+        TRADINGAGENTS_INTRADAY_SCREENER_CANDIDATE_LIMIT="50",
+        TRADINGAGENTS_INTRADAY_SCREENER_REQUIRE_RELATIVE_VOLUME="false",
+        TRADINGAGENTS_INTRADAY_SCREENER_INTERVAL_MINUTES="15",
+        TRADINGAGENTS_INTRADAY_SCREENER_START_TIME="09:45",
+    )
+    assert dc.DEFAULT_CONFIG["intraday_screener_max_watchlist"] == 15
+    assert dc.DEFAULT_CONFIG["intraday_screener_min_rrs_aligned"] == 3
+    assert dc.DEFAULT_CONFIG["intraday_screener_direction"] == "both"
+    assert dc.DEFAULT_CONFIG["intraday_screener_filters"] == ["rrs"]
+    assert dc.DEFAULT_CONFIG["intraday_screener_candidate_limit"] == 50
+    assert dc.DEFAULT_CONFIG["intraday_screener_require_relative_volume"] is False
+    assert dc.DEFAULT_CONFIG["intraday_screener_interval_minutes"] == 15
+    assert dc.DEFAULT_CONFIG["intraday_screener_start_time"] == "09:45"
+
+
+@pytest.mark.unit
 def test_pro_trader_swing_profile_env_overrides(monkeypatch):
     dc = _reload_with_env(
         monkeypatch,
