@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from tradingagents.dataflows.schwab_streamer import (
     ScreenerCandidate,
@@ -198,3 +201,55 @@ def test_fetch_screener_retries_after_token_login_error():
     assert result == candidates
     assert run_mock.await_count == 2
     refresh_mock.assert_called_once()
+
+
+@pytest.mark.unit
+def test_fetch_internals_quotes_cached_reuses_readings_within_ttl(monkeypatch):
+    import pandas as pd
+
+    from tradingagents.dataflows import schwab, schwab_streamer
+
+    schwab_streamer.clear_internals_backfill_cache()
+    session_start = datetime(2026, 3, 30, 9, 30)
+    as_of = datetime(2026, 3, 30, 10, 0)
+    calls = {"n": 0}
+
+    def fake_streamer(*, timeout_seconds):
+        calls["n"] += 1
+        return {"$TICK": 120.0, "$ADD": 900.0, "$VOLD": 400_000.0}
+
+    monkeypatch.setattr(schwab_streamer, "fetch_internals_quotes", fake_streamer)
+    frame = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp(session_start), pd.Timestamp(as_of)],
+            "add": [1200.0, float("nan")],
+            "tick": [650.0, float("nan")],
+            "vold": [4_500_000.0, 4_500_100.0],
+        }
+    ).set_index("Date")
+
+    out1 = schwab._backfill_internals_from_streamer(frame)
+    out2 = schwab._backfill_internals_from_streamer(frame)
+    assert calls["n"] == 1  # second call inside the TTL reuses the reading
+    assert out1["tick"].iloc[-1] == 120.0
+    assert out2["tick"].iloc[-1] == 120.0
+
+
+
+
+@pytest.mark.unit
+def test_streamer_backfill_cache_expires_and_ignores_empty_readings(monkeypatch):
+    from tradingagents.dataflows import schwab_streamer
+
+    schwab_streamer.clear_internals_backfill_cache()
+    calls = {"n": 0}
+
+    def fake_streamer(*, timeout_seconds):
+        calls["n"] += 1
+        return {}  # streamer found nothing
+
+    monkeypatch.setattr(schwab_streamer, "fetch_internals_quotes", fake_streamer)
+    schwab_streamer.fetch_internals_quotes_cached(timeout_seconds=5.0)
+    schwab_streamer.fetch_internals_quotes_cached(timeout_seconds=5.0)
+    assert calls["n"] == 2  # empty readings are never cached; every poll retries
+

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -575,6 +576,42 @@ def fetch_internals_quotes(*, timeout_seconds: float = 5.0) -> dict[str, float]:
     except Exception as exc:
         logger.warning("Schwab streamer internals fetch failed: %s", exc)
         return {}
+
+
+_STREAMER_INTERNALS_TTL_SECONDS = 60.0
+_streamer_internals_cache: tuple[float, dict[str, float]] | None = None
+
+
+def _streamer_backfill_ttl_seconds() -> float:
+    raw = os.environ.get("TRADINGAGENTS_SCHWAB_STREAMER_TTL_SECONDS", "60")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 60.0
+
+
+def fetch_internals_quotes_cached(*, timeout_seconds: float = 5.0) -> dict[str, float]:
+    """``fetch_internals_quotes`` with a short TTL; reuse the last reading.
+
+    Long-running radar loops re-request internals every poll; a fresh-enough
+    streamer reading beats re-running the full auth+login streaming handshake
+    every 60s. Empty readings are never cached so the next poll retries.
+    """
+    global _streamer_internals_cache
+    now = time.monotonic()
+    if _streamer_internals_cache is not None:
+        cached_at, cached_readings = _streamer_internals_cache
+        if now - cached_at < _streamer_backfill_ttl_seconds():
+            return cached_readings
+    readings = fetch_internals_quotes(timeout_seconds=timeout_seconds)
+    if readings:
+        _streamer_internals_cache = (now, readings)
+    return readings
+
+
+def clear_internals_backfill_cache() -> None:
+    global _streamer_internals_cache
+    _streamer_internals_cache = None
 
 
 class SchwabEquityScreener:

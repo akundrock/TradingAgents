@@ -1168,9 +1168,9 @@ def _backfill_internals_from_streamer(frame: pd.DataFrame) -> pd.DataFrame:
     if not needs_backfill:
         return frame
 
-    from .schwab_streamer import fetch_internals_quotes
+    from .schwab_streamer import fetch_internals_quotes_cached
 
-    readings = fetch_internals_quotes(timeout_seconds=5.0)
+    readings = fetch_internals_quotes_cached(timeout_seconds=5.0)
     if not readings:
         return frame
 
