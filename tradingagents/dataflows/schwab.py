@@ -864,6 +864,16 @@ _VOLD_LARGE_BASELINE_CALIBRATION = 1_209_664.0
 _VOLD_LARGE_BASELINE_THRESHOLD = 1e9
 _VOLD_THOUSANDS_SCALE = 1000.0
 _MAX_INTERNAL_PERIOD_DAYS = 10
+# Static display hints for the provenance labels attached to every internals
+# frame (``frame.attrs["provenance"]`` / ``frame.attrs["backfilled"]``).
+INTERNALS_PROVENANCE_NOTES = {
+    "candles": "Direct $ADD/$TICK/$VOLD candles from Schwab price history (primary source).",
+    "synthetic": "Computed from Schwab component candles ($ADVN-$DECN for $ADD, $UVOL/$DVOL delta for $VOLD).",
+    "none": "No data available for this internal.",
+    "quotes": "Latest bar backfilled from live Schwab quotes.",
+    "synthetic_quote": "Latest bar backfilled from component quotes ($ADVN/$DECN, $UVOL/$DVOL).",
+    "streamer": "Latest bar backfilled from the Schwab streamer.",
+}
 
 
 def _internal_candle_value(candle: dict) -> float | None:
@@ -1095,16 +1105,22 @@ def _fetch_internal_key_series(
 ) -> pd.Series:
     symbol = MARKET_INTERNAL_SYMBOLS[key]
     try:
-        return _fetch_internal_series(symbol, session_start, end_dt, frequency)
+        series = _fetch_internal_series(symbol, session_start, end_dt, frequency)
+        series.attrs["provenance"] = "candles"
+        return series
     except Exception as direct_exc:
         if key == "add":
             try:
-                return _fetch_synthetic_add_series(session_start, end_dt, frequency)
+                synthetic_series = _fetch_synthetic_add_series(session_start, end_dt, frequency)
+                synthetic_series.attrs["provenance"] = "synthetic"
+                return synthetic_series
             except Exception:
                 raise direct_exc
         if key == "vold":
             try:
-                return _fetch_synthetic_vold_series(session_start, end_dt, frequency)
+                synthetic_series = _fetch_synthetic_vold_series(session_start, end_dt, frequency)
+                synthetic_series.attrs["provenance"] = "synthetic"
+                return synthetic_series
             except Exception:
                 raise direct_exc
         raise
@@ -1183,6 +1199,7 @@ def _backfill_internals_from_streamer(frame: pd.DataFrame) -> pd.DataFrame:
         if not pd.isna(current) and current != 0:
             continue
         frame.at[last_idx, key] = float(value)
+        frame.attrs.setdefault("backfilled", {})[key] = "streamer"
     return frame
 
 
@@ -1210,12 +1227,14 @@ def _backfill_internals_from_quotes(
         quote = quotes.get(_normalize_symbol(symbol))
         if quote is not None and quote.last_price != 0:
             frame.at[last_idx, key] = float(quote.last_price)
+            frame.attrs.setdefault("backfilled", {})[key] = "quotes"
             continue
         if session_start is None or key not in {"add", "vold"}:
             continue
         synthetic = _synthetic_internal_quote(key, session_start)
         if synthetic is not None:
             frame.at[last_idx, key] = float(synthetic)
+            frame.attrs.setdefault("backfilled", {})[key] = "synthetic_quote"
     return frame
 
 
@@ -1303,6 +1322,9 @@ def get_internals_frame(
         )
 
     frame = pd.DataFrame(series_by_key)
+    provenance = {key: "none" for key in MARKET_INTERNAL_SYMBOLS}
+    for key, series in series_by_key.items():
+        provenance[key] = str(series.attrs.get("provenance", "candles"))
     for key in MARKET_INTERNAL_SYMBOLS:
         if key not in frame.columns:
             frame[key] = pd.NA
@@ -1310,7 +1332,11 @@ def get_internals_frame(
     frame = _backfill_internals_from_quotes(frame, session_start=session_start)
     frame = _backfill_internals_from_streamer(frame)
     frame.index.name = "Date"
-    return frame.reset_index()
+    final = frame.reset_index()
+    final.attrs["provenance"] = provenance
+    final.attrs["backfilled"] = dict(frame.attrs.get("backfilled", {}))
+    final.index.name = "Date"
+    return final
 
 
 def get_market_internals(

@@ -13,6 +13,11 @@ SESSION_START = datetime(2026, 3, 30, 9, 30)
 AS_OF = datetime(2026, 3, 30, 10, 0)
 
 _VALUES = {"$ADD": 1200.0, "$TICK": 650.0, "$VOLD": 4_500_000.0}
+_VALUES["$ADVN"] = 2_500.0
+_VALUES["$DECN"] = 1_100.0
+_VALUES["$UVOL"] = 350_000.0
+_VALUES["$DVOL"] = 450_000.0
+
 
 
 def _epoch_ms(ts: datetime) -> int:
@@ -528,3 +533,58 @@ def test_price_history_cache_can_be_disabled(monkeypatch):
 )
 def test_bucket_end_rounds_up_to_the_next_boundary(dt, expected):
     assert schwab._bucket_end(dt) == expected
+
+
+# --- provenance metadata on the internals frame -------------------------------
+
+
+@pytest.mark.unit
+def test_direct_candle_values_report_candle_provenance(recorded_calls):
+    frame = schwab.get_internals_frame(SESSION_START, AS_OF, "5m")
+    assert frame.attrs["provenance"] == {"add": "candles", "tick": "candles", "vold": "candles"}
+    assert dict(frame.attrs.get("backfilled", {})) == {}
+    assert len(frame) == 6  # recorded_calls fixture still drives the same candles
+
+
+@pytest.mark.unit
+def test_synthetic_vold_reports_synthetic_provenance(monkeypatch):
+    def fake_range(*, symbol, start_dt, end_dt, frequency_type, frequency):
+        if symbol in ("$TICK", "$UVOL", "$DVOL"):
+            return _candles(symbol)
+        raise NoMarketDataError(symbol, symbol, "no candles")
+
+    def fake_period(*, symbol, period_days, frequency_type, frequency):
+        raise NoMarketDataError(symbol, symbol, "period path disabled in test")
+
+    monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_range)
+    monkeypatch.setattr(schwab, "_fetch_price_history_period", fake_period)
+    monkeypatch.setattr(schwab, "_backfill_internals_from_quotes", lambda frame, session_start=None: frame)
+    monkeypatch.setattr(schwab, "_backfill_internals_from_streamer", lambda frame: frame)
+    frame = schwab.get_internals_frame(SESSION_START, AS_OF, "5m")
+    assert frame.attrs["provenance"]["vold"] == "synthetic"
+    assert frame.attrs["provenance"]["tick"] == "candles"
+
+
+@pytest.mark.unit
+def test_quote_backfill_is_recorded_in_backfilled_attrs(monkeypatch):
+    from types import SimpleNamespace
+
+    quotes = {
+        symbol: SimpleNamespace(last_price=6_000.0)
+        for symbol in ("$ADD", "$TICK", "$VOLD")
+    }
+    monkeypatch.setattr(schwab_quotes, "get_quotes", lambda symbols: quotes)
+    frame = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp(SESSION_START), pd.Timestamp(AS_OF)],
+            "add": [1200.0, float("nan")],
+            "tick": [650.0, float("nan")],
+            "vold": [4_500_000.0, float("nan")],
+        }
+    ).set_index("Date")
+
+    frame = schwab._backfill_internals_from_quotes(frame)
+    assert frame.attrs["backfilled"] == {"add": "quotes", "tick": "quotes", "vold": "quotes"}
+    assert frame["add"].iloc[-1] == 6_000.0
+    assert frame["tick"].iloc[-1] == 6_000.0
+    assert frame["vold"].iloc[-1] == 6_000.0
