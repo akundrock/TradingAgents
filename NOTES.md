@@ -49,3 +49,23 @@ TRADINGAGENTS_INTRADAY_SCREENER_MAX_WATCHLIST=15
 ```
 
 Full plan: `.cursor/plans/rs-focused_screener_637b9df9.plan.md`
+
+# Timestamp 11:30 (radar vs actual)
+# VIX is not represented in internals
+# $VOLD value is too short 540095 vs 61940120
+# VWAP 7660.95 vs 7656.18
+# +2 ATR 7691.17 vs ? (MES_ATR_Range_ length 14)
+# MES_Vwap_deviations_
+
+### Internals cache + provenance (2026-09-11)
+- Price-history responses are cached per 5m bucket with a 120s TTL
+  (`TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS`; 0 disables). Within a 5m
+  bucket every poll reuses one response per (symbol, window); closed bars never
+  change, and the live tail is corrected by the quotes/streamer backfills.
+  Expected: radar drops from ~8-15 price-history calls/poll to 1 cold + 0 warm.
+- Streamer-internals backfill readings are reused for 60s
+  (`TRADINGAGENTS_SCHWAB_STREAMER_TTL_SECONDS`).
+- `get_internals_frame` reports `.attrs["provenance"]`
+  (`candles`/`synthetic`/`none`) and `.attrs["backfilled"]`; snapshot renders
+  show synthetic $VOLD as `Δ… (synthetic)` and warn that its absolute level is
+  not TOS-comparable — trust the delta/z-score, never the level.
