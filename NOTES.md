@@ -69,3 +69,11 @@ Full plan: `.cursor/plans/rs-focused_screener_637b9df9.plan.md`
   (`candles`/`synthetic`/`none`) and `.attrs["backfilled"]`; snapshot renders
   show synthetic $VOLD as `Δ… (synthetic)` and warn that its absolute level is
   not TOS-comparable — trust the delta/z-score, never the level.
+
+### Internals 1m-source aggregation (2026-09-11)
+- `internals_source_interval: "1m"` (config) fetches internals at 1m and keeps
+  each 5m bucket's last good reading; the frame stays 5m-aligned.
+- Motivation (census): 1m candles carried no additional defects and rescue
+  buckets whose 5m candle was defective; $TICK close=0 defects remain possible
+  but a bucket only goes blank when ALL its 1m reads are defective.
+- Provenance/backfill metadata from Plan A is unaffected.
