@@ -115,6 +115,18 @@ def test_get_internals_frame_shape_and_values(recorded_calls, monkeypatch):
 
 
 @pytest.mark.unit
+def test_get_internals_frame_index_stays_unnamed_for_date_merges(recorded_calls):
+    """Snapshot merges bars with internals on ``Date``; a named index that
+    duplicates the ``Date`` column makes pandas raise an ambiguity ValueError."""
+    frame = schwab.get_internals_frame(SESSION_START, AS_OF, "5m")
+    assert frame.index.name is None
+    merged = pd.DataFrame({"Date": frame["Date"]}).merge(
+        frame, on="Date", how="left", suffixes=("", "_internal")
+    )
+    assert len(merged) == len(frame)
+
+
+@pytest.mark.unit
 def test_get_internals_frame_rejects_an_unsupported_interval():
     with pytest.raises(ValueError, match="Unsupported internals interval"):
         schwab.get_internals_frame(SESSION_START, AS_OF, "7m")

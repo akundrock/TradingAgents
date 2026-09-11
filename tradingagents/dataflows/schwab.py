@@ -1335,7 +1335,6 @@ def get_internals_frame(
     final = frame.reset_index()
     final.attrs["provenance"] = provenance
     final.attrs["backfilled"] = dict(frame.attrs.get("backfilled", {}))
-    final.index.name = "Date"
     return final
 
 
