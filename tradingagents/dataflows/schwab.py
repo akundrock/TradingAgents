@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -296,6 +297,64 @@ def _schwab_get_with_retry(
     raise SchwabRateLimitError(rate_limit_message)
 
 
+# --- price-history response cache -------------------------------------------
+# radar/go re-fetch identical candles every 15-60s, but 5m candles only change
+# at the bar boundary. Cache each successful response under a bucketed key so
+# a long-running radar makes one price-history call per symbol per 5m bucket
+# instead of one per poll. Quotes/streamer backfills stay live and keep the
+# freshest bar honest. Failures are never cached. Disable with
+# TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS=0.
+
+
+def _cache_ttl_seconds() -> float:
+    raw = os.environ.get("TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS", "120")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 120.0
+
+
+_PRICE_HISTORY_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+_PRICE_HISTORY_CACHE_MAX_ENTRIES = 256
+_cache_now: Callable[[], float] = time.monotonic
+
+
+def _bucket_end(dt: datetime, *, minutes: int = 5) -> datetime:
+    """Round ``dt`` up to the next bucket boundary (exact boundaries unchanged).
+
+    Naive market wall-clock in, naive market wall-clock out (same convention as
+    ``_naive_market_datetime``).
+    """
+    dt = _naive_market_datetime(dt)
+    floored = dt.replace(minute=(dt.minute // minutes) * minutes, second=0, microsecond=0)
+    if floored < dt:
+        floored = floored + timedelta(minutes=minutes)
+    return floored
+
+
+def clear_price_history_cache() -> None:
+    """Drop every cached price-history response (tests, replays, manual refresh)."""
+    _PRICE_HISTORY_CACHE.clear()
+
+
+def _price_history_cache_get(key: tuple) -> list[dict] | None:
+    entry = _PRICE_HISTORY_CACHE.get(key)
+    if entry is None:
+        return None
+    stored_at, candles = entry
+    if _cache_now() - stored_at > _cache_ttl_seconds():
+        _PRICE_HISTORY_CACHE.pop(key, None)
+        return None
+    return candles
+
+
+def _price_history_cache_put(key: tuple, candles: list[dict]) -> None:
+    if len(_PRICE_HISTORY_CACHE) >= _PRICE_HISTORY_CACHE_MAX_ENTRIES:
+        oldest_key = min(_PRICE_HISTORY_CACHE, key=lambda k: _PRICE_HISTORY_CACHE[k][0])
+        _PRICE_HISTORY_CACHE.pop(oldest_key, None)
+    _PRICE_HISTORY_CACHE[key] = (_cache_now(), candles)
+
+
 def _market_epoch_ms(dt: datetime, timezone: str = "America/New_York") -> int:
     """Convert a naive market wall-clock time to epoch ms in ``timezone``.
 
@@ -321,10 +380,33 @@ def _fetch_price_history_range(
 
     start_dt = _naive_market_datetime(start_dt)
     end_dt = _naive_market_datetime(end_dt)
+    # Bucket the requested end to the next 5m boundary so every poll inside the
+    # same bar shares one cache entry and one HTTP call. The response contains
+    # only bars that existed at fetch time; downstream as_of filtering and the
+    # quote/streamer backfills keep the live tail honest.
+    bucketed_end = _bucket_end(end_dt)
+    # Key on the START of the 5m bucket containing end_dt so every poll inside
+    # one bar — including one landing exactly on the boundary — shares a single
+    # cache entry. (Keying on the ceil-ed bucketed_end would split the bucket:
+    # a poll at exactly 10:00:00 buckets to 10:00 while 10:00:01+ bucket to
+    # 10:05, giving two HTTP calls for one 5m bar.)
+    bucket_start = end_dt.replace(minute=(end_dt.minute // 5) * 5, second=0, microsecond=0)
+    cache_key = (
+        "range",
+        _normalize_symbol(symbol),
+        start_dt,
+        bucket_start,
+        frequency_type,
+        frequency,
+    )
+    cached = _price_history_cache_get(cache_key)
+    if cached is not None:
+        logger.debug("price-history cache hit (range): %s", cache_key)
+        return cached
     params = {
         "symbol": _normalize_symbol(symbol),
         "startDate": _market_epoch_ms(start_dt),
-        "endDate": _market_epoch_ms(end_dt),
+        "endDate": _market_epoch_ms(bucketed_end),
         "frequencyType": frequency_type,
         "frequency": frequency,
         "needExtendedHoursData": True,
@@ -345,6 +427,7 @@ def _fetch_price_history_range(
     candles = payload.get("candles") or []
     if payload.get("empty") or not candles:
         raise NoMarketDataError(symbol, _normalize_symbol(symbol), "Schwab returned no candles")
+    _price_history_cache_put(cache_key, candles)
     return candles
 
 
@@ -822,6 +905,22 @@ def _fetch_price_history_period(
         "frequency": frequency,
         "needExtendedHoursData": True,
     }
+
+    from zoneinfo import ZoneInfo
+
+    et_today = datetime.now(ZoneInfo("America/New_York")).date()
+    cache_key = (
+        "period",
+        params["symbol"],
+        params["period"],
+        frequency_type,
+        frequency,
+        et_today,
+    )
+    cached = _price_history_cache_get(cache_key)
+    if cached is not None:
+        logger.debug("price-history cache hit (period): %s", cache_key)
+        return cached
     response = _schwab_get_with_retry(
         PRICE_HISTORY_URL,
         params,
@@ -836,6 +935,7 @@ def _fetch_price_history_period(
     candles = payload.get("candles") or []
     if payload.get("empty") or not candles:
         raise NoMarketDataError(symbol, _normalize_symbol(symbol), "Schwab returned no candles")
+    _price_history_cache_put(cache_key, candles)
     return candles
 
 

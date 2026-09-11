@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -32,6 +32,17 @@ def _candles(symbol: str, count: int = 6) -> list[dict]:
         }
         for i in range(count)
     ]
+
+
+class _FakeResponse:
+    """Minimal stand-in for a successful price-history HTTP response."""
+
+    def __init__(self, payload: dict):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
 
 
 @pytest.fixture()
@@ -412,3 +423,108 @@ def test_quote_backfill_never_overrides_a_valid_candle_close(monkeypatch):
     assert patched["vold"].iloc[-1] == 4_510_000.0
 
 
+# --- price-history response cache -------------------------------------------
+
+
+@pytest.mark.unit
+def test_price_history_range_reuses_one_http_call_within_a_5m_bucket(monkeypatch):
+    schwab.clear_price_history_cache()
+    calls = {"n": 0}
+
+    def fake_get(url, params, *, rate_limit_message):
+        calls["n"] += 1
+        return _FakeResponse({"candles": _candles("$TICK", 6)})
+
+    monkeypatch.setattr(schwab, "_schwab_get_with_retry", fake_get)
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    schwab._fetch_price_history_range(
+        "$TICK", SESSION_START, AS_OF + timedelta(seconds=90), "minute", 5
+    )
+    assert calls["n"] == 1  # same 5m bucket -> one HTTP call
+
+
+@pytest.mark.unit
+def test_price_history_range_refetches_in_the_next_bucket(monkeypatch):
+    schwab.clear_price_history_cache()
+    calls = {"n": 0}
+
+    def fake_get(url, params, *, rate_limit_message):
+        calls["n"] += 1
+        return _FakeResponse({"candles": [], "empty": True})
+
+    monkeypatch.setattr(schwab, "_schwab_get_with_retry", fake_get)
+    with pytest.raises(NoMarketDataError):
+        schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    with pytest.raises(NoMarketDataError):
+        schwab._fetch_price_history_range(
+            "$TICK", SESSION_START, AS_OF + timedelta(minutes=5, seconds=1), "minute", 5
+        )
+    assert calls["n"] == 2  # different buckets -> separate fetches
+
+
+@pytest.mark.unit
+def test_price_history_cache_expires_after_ttl(monkeypatch):
+    schwab.clear_price_history_cache()
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(schwab, "_cache_now", lambda: clock["now"])
+    calls = {"n": 0}
+
+    def fake_get(url, params, *, rate_limit_message):
+        calls["n"] += 1
+        return _FakeResponse({"candles": _candles("$TICK", 6)})
+
+    monkeypatch.setattr(schwab, "_schwab_get_with_retry", fake_get)
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    assert calls["n"] == 1  # inside the 120s TTL: served from cache
+    clock["now"] += 121.0  # age past the default 120s TTL
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    assert calls["n"] == 2  # expired -> refetched
+
+
+@pytest.mark.unit
+def test_no_market_data_errors_are_not_cached(monkeypatch):
+    schwab.clear_price_history_cache()
+    calls = {"n": 0}
+
+    def fake_get(url, params, *, rate_limit_message):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise NoMarketDataError("$TICK", "$TICK", "Schwab returned no candles")
+        return _FakeResponse({"candles": _candles("$TICK", 6)})
+
+    monkeypatch.setattr(schwab, "_schwab_get_with_retry", fake_get)
+    with pytest.raises(NoMarketDataError):
+        schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    candles = schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    assert len(candles) == 6
+    assert calls["n"] == 2  # the failed fetch was not cached; the retry hit HTTP
+
+
+@pytest.mark.unit
+def test_price_history_cache_can_be_disabled(monkeypatch):
+    schwab.clear_price_history_cache()
+    monkeypatch.setenv("TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS", "0")
+    calls = {"n": 0}
+
+    def fake_get(url, params, *, rate_limit_message):
+        calls["n"] += 1
+        return _FakeResponse({"candles": _candles("$TICK", 6)})
+
+    monkeypatch.setattr(schwab, "_schwab_get_with_retry", fake_get)
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    schwab._fetch_price_history_range("$TICK", SESSION_START, AS_OF, "minute", 5)
+    assert calls["n"] == 2  # TTL 0 disables the cache entirely
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dt", "expected"),
+    [
+        (datetime(2026, 9, 11, 10, 0, 0), datetime(2026, 9, 11, 10, 0)),
+        (datetime(2026, 9, 11, 10, 0, 1), datetime(2026, 9, 11, 10, 5)),
+        (datetime(2026, 9, 11, 10, 4, 59), datetime(2026, 9, 11, 10, 5)),
+    ],
+)
+def test_bucket_end_rounds_up_to_the_next_boundary(dt, expected):
+    assert schwab._bucket_end(dt) == expected
