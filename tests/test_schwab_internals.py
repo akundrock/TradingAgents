@@ -338,7 +338,7 @@ def test_fetch_internal_key_series_falls_back_to_synthetic_add(monkeypatch):
 def test_get_internals_frame_fetches_tick_before_breadth(monkeypatch):
     call_order: list[str] = []
 
-    def fake_fetch(key, session_start, end_dt, frequency):
+    def fake_fetch(key, session_start, end_dt, frequency, source_frequency=None):
         call_order.append(key)
         if key == "tick":
             return pd.Series({pd.Timestamp(SESSION_START): 650.0})
@@ -637,3 +637,51 @@ def test_aggregate_series_returns_the_series_unchanged_when_source_is_not_finer(
     assert schwab._aggregate_series_to_bucket(series, source_minutes=5, target_minutes=5) is series
     assert schwab._aggregate_series_to_bucket(series, source_minutes=15, target_minutes=5) is series
     assert schwab._aggregate_series_to_bucket(series, source_minutes=0, target_minutes=5) is series
+
+
+@pytest.mark.unit
+def test_get_internals_frame_downsamples_a_1m_source_into_5m_buckets(monkeypatch):
+    def fake_range(*, symbol, start_dt, end_dt, frequency_type, frequency):
+        assert frequency == 1, "the source granularity must reach the HTTP fetchers"
+        base = _VALUES[symbol]
+        return [
+            {
+                "datetime": _epoch_ms(SESSION_START + pd.Timedelta(minutes=minute)),
+                "open": 0.0,
+                "high": 0.0,
+                "low": 0.0,
+                "close": base + minute,
+                "volume": 0,
+            }
+            for minute in range(30)
+        ]
+
+    def fake_period(*, symbol, period_days, frequency_type, frequency):
+        raise NoMarketDataError(symbol, symbol, "period path disabled in test")
+
+    monkeypatch.setattr(schwab, "_fetch_price_history_range", fake_range)
+    monkeypatch.setattr(schwab, "_fetch_price_history_period", fake_period)
+    monkeypatch.setattr(schwab, "_backfill_internals_from_quotes", lambda frame, session_start=None: frame)
+    monkeypatch.setattr(schwab, "_backfill_internals_from_streamer", lambda frame: frame)
+
+    frame = schwab.get_internals_frame(SESSION_START, AS_OF, "5m", source_interval="1m")
+
+    # 30 one-minute candles -> 6 five-minute buckets; each keeps its last minute
+    # (minutes 0-29 -> buckets 09:30..09:55, last-minute values +4, +9, ..., +29).
+    assert len(frame) == 6
+    assert frame["add"].tolist() == [1200.0 + 5 * i + 4 for i in range(6)]
+    assert frame["tick"].tolist() == [650.0 + 5 * i + 4 for i in range(6)]
+    assert frame["vold"].tolist() == [4_500_000.0 + 5 * i + 4 for i in range(6)]
+    assert frame.attrs["provenance"] == {"add": "candles", "tick": "candles", "vold": "candles"}
+
+
+@pytest.mark.unit
+def test_source_interval_defaults_to_the_target_granularity(recorded_calls):
+    schwab.get_internals_frame(SESSION_START, AS_OF, "5m")
+    assert {c["frequency"] for c in recorded_calls} == {5}  # default unchanged
+
+
+@pytest.mark.unit
+def test_get_internals_frame_rejects_an_unsupported_source_interval():
+    with pytest.raises(ValueError, match="Unsupported internals source interval"):
+        schwab.get_internals_frame(SESSION_START, AS_OF, "5m", source_interval="7m")

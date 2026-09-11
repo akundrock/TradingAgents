@@ -1119,28 +1119,35 @@ def _fetch_internal_key_series(
     session_start: datetime,
     end_dt: datetime,
     frequency: int,
+    source_frequency: int | None = None,
 ) -> pd.Series:
     symbol = MARKET_INTERNAL_SYMBOLS[key]
+    fetch_frequency = source_frequency or frequency
     try:
-        series = _fetch_internal_series(symbol, session_start, end_dt, frequency)
+        series = _fetch_internal_series(symbol, session_start, end_dt, fetch_frequency)
         series.attrs["provenance"] = "candles"
-        return series
     except Exception as direct_exc:
         if key == "add":
             try:
-                synthetic_series = _fetch_synthetic_add_series(session_start, end_dt, frequency)
-                synthetic_series.attrs["provenance"] = "synthetic"
-                return synthetic_series
+                series = _fetch_synthetic_add_series(session_start, end_dt, fetch_frequency)
             except Exception:
                 raise direct_exc
-        if key == "vold":
+            series.attrs["provenance"] = "synthetic"
+        elif key == "vold":
             try:
-                synthetic_series = _fetch_synthetic_vold_series(session_start, end_dt, frequency)
-                synthetic_series.attrs["provenance"] = "synthetic"
-                return synthetic_series
+                series = _fetch_synthetic_vold_series(session_start, end_dt, fetch_frequency)
             except Exception:
                 raise direct_exc
-        raise
+            series.attrs["provenance"] = "synthetic"
+        else:
+            raise
+    provenance = series.attrs.get("provenance", "candles")
+    if fetch_frequency != frequency:
+        series = _aggregate_series_to_bucket(
+            series, source_minutes=fetch_frequency, target_minutes=frequency
+        )
+        series.attrs["provenance"] = provenance
+    return series
 
 
 def _synthetic_internal_quote(key: str, session_start: datetime) -> float | None:
@@ -1259,6 +1266,7 @@ def _fetch_internals_series_by_key(
     session_start: datetime,
     as_of: datetime,
     frequency: int,
+    source_frequency: int | None = None,
 ) -> tuple[dict[str, pd.Series], list[str], dict[str, Exception]]:
     """Fetch internals series, isolating breadth pulls from $TICK rate pressure."""
     series_by_key: dict[str, pd.Series] = {}
@@ -1268,7 +1276,9 @@ def _fetch_internals_series_by_key(
     def capture(key: str) -> bool:
         symbol = MARKET_INTERNAL_SYMBOLS[key]
         try:
-            series_by_key[key] = _fetch_internal_key_series(key, session_start, as_of, frequency)
+            series_by_key[key] = _fetch_internal_key_series(
+                key, session_start, as_of, frequency, source_frequency=source_frequency
+            )
             errors_by_key.pop(key, None)
             failures[:] = [entry for entry in failures if not entry.startswith(f"{symbol}:")]
             return True
@@ -1302,16 +1312,25 @@ def get_internals_frame(
     session_start: datetime,
     as_of: datetime,
     interval: str = "5m",
+    *,
+    source_interval: str | None = None,
 ) -> pd.DataFrame:
     """Fetch $ADD / $TICK / $VOLD as a bar-aligned frame.
 
     Columns: ``Date``, ``add``, ``tick``, ``vold``. Symbols are fetched in
     parallel and outer-joined on timestamp so a partial outage still yields a
     frame with NaN in the missing column rather than failing the whole call.
+    The optional ``source_interval`` fetches at a finer granularity (e.g. "1m")
+    and downsamples each series into ``interval`` buckets.
     """
     if interval not in _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL:
         raise ValueError(f"Unsupported internals interval: {interval}")
     frequency = _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL[interval]
+    if source_interval is not None and source_interval not in _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL:
+        raise ValueError(f"Unsupported internals source interval: {source_interval}")
+    source_frequency = (
+        _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL[source_interval] if source_interval else frequency
+    )
 
     session_start = _naive_market_datetime(session_start)
     as_of = _naive_market_datetime(as_of)
@@ -1319,7 +1338,7 @@ def get_internals_frame(
         raise ValueError("as_of must be after session_start")
 
     series_by_key, failures, errors_by_key = _fetch_internals_series_by_key(
-        session_start, as_of, frequency
+        session_start, as_of, frequency, source_frequency=source_frequency
     )
 
     if not series_by_key:
