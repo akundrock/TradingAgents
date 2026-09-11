@@ -103,6 +103,12 @@ class MesChecklistConfig:
     tick_burst_multiplier: float = 1.5
     vold_zscore_lookback: int = 20
 
+    # Candle granularity the internals series is fetched at, before
+    # aggregation into the 5m frame ("5m" = direct candles, the default).
+    # 1m gives ~5 raw readings per bar, so a single defective candle no
+    # longer blanks the bar. See NOTES.md data-fidelity census.
+    internals_source_interval: str = "5m"
+
     # Discretionary SPY-context thresholds from azp-dual-chart-workflow.md.
     add_trend_threshold: float = 1000.0
     add_chop_threshold: float = 500.0

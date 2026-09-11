@@ -396,3 +396,37 @@ def test_direct_vold_provenance_adds_no_warning():
 
     assert snapshot.vold_is_synthetic is False
     assert snapshot.warnings == []
+
+
+@pytest.mark.unit
+def test_build_snapshot_forwards_the_configured_internals_source_interval(monkeypatch):
+    cfg = load_mes_config({"internals_source_interval": "1m"})
+    calls: list[dict] = []
+
+    def fake_get_internals_frame(session_start, as_of, interval, *, source_interval=None):
+        calls.append({"interval": interval, "source_interval": source_interval})
+        return _internals_frame()
+
+    import tradingagents.dataflows.schwab as schwab_module
+
+    monkeypatch.setattr(schwab_module, "get_internals_frame", fake_get_internals_frame)
+    build_snapshot(AS_OF, cfg, fetch_bars=lambda *a, **k: _bar_frame())
+    assert calls and calls[0]["interval"] == "5m"
+    assert calls[0]["source_interval"] == "1m"
+
+
+@pytest.mark.unit
+def test_build_snapshot_defaults_to_5m_source_when_not_configured(monkeypatch):
+    cfg = load_mes_config()
+    calls: list[dict] = []
+
+    def fake_get_internals_frame(session_start, as_of, interval, *, source_interval=None):
+        calls.append({"interval": interval, "source_interval": source_interval})
+        return _internals_frame()
+
+    import tradingagents.dataflows.schwab as schwab_module
+
+    monkeypatch.setattr(schwab_module, "get_internals_frame", fake_get_internals_frame)
+    build_snapshot(AS_OF, cfg, fetch_bars=lambda *a, **k: _bar_frame())
+    assert calls[0]["source_interval"] == "5m"
+

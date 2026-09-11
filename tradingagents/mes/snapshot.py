@@ -463,8 +463,15 @@ def build_snapshot(
     """
     from ..dataflows.schwab import get_internals_frame, get_intraday_5m_candles
 
+    def _default_fetch_internals(
+        session_start: datetime, as_of: datetime, interval: str
+    ) -> pd.DataFrame:
+        return get_internals_frame(
+            session_start, as_of, interval, source_interval=cfg.internals_source_interval
+        )
+
     fetch_bars = fetch_bars or get_intraday_5m_candles
-    fetch_internals = fetch_internals or get_internals_frame
+    fetch_internals = fetch_internals or _default_fetch_internals
 
     session_start, fetch_start = session_bounds(as_of, cfg)
     warnings: list[str] = []
