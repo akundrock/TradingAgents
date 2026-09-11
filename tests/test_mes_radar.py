@@ -19,7 +19,7 @@ from tradingagents.mes.radar import (
     _missing_items,
     build_proximity,
 )
-from tradingagents.mes.render import format_internals_status
+from tradingagents.mes.render import format_internals_status, render_market_context
 from tests.mes_factories import (
     DEFAULT_AS_OF,
     make_mes_series,
@@ -107,6 +107,7 @@ def _make_snapshot(*, prior_high: float | None = 7673.75, overnight_high: float 
 
     # Inject prior/overnight directly on snapshot for level collection
     class _Prior:
+        session_date = snap.session_date
         high = prior_high
         low = 7640.0
         close = 7655.0
@@ -513,6 +514,33 @@ def test_internals_status_marks_unavailable_segments():
     assert "TICK +250 (thr ±" in line
     assert "ADD unavailable" in line
     assert "VOLD unavailable" in line
+
+
+@pytest.mark.unit
+def test_internals_status_marks_synthetic_vold_as_a_delta():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "synthetic"}
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "VOLD Δ+1,000 (synthetic)" in line
+
+
+@pytest.mark.unit
+def test_internals_status_keeps_plain_vold_for_direct_candle_provenance():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "candles"}
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "VOLD +1000 slope" in line
+    assert "synthetic" not in line
+
+
+@pytest.mark.unit
+def test_market_context_marks_synthetic_vold_value():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "synthetic"}
+    body = render_market_context(snap)
+    assert "Δ+1,000 (synthetic)" in body
 
 
 # ---------------------------------------------------------------------------

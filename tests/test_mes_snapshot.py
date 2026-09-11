@@ -358,3 +358,41 @@ def test_series_helpers_expose_last_bar_and_session_change():
     assert state.session_change() == pytest.approx(
         state.close - state.session_start_price
     )
+
+
+@pytest.mark.unit
+def test_build_snapshot_exposes_internals_provenance_and_flags_synthetic_vold():
+    cfg = load_mes_config()
+    frame = _internals_frame()
+    frame.attrs["provenance"] = {"add": "candles", "tick": "candles", "vold": "synthetic"}
+    frame.attrs["backfilled"] = {"vold": "synthetic_quote"}
+
+    def fetch_internals(session_start, as_of, interval):
+        return frame
+
+    snapshot = build_snapshot(
+        AS_OF,
+        cfg,
+        fetch_bars=lambda *a, **k: _bar_frame(),
+        fetch_internals=fetch_internals,
+    )
+
+    assert snapshot.internals_provenance["vold"] == "synthetic"
+    assert snapshot.internals_provenance["tick"] == "candles"
+    assert snapshot.vold_is_synthetic is True
+    assert any("$VOLD is synthetic" in w for w in snapshot.warnings)
+
+
+@pytest.mark.unit
+def test_direct_vold_provenance_adds_no_warning():
+    cfg = load_mes_config()
+
+    snapshot = build_snapshot(
+        AS_OF,
+        cfg,
+        fetch_bars=lambda *a, **k: _bar_frame(),
+        fetch_internals=lambda *a, **k: _internals_frame(),
+    )
+
+    assert snapshot.vold_is_synthetic is False
+    assert snapshot.warnings == []

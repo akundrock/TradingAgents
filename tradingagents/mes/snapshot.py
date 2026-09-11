@@ -243,6 +243,8 @@ class MesSnapshot:
     prior_mes: SessionLevels | None = None
     prior_spy: SessionLevels | None = None
     overnight_mes: tuple[float, float] | None = None
+    internals_provenance: dict[str, str] = field(default_factory=dict)
+    """How each internals reading was obtained: ``candles`` / ``synthetic`` / ``none``."""
 
     @property
     def session_open(self) -> datetime:
@@ -274,6 +276,10 @@ class MesSnapshot:
     @property
     def vold(self) -> float | None:
         return self.spy.last.vold
+
+    @property
+    def vold_is_synthetic(self) -> bool:
+        return self.internals_provenance.get("vold") == "synthetic"
 
     def _tick_history(self) -> list[float]:
         return [b.tick for b in self.spy.bars if b.tick is not None]
@@ -462,6 +468,7 @@ def build_snapshot(
 
     session_start, fetch_start = session_bounds(as_of, cfg)
     warnings: list[str] = []
+    internals_provenance: dict[str, dict[str, str]] = {}
 
     internals: pd.DataFrame | None = None
     if as_of < session_start + INTERNALS_FIRST_BAR:
@@ -472,6 +479,10 @@ def build_snapshot(
     else:
         try:
             internals = fetch_internals(session_start, as_of, "5m")
+            internals_provenance = {
+                "provenance": dict(getattr(internals, "attrs", {}).get("provenance", {})),
+                "backfilled": dict(getattr(internals, "attrs", {}).get("backfilled", {})),
+            }
         except Exception as exc:
             warnings.append(f"market internals unavailable: {exc}")
             logger.warning("MES snapshot: internals unavailable: %s", exc)
@@ -494,6 +505,7 @@ def build_snapshot(
         prior_mes=prior_session_levels(mes_bars, as_of, cfg, cfg.mes_tick_size),
         prior_spy=prior_session_levels(spy_bars, as_of, cfg, cfg.spy_tick_size),
         overnight_mes=overnight_range(mes_bars, as_of, cfg),
+        internals_provenance=internals_provenance.get("provenance", {}),
     )
     if snapshot.rth_started and as_of >= session_start + INTERNALS_FIRST_BAR and internals is not None:
         missing = [
@@ -511,6 +523,12 @@ def build_snapshot(
                 f"{', '.join(missing)} this session after REST, quotes, and streamer. "
                 "Breadth gates will block until those symbols publish or you set "
                 "TRADINGAGENTS_MES_ALLOW_MISSING_INTERNALS=true."
+            )
+            snapshot.warnings = warnings
+        if snapshot.vold_is_synthetic and snapshot.vold is not None:
+            warnings.append(
+                "$VOLD is synthetic (Δ$UVOL−$DVOL since open, session-fitted scale); "
+                "its absolute level is not TOS-comparable — read the delta or z-score"
             )
             snapshot.warnings = warnings
         sparse = _tick_coverage_warning(internals, session_start, as_of)
