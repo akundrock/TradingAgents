@@ -600,3 +600,40 @@ def test_quote_backfill_is_recorded_in_backfilled_attrs(monkeypatch):
     assert frame["add"].iloc[-1] == 6_000.0
     assert frame["tick"].iloc[-1] == 6_000.0
     assert frame["vold"].iloc[-1] == 6_000.0
+
+
+# --- 1m -> 5m internals aggregation ------------------------------------------
+
+
+@pytest.mark.unit
+def test_aggregate_series_takes_the_last_reading_per_5m_bucket():
+    index = pd.to_datetime(
+        [
+            "2026-09-11 10:00", "2026-09-11 10:01", "2026-09-11 10:02", "2026-09-11 10:04",
+            "2026-09-11 10:05", "2026-09-11 10:06",
+        ]
+    )
+    series = pd.Series([10.0, 15.0, 20.0, 30.0, 45.0, 60.0], index=index)
+    out = schwab._aggregate_series_to_bucket(series, source_minutes=1, target_minutes=5)
+    assert out.index.tolist() == [pd.Timestamp("2026-09-11 10:00"), pd.Timestamp("2026-09-11 10:05")]
+    assert out.loc[pd.Timestamp("2026-09-11 10:00")] == 30.0  # last 1m close inside the bucket (10:04)
+    assert out.loc[pd.Timestamp("2026-09-11 10:05")] == 60.0
+
+
+@pytest.mark.unit
+def test_aggregate_series_takes_last_good_minute_when_defects_were_dropped():
+    # 10:02 was defective (dropped upstream); 10:03 is the last good read.
+    index = pd.to_datetime(["2026-09-11 10:00", "2026-09-11 10:01", "2026-09-11 10:03"])
+    series = pd.Series([100.0, -120.0, 45.0], index=index)
+    out = schwab._aggregate_series_to_bucket(series, source_minutes=1, target_minutes=5)
+    assert out.index.tolist() == [pd.Timestamp("2026-09-11 10:00")]
+    assert out.iloc[0] == 45.0
+
+
+@pytest.mark.unit
+def test_aggregate_series_returns_the_series_unchanged_when_source_is_not_finer():
+    index = pd.to_datetime(["2026-09-11 10:00", "2026-09-11 10:05"])
+    series = pd.Series([5.0, -7.0], index=index)
+    assert schwab._aggregate_series_to_bucket(series, source_minutes=5, target_minutes=5) is series
+    assert schwab._aggregate_series_to_bucket(series, source_minutes=15, target_minutes=5) is series
+    assert schwab._aggregate_series_to_bucket(series, source_minutes=0, target_minutes=5) is series

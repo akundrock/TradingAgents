@@ -961,6 +961,23 @@ def _merge_internal_candles(*groups: list[dict]) -> list[dict]:
     return [merged[key] for key in sorted(merged)]
 
 
+def _aggregate_series_to_bucket(
+    series: pd.Series, *, source_minutes: int, target_minutes: int
+) -> pd.Series:
+    """Downsample a finer internals series into target-frequency buckets.
+
+    Internals candles are step readings, so the last reading inside a bucket is
+    that bar's close-equivalent; defective candles are dropped upstream, so the
+    bucket keeps its last good reading. Output is indexed by bucket-start time.
+    """
+    if target_minutes <= source_minutes or source_minutes <= 0:
+        return series
+    keys = pd.to_datetime(series.index).floor(f"{target_minutes}min")
+    grouped = series.groupby(keys).last()
+    grouped.index.name = series.index.name
+    return grouped.sort_index()
+
+
 def _fetch_internal_series(
     symbol: str,
     start_dt: datetime,
