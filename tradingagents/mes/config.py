@@ -61,6 +61,17 @@ _TUNER_FIELD_ALIASES: dict[str, str] = {
     "BlockMorningUntil": "block_morning_until",
     "AllowORBWindow": "allow_orb_window",
     "AllowMissingInternals": "allow_missing_internals",
+    # W1.3 SPY-context gate port: the checklist's discretionary SPY thresholds
+    # (config.py add_trend_threshold/add_chop_threshold/tick_extreme_threshold/
+    # tick_sustain_bars/vold_slope_bars) are the promotion targets for tuned
+    # tuner values. EnableSPYContext is intentionally unmapped: the checklist
+    # gate is always-on and the toggle exists only for default-off engine
+    # parity (mes_tuner/engine/spy_context.py).
+    "SPYAddTrendThreshold": "add_trend_threshold",
+    "SPYAddChopThreshold": "add_chop_threshold",
+    "SPYTickExtremeThreshold": "tick_extreme_threshold",
+    "SPYTickSustainBars": "tick_sustain_bars",
+    "VOLDTrendBars": "vold_slope_bars",
 }
 
 
