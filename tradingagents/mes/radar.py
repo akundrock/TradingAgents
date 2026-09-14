@@ -21,6 +21,7 @@ from enum import Enum
 
 from .checklist import ChecklistResult
 from .levels import _collect_levels
+from .render import format_internals_status
 from .snapshot import MesSnapshot
 
 
@@ -109,6 +110,10 @@ class ProximityReport:
     """True when at least one level is within the proximity band."""
     proximity_band: float = 4.0
     """Band width in points used to classify near_level / SetupState."""
+    warnings: list[str] = field(default_factory=list)
+    """Snapshot data-quality warnings (sparse $TICK coverage, missing internals, pre-open note)."""
+    internals_status: str | None = None
+    """Plain-text $ADD/$TICK/$VOLD status from render.format_internals_status; None when unavailable."""
 
 
 # ---------------------------------------------------------------------------
@@ -275,4 +280,6 @@ def build_proximity(
         levels_below=below,
         near_level=near,
         proximity_band=round(proximity_band, 2),
+        warnings=list(snapshot.warnings),
+        internals_status=format_internals_status(snapshot),
     )

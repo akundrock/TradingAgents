@@ -56,6 +56,19 @@ def _isolate_config():
     config_module._config = copy.deepcopy(default_config.DEFAULT_CONFIG)
 
 
+@pytest.fixture(autouse=True)
+def _clear_schwab_price_history_cache():
+    """Keep the Schwab price-history/backfill TTL caches from leaking between tests."""
+    from tradingagents.dataflows import schwab as schwab_module
+    from tradingagents.dataflows import schwab_streamer as schwab_streamer_module
+
+    schwab_module.clear_price_history_cache()
+    schwab_streamer_module.clear_internals_backfill_cache()
+    yield
+    schwab_module.clear_price_history_cache()
+    schwab_streamer_module.clear_internals_backfill_cache()
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

@@ -243,6 +243,8 @@ class MesSnapshot:
     prior_mes: SessionLevels | None = None
     prior_spy: SessionLevels | None = None
     overnight_mes: tuple[float, float] | None = None
+    internals_provenance: dict[str, str] = field(default_factory=dict)
+    """How each internals reading was obtained: ``candles`` / ``synthetic`` / ``none``."""
 
     @property
     def session_open(self) -> datetime:
@@ -274,6 +276,10 @@ class MesSnapshot:
     @property
     def vold(self) -> float | None:
         return self.spy.last.vold
+
+    @property
+    def vold_is_synthetic(self) -> bool:
+        return self.internals_provenance.get("vold") == "synthetic"
 
     def _tick_history(self) -> list[float]:
         return [b.tick for b in self.spy.bars if b.tick is not None]
@@ -404,6 +410,44 @@ def session_bounds(as_of: datetime, cfg: MesChecklistConfig) -> tuple[datetime, 
 # warnings and wasted API calls.
 INTERNALS_FIRST_BAR = timedelta(minutes=5)
 
+# Schwab frequently publishes internals candles with close=0; those bars are
+# dropped (never fabricated), so measure how much of the session's $TICK
+# history is actually readable and warn when streak/threshold math runs on a
+# sparse, mostly-carried-forward series.
+_TICK_BAR_SPACING = pd.Timedelta(minutes=5)
+TICK_COVERAGE_MIN_BARS = 4
+TICK_COVERAGE_WARN_RATIO = 0.5
+
+
+def _tick_coverage_warning(
+    internals: pd.DataFrame | None,
+    session_start: datetime,
+    as_of: datetime,
+) -> str | None:
+    """Warn when too few of the session's $TICK bars were readable from Schwab."""
+    if internals is None or internals.empty or "tick" not in internals.columns:
+        return None
+    start = pd.Timestamp(session_start)
+    end = pd.Timestamp(as_of)
+    expected = int((end - start) / _TICK_BAR_SPACING) + 1
+    if expected < TICK_COVERAGE_MIN_BARS:
+        return None
+    known = int(
+        (
+            (internals["Date"] >= start)
+            & (internals["Date"] <= end)
+            & internals["tick"].notna()
+        ).sum()
+    )
+    if known >= expected * TICK_COVERAGE_WARN_RATIO:
+        return None
+    return (
+        f"$TICK data sparse: only {known}/{expected} 5m bars readable from Schwab "
+        "candles (defective close=0 bars are dropped, never fabricated). Tick "
+        "streaks and thresholds may be stale — cross-check the TOS $TICK panel."
+    )
+
+
 
 def build_snapshot(
     as_of: datetime,
@@ -419,11 +463,19 @@ def build_snapshot(
     """
     from ..dataflows.schwab import get_internals_frame, get_intraday_5m_candles
 
+    def _default_fetch_internals(
+        session_start: datetime, as_of: datetime, interval: str
+    ) -> pd.DataFrame:
+        return get_internals_frame(
+            session_start, as_of, interval, source_interval=cfg.internals_source_interval
+        )
+
     fetch_bars = fetch_bars or get_intraday_5m_candles
-    fetch_internals = fetch_internals or get_internals_frame
+    fetch_internals = fetch_internals or _default_fetch_internals
 
     session_start, fetch_start = session_bounds(as_of, cfg)
     warnings: list[str] = []
+    internals_provenance: dict[str, dict[str, str]] = {}
 
     internals: pd.DataFrame | None = None
     if as_of < session_start + INTERNALS_FIRST_BAR:
@@ -434,6 +486,10 @@ def build_snapshot(
     else:
         try:
             internals = fetch_internals(session_start, as_of, "5m")
+            internals_provenance = {
+                "provenance": dict(getattr(internals, "attrs", {}).get("provenance", {})),
+                "backfilled": dict(getattr(internals, "attrs", {}).get("backfilled", {})),
+            }
         except Exception as exc:
             warnings.append(f"market internals unavailable: {exc}")
             logger.warning("MES snapshot: internals unavailable: %s", exc)
@@ -456,6 +512,7 @@ def build_snapshot(
         prior_mes=prior_session_levels(mes_bars, as_of, cfg, cfg.mes_tick_size),
         prior_spy=prior_session_levels(spy_bars, as_of, cfg, cfg.spy_tick_size),
         overnight_mes=overnight_range(mes_bars, as_of, cfg),
+        internals_provenance=internals_provenance.get("provenance", {}),
     )
     if snapshot.rth_started and as_of >= session_start + INTERNALS_FIRST_BAR and internals is not None:
         missing = [
@@ -475,7 +532,18 @@ def build_snapshot(
                 "TRADINGAGENTS_MES_ALLOW_MISSING_INTERNALS=true."
             )
             snapshot.warnings = warnings
+        if snapshot.vold_is_synthetic and snapshot.vold is not None:
+            warnings.append(
+                "$VOLD is synthetic (Δ$UVOL−$DVOL since open, session-fitted scale); "
+                "its absolute level is not TOS-comparable — read the delta or z-score"
+            )
+            snapshot.warnings = warnings
+        sparse = _tick_coverage_warning(internals, session_start, as_of)
+        if sparse:
+            warnings.append(sparse)
+            snapshot.warnings = warnings
     return snapshot
+
 
 
 def snapshot_from_csv(

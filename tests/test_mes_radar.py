@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
+import io
 
+import pytest
+from rich.console import Console
+from typer.testing import CliRunner
+
+from cli import mes as mes_cli
 from tradingagents.mes.checklist import CheckItem, ChecklistResult
 from tradingagents.mes.radar import (
     LevelDistance,
@@ -14,12 +19,22 @@ from tradingagents.mes.radar import (
     _missing_items,
     build_proximity,
 )
+from tradingagents.mes.render import format_internals_status, render_market_context
 from tests.mes_factories import (
     DEFAULT_AS_OF,
     make_mes_series,
     make_snapshot,
     make_spy_series,
 )
+
+radar_runner = CliRunner()
+
+
+def _render_table_to_text(table) -> str:
+    """Render a Rich table/grid to plain text for substring assertions."""
+    console = Console(file=io.StringIO(), width=160, legacy_windows=False)
+    console.print(table)
+    return console.file.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +107,7 @@ def _make_snapshot(*, prior_high: float | None = 7673.75, overnight_high: float 
 
     # Inject prior/overnight directly on snapshot for level collection
     class _Prior:
+        session_date = snap.session_date
         high = prior_high
         low = 7640.0
         close = 7655.0
@@ -465,3 +481,159 @@ def test_near_level_true_when_price_close_to_vwap():
     # Default band: min(4.0, 6.0) = 4.0; VWAP is 2.0 pts away → within band
     report = build_proximity(snap, result)
     assert report.near_level
+
+
+# ---------------------------------------------------------------------------
+# Internals status line (render.format_internals_status)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_internals_status_formats_all_three():
+    snap = _make_snapshot()
+    line = format_internals_status(snap)
+    assert line is not None
+    assert line.startswith("TICK +100 (thr ±")
+    assert "ADD +300" in line
+    assert "VOLD +1000 slope +0" in line
+
+
+@pytest.mark.unit
+def test_internals_status_none_when_all_missing():
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    assert format_internals_status(snap) is None
+
+
+@pytest.mark.unit
+def test_internals_status_marks_unavailable_segments():
+    spy = make_spy_series(internals=[(None, 250.0, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "TICK +250 (thr ±" in line
+    assert "ADD unavailable" in line
+    assert "VOLD unavailable" in line
+
+
+@pytest.mark.unit
+def test_internals_status_marks_synthetic_vold_as_a_delta():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "synthetic"}
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "VOLD Δ+1,000 (synthetic)" in line
+
+
+@pytest.mark.unit
+def test_internals_status_keeps_plain_vold_for_direct_candle_provenance():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "candles"}
+    line = format_internals_status(snap)
+    assert line is not None
+    assert "VOLD +1000 slope" in line
+    assert "synthetic" not in line
+
+
+@pytest.mark.unit
+def test_market_context_marks_synthetic_vold_value():
+    snap = _make_snapshot()
+    snap.internals_provenance = {"add": "candles", "tick": "candles", "vold": "synthetic"}
+    body = render_market_context(snap)
+    assert "Δ+1,000 (synthetic)" in body
+
+
+# ---------------------------------------------------------------------------
+# Snapshot warnings + internals status on ProximityReport
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_warnings_carried_from_snapshot():
+    snap = _make_snapshot()
+    snap.warnings = ["$TICK data sparse: only 2/78 5m bars readable"]
+    report = build_proximity(snap, _make_result())
+    assert report.warnings == ["$TICK data sparse: only 2/78 5m bars readable"]
+
+
+@pytest.mark.unit
+def test_warnings_is_a_copy_not_a_live_reference():
+    snap = _make_snapshot()
+    snap.warnings = ["first"]
+    report = build_proximity(snap, _make_result())
+    snap.warnings.append("appended later")
+    assert report.warnings == ["first"]
+
+
+@pytest.mark.unit
+def test_warnings_empty_by_default():
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    assert report.warnings == []
+
+
+@pytest.mark.unit
+def test_internals_status_carried_on_report():
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    assert report.internals_status is not None
+    assert report.internals_status.startswith("TICK +100 (thr ±")
+
+
+@pytest.mark.unit
+def test_report_internals_status_none_when_all_missing():
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(spy=spy)
+    report = build_proximity(snap, _make_result())
+    assert report.internals_status is None
+
+
+# ---------------------------------------------------------------------------
+# Radar panel rendering: internals status + snapshot warnings
+# ---------------------------------------------------------------------------
+
+
+def _invoke_radar(snapshot, monkeypatch):
+    from tests.mes_factories import DEFAULT_AS_OF
+
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snapshot)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: DEFAULT_AS_OF)
+    return radar_runner.invoke(mes_cli.mes_app, ["radar", "--no-watch"])
+
+
+@pytest.mark.unit
+def test_radar_panel_shows_internals_status(monkeypatch):
+    snap = _make_snapshot()
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "internals:" in result.output
+    assert "TICK +100" in result.output
+    assert "ADD +300" in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_shows_snapshot_warnings(monkeypatch):
+    snap = _make_snapshot()
+    snap.warnings = ["$TICK data sparse: only 2/78 5m bars readable"]
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "warn:" in result.output
+    assert "$TICK data sparse" in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_internals_unavailable_row(monkeypatch):
+    spy = make_spy_series(internals=[(None, None, None)] * 6)
+    snap = make_snapshot(mes=make_mes_series(), spy=spy)
+    result = _invoke_radar(snap, monkeypatch)
+    assert result.exit_code == 0
+    assert "internals unavailable" in result.output
+    assert "warn:" not in result.output
+
+
+@pytest.mark.unit
+def test_radar_panel_renders_report_without_warnings_cleanly(monkeypatch):
+    snap = _make_snapshot()
+    report = build_proximity(snap, _make_result())
+    text = _render_table_to_text(mes_cli._render_radar(report, snap.as_of))
+    assert "warn:" not in text

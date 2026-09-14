@@ -108,7 +108,7 @@ def render_market_context(snapshot: MesSnapshot) -> str:
             "| --- | --- | --- |",
             f"| $ADD | {_fmt(snapshot.add)} | {_add_read(snapshot)} |",
             f"| $TICK | {_fmt(snapshot.tick)} | {_tick_read(snapshot)} |",
-            f"| $VOLD | {_fmt(snapshot.vold)} | {_vold_read(snapshot)} |",
+            f"| $VOLD | {_fmt_vold(snapshot)} | {_vold_read(snapshot)} |",
         ]
     )
     if mes.opening_range_high is not None and mes.opening_range_low is not None:
@@ -169,6 +169,16 @@ def _opt(value: float | None) -> str:
 
 def _fmt(value: float | None) -> str:
     return "unavailable" if value is None else f"{value:+.0f}"
+
+
+def _fmt_vold(snapshot: MesSnapshot) -> str:
+    """Synthetic $VOLD is a baseline-relative delta, not a TOS-comparable level."""
+    vold = snapshot.vold
+    if vold is None:
+        return "unavailable"
+    if snapshot.internals_provenance.get("vold") == "synthetic":
+        return f"Δ{vold:+,.0f} (synthetic)"
+    return _fmt(vold)
 
 
 def _add_read(snapshot: MesSnapshot) -> str:
@@ -236,3 +246,33 @@ def _vold_read(snapshot: MesSnapshot) -> str:
     if slope < 0:
         return f"falling{z_hint}"
     return f"flat{z_hint}"
+
+
+def format_internals_status(snapshot: MesSnapshot) -> str | None:
+    """Compact $ADD/$TICK/$VOLD status for the radar panel (plain text).
+
+    Returns ``None`` when none of the three internals publish, which the CLI
+    renders as "internals unavailable". Segments report "unavailable"
+    individually so a partial feed stays visible.
+    """
+    add, tick, vold = snapshot.add, snapshot.tick, snapshot.vold
+    if add is None and tick is None and vold is None:
+        return None
+    if tick is None:
+        tick_seg = "TICK unavailable"
+    else:
+        tick_seg = f"TICK {tick:+.0f} (thr ±{snapshot.tick_effective_threshold():.0f})"
+    add_seg = "ADD unavailable" if add is None else f"ADD {add:+.0f}"
+    if vold is None:
+        vold_seg = "VOLD unavailable"
+    elif snapshot.internals_provenance.get("vold") == "synthetic":
+        vold_seg = f"VOLD Δ{vold:+,.0f} (synthetic)"
+        slope = snapshot.vold_slope()
+        if slope is not None:
+            vold_seg += f" slope {slope:+.0f}"
+    else:
+        vold_seg = f"VOLD {vold:+.0f}"
+        slope = snapshot.vold_slope()
+        if slope is not None:
+            vold_seg += f" slope {slope:+.0f}"
+    return "  ".join([tick_seg, add_seg, vold_seg])

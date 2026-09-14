@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -296,6 +297,64 @@ def _schwab_get_with_retry(
     raise SchwabRateLimitError(rate_limit_message)
 
 
+# --- price-history response cache -------------------------------------------
+# radar/go re-fetch identical candles every 15-60s, but 5m candles only change
+# at the bar boundary. Cache each successful response under a bucketed key so
+# a long-running radar makes one price-history call per symbol per 5m bucket
+# instead of one per poll. Quotes/streamer backfills stay live and keep the
+# freshest bar honest. Failures are never cached. Disable with
+# TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS=0.
+
+
+def _cache_ttl_seconds() -> float:
+    raw = os.environ.get("TRADINGAGENTS_SCHWAB_PRICE_HISTORY_TTL_SECONDS", "120")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 120.0
+
+
+_PRICE_HISTORY_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+_PRICE_HISTORY_CACHE_MAX_ENTRIES = 256
+_cache_now: Callable[[], float] = time.monotonic
+
+
+def _bucket_end(dt: datetime, *, minutes: int = 5) -> datetime:
+    """Round ``dt`` up to the next bucket boundary (exact boundaries unchanged).
+
+    Naive market wall-clock in, naive market wall-clock out (same convention as
+    ``_naive_market_datetime``).
+    """
+    dt = _naive_market_datetime(dt)
+    floored = dt.replace(minute=(dt.minute // minutes) * minutes, second=0, microsecond=0)
+    if floored < dt:
+        floored = floored + timedelta(minutes=minutes)
+    return floored
+
+
+def clear_price_history_cache() -> None:
+    """Drop every cached price-history response (tests, replays, manual refresh)."""
+    _PRICE_HISTORY_CACHE.clear()
+
+
+def _price_history_cache_get(key: tuple) -> list[dict] | None:
+    entry = _PRICE_HISTORY_CACHE.get(key)
+    if entry is None:
+        return None
+    stored_at, candles = entry
+    if _cache_now() - stored_at > _cache_ttl_seconds():
+        _PRICE_HISTORY_CACHE.pop(key, None)
+        return None
+    return candles
+
+
+def _price_history_cache_put(key: tuple, candles: list[dict]) -> None:
+    if len(_PRICE_HISTORY_CACHE) >= _PRICE_HISTORY_CACHE_MAX_ENTRIES:
+        oldest_key = min(_PRICE_HISTORY_CACHE, key=lambda k: _PRICE_HISTORY_CACHE[k][0])
+        _PRICE_HISTORY_CACHE.pop(oldest_key, None)
+    _PRICE_HISTORY_CACHE[key] = (_cache_now(), candles)
+
+
 def _market_epoch_ms(dt: datetime, timezone: str = "America/New_York") -> int:
     """Convert a naive market wall-clock time to epoch ms in ``timezone``.
 
@@ -321,10 +380,33 @@ def _fetch_price_history_range(
 
     start_dt = _naive_market_datetime(start_dt)
     end_dt = _naive_market_datetime(end_dt)
+    # Bucket the requested end to the next 5m boundary so every poll inside the
+    # same bar shares one cache entry and one HTTP call. The response contains
+    # only bars that existed at fetch time; downstream as_of filtering and the
+    # quote/streamer backfills keep the live tail honest.
+    bucketed_end = _bucket_end(end_dt)
+    # Key on the START of the 5m bucket containing end_dt so every poll inside
+    # one bar — including one landing exactly on the boundary — shares a single
+    # cache entry. (Keying on the ceil-ed bucketed_end would split the bucket:
+    # a poll at exactly 10:00:00 buckets to 10:00 while 10:00:01+ bucket to
+    # 10:05, giving two HTTP calls for one 5m bar.)
+    bucket_start = end_dt.replace(minute=(end_dt.minute // 5) * 5, second=0, microsecond=0)
+    cache_key = (
+        "range",
+        _normalize_symbol(symbol),
+        start_dt,
+        bucket_start,
+        frequency_type,
+        frequency,
+    )
+    cached = _price_history_cache_get(cache_key)
+    if cached is not None:
+        logger.debug("price-history cache hit (range): %s", cache_key)
+        return cached
     params = {
         "symbol": _normalize_symbol(symbol),
         "startDate": _market_epoch_ms(start_dt),
-        "endDate": _market_epoch_ms(end_dt),
+        "endDate": _market_epoch_ms(bucketed_end),
         "frequencyType": frequency_type,
         "frequency": frequency,
         "needExtendedHoursData": True,
@@ -345,6 +427,7 @@ def _fetch_price_history_range(
     candles = payload.get("candles") or []
     if payload.get("empty") or not candles:
         raise NoMarketDataError(symbol, _normalize_symbol(symbol), "Schwab returned no candles")
+    _price_history_cache_put(cache_key, candles)
     return candles
 
 
@@ -781,13 +864,30 @@ _VOLD_LARGE_BASELINE_CALIBRATION = 1_209_664.0
 _VOLD_LARGE_BASELINE_THRESHOLD = 1e9
 _VOLD_THOUSANDS_SCALE = 1000.0
 _MAX_INTERNAL_PERIOD_DAYS = 10
+# Static display hints for the provenance labels attached to every internals
+# frame (``frame.attrs["provenance"]`` / ``frame.attrs["backfilled"]``).
+INTERNALS_PROVENANCE_NOTES = {
+    "candles": "Direct $ADD/$TICK/$VOLD candles from Schwab price history (primary source).",
+    "synthetic": "Computed from Schwab component candles ($ADVN-$DECN for $ADD, $UVOL/$DVOL delta for $VOLD).",
+    "none": "No data available for this internal.",
+    "quotes": "Latest bar backfilled from live Schwab quotes.",
+    "synthetic_quote": "Latest bar backfilled from component quotes ($ADVN/$DECN, $UVOL/$DVOL).",
+    "streamer": "Latest bar backfilled from the Schwab streamer.",
+}
 
 
 def _internal_candle_value(candle: dict) -> float | None:
     """Best-effort internals reading from a pricehistory candle.
 
-    Live $TICK candles often report ``close=0`` while ``high``/``low`` carry the
-    actual reading; prefer a non-zero close, then the bar midpoint/high.
+    Only a real ``close`` — or the bar midpoint when both ``high`` and ``low``
+    are populated — is trusted. Schwab's live internals candles frequently
+    publish ``close=0`` (and ``low=0``) while only ``high`` carries a value;
+    substituting that single-sided extreme for an oscillating reading like
+    $TICK is positive-biased (the bar maximum can never read below zero) and
+    fabricated persistent-buy streaks that disagree with the TOS panel.
+    Unknown bars are dropped here; the latest bar is recovered from live
+    quotes/streamer by the backfills in ``get_internals_frame``, and earlier
+    gaps carry the last known reading via the snapshot's per-day ffill.
     """
     close = candle.get("close")
     high = candle.get("high")
@@ -797,13 +897,8 @@ def _internal_candle_value(candle: dict) -> float | None:
         return float(close)
     if high is not None and low is not None and high != 0 and low != 0:
         return float((high + low) / 2.0)
-    if high is not None and high != 0:
-        return float(high)
-    if low is not None and low != 0:
-        return float(low)
-    if close is not None:
-        return float(close)
     return None
+
 
 
 def _fetch_price_history_period(
@@ -820,6 +915,22 @@ def _fetch_price_history_period(
         "frequency": frequency,
         "needExtendedHoursData": True,
     }
+
+    from zoneinfo import ZoneInfo
+
+    et_today = datetime.now(ZoneInfo("America/New_York")).date()
+    cache_key = (
+        "period",
+        params["symbol"],
+        params["period"],
+        frequency_type,
+        frequency,
+        et_today,
+    )
+    cached = _price_history_cache_get(cache_key)
+    if cached is not None:
+        logger.debug("price-history cache hit (period): %s", cache_key)
+        return cached
     response = _schwab_get_with_retry(
         PRICE_HISTORY_URL,
         params,
@@ -834,6 +945,7 @@ def _fetch_price_history_period(
     candles = payload.get("candles") or []
     if payload.get("empty") or not candles:
         raise NoMarketDataError(symbol, _normalize_symbol(symbol), "Schwab returned no candles")
+    _price_history_cache_put(cache_key, candles)
     return candles
 
 
@@ -847,6 +959,23 @@ def _merge_internal_candles(*groups: list[dict]) -> list[dict]:
                 continue
             merged[int(raw_ts)] = candle
     return [merged[key] for key in sorted(merged)]
+
+
+def _aggregate_series_to_bucket(
+    series: pd.Series, *, source_minutes: int, target_minutes: int
+) -> pd.Series:
+    """Downsample a finer internals series into target-frequency buckets.
+
+    Internals candles are step readings, so the last reading inside a bucket is
+    that bar's close-equivalent; defective candles are dropped upstream, so the
+    bucket keeps its last good reading. Output is indexed by bucket-start time.
+    """
+    if target_minutes <= source_minutes or source_minutes <= 0:
+        return series
+    keys = pd.to_datetime(series.index).floor(f"{target_minutes}min")
+    grouped = series.groupby(keys).last()
+    grouped.index.name = series.index.name
+    return grouped.sort_index()
 
 
 def _fetch_internal_series(
@@ -990,22 +1119,35 @@ def _fetch_internal_key_series(
     session_start: datetime,
     end_dt: datetime,
     frequency: int,
+    source_frequency: int | None = None,
 ) -> pd.Series:
     symbol = MARKET_INTERNAL_SYMBOLS[key]
+    fetch_frequency = source_frequency or frequency
     try:
-        return _fetch_internal_series(symbol, session_start, end_dt, frequency)
+        series = _fetch_internal_series(symbol, session_start, end_dt, fetch_frequency)
+        series.attrs["provenance"] = "candles"
     except Exception as direct_exc:
         if key == "add":
             try:
-                return _fetch_synthetic_add_series(session_start, end_dt, frequency)
+                series = _fetch_synthetic_add_series(session_start, end_dt, fetch_frequency)
             except Exception:
                 raise direct_exc
-        if key == "vold":
+            series.attrs["provenance"] = "synthetic"
+        elif key == "vold":
             try:
-                return _fetch_synthetic_vold_series(session_start, end_dt, frequency)
+                series = _fetch_synthetic_vold_series(session_start, end_dt, fetch_frequency)
             except Exception:
                 raise direct_exc
-        raise
+            series.attrs["provenance"] = "synthetic"
+        else:
+            raise
+    provenance = series.attrs.get("provenance", "candles")
+    if fetch_frequency != frequency:
+        series = _aggregate_series_to_bucket(
+            series, source_minutes=fetch_frequency, target_minutes=frequency
+        )
+        series.attrs["provenance"] = provenance
+    return series
 
 
 def _synthetic_internal_quote(key: str, session_start: datetime) -> float | None:
@@ -1066,9 +1208,9 @@ def _backfill_internals_from_streamer(frame: pd.DataFrame) -> pd.DataFrame:
     if not needs_backfill:
         return frame
 
-    from .schwab_streamer import fetch_internals_quotes
+    from .schwab_streamer import fetch_internals_quotes_cached
 
-    readings = fetch_internals_quotes(timeout_seconds=5.0)
+    readings = fetch_internals_quotes_cached(timeout_seconds=5.0)
     if not readings:
         return frame
 
@@ -1081,6 +1223,7 @@ def _backfill_internals_from_streamer(frame: pd.DataFrame) -> pd.DataFrame:
         if not pd.isna(current) and current != 0:
             continue
         frame.at[last_idx, key] = float(value)
+        frame.attrs.setdefault("backfilled", {})[key] = "streamer"
     return frame
 
 
@@ -1108,12 +1251,14 @@ def _backfill_internals_from_quotes(
         quote = quotes.get(_normalize_symbol(symbol))
         if quote is not None and quote.last_price != 0:
             frame.at[last_idx, key] = float(quote.last_price)
+            frame.attrs.setdefault("backfilled", {})[key] = "quotes"
             continue
         if session_start is None or key not in {"add", "vold"}:
             continue
         synthetic = _synthetic_internal_quote(key, session_start)
         if synthetic is not None:
             frame.at[last_idx, key] = float(synthetic)
+            frame.attrs.setdefault("backfilled", {})[key] = "synthetic_quote"
     return frame
 
 
@@ -1121,6 +1266,7 @@ def _fetch_internals_series_by_key(
     session_start: datetime,
     as_of: datetime,
     frequency: int,
+    source_frequency: int | None = None,
 ) -> tuple[dict[str, pd.Series], list[str], dict[str, Exception]]:
     """Fetch internals series, isolating breadth pulls from $TICK rate pressure."""
     series_by_key: dict[str, pd.Series] = {}
@@ -1130,7 +1276,9 @@ def _fetch_internals_series_by_key(
     def capture(key: str) -> bool:
         symbol = MARKET_INTERNAL_SYMBOLS[key]
         try:
-            series_by_key[key] = _fetch_internal_key_series(key, session_start, as_of, frequency)
+            series_by_key[key] = _fetch_internal_key_series(
+                key, session_start, as_of, frequency, source_frequency=source_frequency
+            )
             errors_by_key.pop(key, None)
             failures[:] = [entry for entry in failures if not entry.startswith(f"{symbol}:")]
             return True
@@ -1164,16 +1312,25 @@ def get_internals_frame(
     session_start: datetime,
     as_of: datetime,
     interval: str = "5m",
+    *,
+    source_interval: str | None = None,
 ) -> pd.DataFrame:
     """Fetch $ADD / $TICK / $VOLD as a bar-aligned frame.
 
     Columns: ``Date``, ``add``, ``tick``, ``vold``. Symbols are fetched in
     parallel and outer-joined on timestamp so a partial outage still yields a
     frame with NaN in the missing column rather than failing the whole call.
+    The optional ``source_interval`` fetches at a finer granularity (e.g. "1m")
+    and downsamples each series into ``interval`` buckets.
     """
     if interval not in _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL:
         raise ValueError(f"Unsupported internals interval: {interval}")
     frequency = _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL[interval]
+    if source_interval is not None and source_interval not in _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL:
+        raise ValueError(f"Unsupported internals source interval: {source_interval}")
+    source_frequency = (
+        _INTRADAY_MINUTE_FREQ_MAP_BY_LABEL[source_interval] if source_interval else frequency
+    )
 
     session_start = _naive_market_datetime(session_start)
     as_of = _naive_market_datetime(as_of)
@@ -1181,7 +1338,7 @@ def get_internals_frame(
         raise ValueError("as_of must be after session_start")
 
     series_by_key, failures, errors_by_key = _fetch_internals_series_by_key(
-        session_start, as_of, frequency
+        session_start, as_of, frequency, source_frequency=source_frequency
     )
 
     if not series_by_key:
@@ -1201,6 +1358,9 @@ def get_internals_frame(
         )
 
     frame = pd.DataFrame(series_by_key)
+    provenance = {key: "none" for key in MARKET_INTERNAL_SYMBOLS}
+    for key, series in series_by_key.items():
+        provenance[key] = str(series.attrs.get("provenance", "candles"))
     for key in MARKET_INTERNAL_SYMBOLS:
         if key not in frame.columns:
             frame[key] = pd.NA
@@ -1208,7 +1368,10 @@ def get_internals_frame(
     frame = _backfill_internals_from_quotes(frame, session_start=session_start)
     frame = _backfill_internals_from_streamer(frame)
     frame.index.name = "Date"
-    return frame.reset_index()
+    final = frame.reset_index()
+    final.attrs["provenance"] = provenance
+    final.attrs["backfilled"] = dict(frame.attrs.get("backfilled", {}))
+    return final
 
 
 def get_market_internals(
