@@ -415,8 +415,9 @@ def test_build_snapshot_forwards_the_configured_internals_source_interval(monkey
     assert calls[0]["source_interval"] == "1m"
 
 
+# 1m-internals rationale: 1m source candles are aggregated onto 5m bars; config default internals_source_interval="1m" (tradingagents/mes/config.py:110) — ~5 raw readings per bar so a single defective candle cannot blank the bar.
 @pytest.mark.unit
-def test_build_snapshot_defaults_to_5m_source_when_not_configured(monkeypatch):
+def test_build_snapshot_defaults_to_1m_source_when_not_configured(monkeypatch):
     cfg = load_mes_config()
     calls: list[dict] = []
 
@@ -428,5 +429,5 @@ def test_build_snapshot_defaults_to_5m_source_when_not_configured(monkeypatch):
 
     monkeypatch.setattr(schwab_module, "get_internals_frame", fake_get_internals_frame)
     build_snapshot(AS_OF, cfg, fetch_bars=lambda *a, **k: _bar_frame())
-    assert calls[0]["source_interval"] == "5m"
+    assert calls[0]["source_interval"] == "1m"
 
