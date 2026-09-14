@@ -128,6 +128,25 @@ class MesChecklistConfig:
     tick_sustain_bars: int = 3
     vold_slope_bars: int = 6
 
+    # ---- Replay-harness ablation knobs (AZP Phase 2 W2.4). -------------------
+    # Additive toggles the backtest ablation matrix overlays. Both default to
+    # the checklist's historic behavior, so every default-path verdict is
+    # byte-identical to before (guarded by tests/test_mes_ablations.py):
+    #
+    #   enable_spy_context=False  → ablation "spy-gate-off": the entire SPY half
+    #     ($ADD/$VOLD/$TICK breadth items, the 3-of-5 confluence requirement,
+    #     and the SPY no-trade vetoes) is skipped; the MES half alone drives
+    #     verdicts. Mirrors W1.3's tuner-side ``EnableSPYContext=False``.
+    #   divergence_veto=False     → ablation "divergence-veto-off": the
+    #     $VOLD-bullish-vs-price-up / bearish-vs-down opposite-side no-trade
+    #     veto is dropped (item scoring itself is untouched).
+    #
+    # Both are consumed by checklist.py and by nothing else; live behavior is
+    # unchanged because both default to the gate being active.
+    enable_spy_context: bool = True
+    divergence_veto: bool = True
+    # --------------------------------------------------------------------------
+
     min_confirmations: int = 4
     enable_tier_min_confirmations: bool = True
     min_confirmations_marginal: int = 3

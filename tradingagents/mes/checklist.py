@@ -167,6 +167,12 @@ def detect_divergence(snapshot: MesSnapshot) -> Divergence:
 
 def _evaluate_spy(snapshot: MesSnapshot, side: Side) -> list[CheckItem]:
     cfg = snapshot.config
+    if not cfg.enable_spy_context:
+        # Replay-harness ablation "spy-gate-off" (W2.4): the SPY-context half
+        # contributes nothing — no breadth items and no 3-of-5 requirement
+        # (evaluate() auto-passes confluence). Mirrors mes-tuner's
+        # EnableSPYContext=False (W1.3). Default-on: behavior unchanged.
+        return []
     spy = snapshot.spy
     add, tick, vold = snapshot.add, snapshot.tick, snapshot.vold
     slope = snapshot.vold_slope()
@@ -278,8 +284,9 @@ def _evaluate_mes(snapshot: MesSnapshot, side: Side) -> tuple[list[CheckItem], i
                 else (vold < cfg.vold_threshold and vold < prev)
             )
             confirms_ok = snapshot.vold_confirms(side)
-            opposing = (long_side and divergence == "bearish") or (
-                not long_side and divergence == "bullish"
+            opposing = cfg.divergence_veto and (
+                (long_side and divergence == "bearish")
+                or (not long_side and divergence == "bullish")
             )
             vold_sig = (trend_ok or confirms_ok) and not opposing
         else:
@@ -453,14 +460,15 @@ def _no_trade_reasons(snapshot: MesSnapshot, side: Side, spy_confirmations: int)
             )
     if snapshot.tick_whipsawing():
         reasons.append("$TICK whipsawing around 0 with no directional control")
-    divergence = detect_divergence(snapshot)
-    if side == "long" and divergence == "bearish":
-        reasons.append("$VOLD diverging bearishly from SPY bar direction")
-    if side == "short" and divergence == "bullish":
-        reasons.append("$VOLD diverging bullishly from SPY bar direction")
-    if spy_confirmations < 3:
+    if cfg.divergence_veto:
+        divergence = detect_divergence(snapshot)
+        if side == "long" and divergence == "bearish":
+            reasons.append("$VOLD diverging bearishly from SPY bar direction")
+        if side == "short" and divergence == "bullish":
+            reasons.append("$VOLD diverging bullishly from SPY bar direction")
+    if cfg.enable_spy_context and spy_confirmations < 3:
         reasons.append(f"only {spy_confirmations}/5 SPY confirmations (3 required)")
-    if tick is not None and abs(tick) >= cfg.tick_extreme_threshold and (
+    if cfg.enable_spy_context and tick is not None and abs(tick) >= cfg.tick_extreme_threshold and (
         (tick > 0) == (side == "long")
     ):
         reasons.append(f"$TICK at exhaustion extreme ({tick:+.0f}) for a {side}")
@@ -508,7 +516,7 @@ def evaluate(
         gate_reasons=gate_reasons,
         no_trade_reasons=no_trade,
         spy_confirmations=spy_confirmations,
-        spy_confluence_ok=spy_confirmations >= 3,
+        spy_confluence_ok=spy_confirmations >= 3 if cfg.enable_spy_context else True,
         divergence=detect_divergence(snapshot),
         vwap=snapshot.mes.vwap,
         atr=snapshot.mes.atr,
