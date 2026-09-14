@@ -70,6 +70,36 @@ Full plan: `.cursor/plans/rs-focused_screener_637b9df9.plan.md`
   show synthetic $VOLD as `Δ… (synthetic)` and warn that its absolute level is
   not TOS-comparable — trust the delta/z-score, never the level.
 
+### Absolute-threshold comparability census (2026-09)
+
+Goal: decide, per internal reading, whether its **absolute** value from the
+Schwab/radar path is directly comparable to a TOS panel reading — or whether
+the checklist may only consume deltas / z-scores from it. This closes scorecard
+defect 2 ("$ADD absolute thresholds treated as TOS-comparable without a
+documented cross-check"): the engine gate rows below (SPY-context gate,
+`mes-tuner/mes_tuner/engine/spy_context.py`) are the highest stakes. This
+extends the mismatch list above ($VOLD 540095 vs 61940120; VWAP 7660.95 vs
+7656.18; +2·ATR band; VIX absent; ~11:30 radar-vs-TOS timestamp lag).
+
+| Reading | Consumer | Absolute value used? | TOS-comparable? | Evidence (live session) |
+|---|---|---|---|---|
+| $ADD level (±1000 trending / ±500 chop) | SPY-gate add trend/chop (engine) | yes | **pending observation** — highest-stakes row | pending |
+| $TICK threshold (±600 static / dynamic mean-abs) | SPY-gate sustained/exhausted; z-score reads | threshold on level | **pending observation** (compare radar $TICK vs TOS $TICK level + zero-cross times) | pending |
+| $VOLD level | — (never consumed raw) | level differs by orders of magnitude (540095 vs 61940120) | **absolute NOT comparable** — delta/z-score only | 2026-09-11 session (existing note) |
+| $VOLD slope sign | SPY-gate vold trend / divergence | no (slope sign / net change over window) | **delta-only — safe** | n/a |
+| SPY close vs VWAP side | SPY-gate VWAP confirmation | no — side of close relative to same-source VWAP | **delta-only — comparable** (offset 7660.95 vs 7656.18 cancels) | pending observation |
+| SPY bar-to-bar divergence (close vs prev_close) | SPY-gate vold divergence | no — bar-to-bar delta | **delta-only — safe** | n/a |
+| SPY +2·ATR room-to-target | SPY-gate room check | band vs 14-bar ATR | **pending observation** (TOS `MES_ATR_Range_` band value not yet captured) | pending |
+| VIX | not consumed | n/a | **absent from Schwab internals** — checklist row cannot run | n/a |
+| Radar timestamps vs TOS | bucket alignment | — | radar-vs-TOS lag observed (~11:30 session); mitigated by 5m-bucket cache + 1m source | 2026-09-11 |
+
+Fill rules: the user fills "Evidence" after one live/recorded session watched
+through both TOS panels and the Schwab CSVs; until then any gate row marked
+**pending** must not be promoted from delta/z-score-only to absolute, and the
+engine keeps `EnableSPYContext=False` by default. Companion provenance notes
+live in `mes-tuner/mes_tuner/data/loader.py` (`INTERNAL_COLUMNS_PROVENANCE`)
+and the `mes-tuner` README.
+
 ### Internals 1m-source aggregation (2026-09-11)
 - `internals_source_interval: "1m"` (config) fetches internals at 1m and keeps
   each 5m bucket's last good reading; the frame stays 5m-aligned.
