@@ -226,5 +226,10 @@ reports/
 # Local trade exports (not part of the repo)
 mes-order-history.csv
 
+# Backtest run artifacts: per-run JSONL records stay local (Phase 3 sweeps
+# re-read them from disk); only the evidence report is committed (W2.6).
+out/*
+!out/backtest-evidence.md
+
 # Git worktrees (isolated dev workspaces)
 .worktrees/

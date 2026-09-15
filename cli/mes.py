@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -65,6 +66,11 @@ from tradingagents.mes.backtest import (
     join_outcomes,
     list_ablations,
     load_session,
+)
+from tradingagents.mes.backtest.report import (
+    PARITY_STATUS,
+    build_evidence_report,
+    load_order_history,
 )
 from tradingagents.mes.config import MesChecklistConfig
 from tradingagents.mes.levels import (
@@ -988,6 +994,28 @@ def trade_adjust(
         console.print(f"[green]Noted:[/green] {note}")
 
 
+def _git_sha() -> str:
+    """Best-effort repo HEAD SHA for the evidence-report header.
+
+    Shells out to ``git rev-parse`` (CLI-layer capture, per W2.6: the pure
+    emitter takes the SHA as a parameter and never shells out itself).
+    Outside a repo — or if git is unavailable — the header says ``unknown``
+    instead of failing the run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else "unknown"
+
+
 @mes_app.command("replay")
 def replay(
     data_dir: Path | None = typer.Option(
@@ -1011,6 +1039,29 @@ def replay(
     out: Path | None = typer.Option(
         None, "--out", help="Write per-bar checklist records as JSONL (overwrites)."
     ),
+    report: Path | None = typer.Option(
+        None,
+        "--report",
+        help=(
+            "Write the deterministic markdown evidence report (W2.6) to PATH "
+            "(parent dirs created; reuses the run's in-memory stats — no second walk)."
+        ),
+    ),
+    order_history: Path | None = typer.Option(
+        None,
+        "--order-history",
+        exists=True,
+        dir_okay=False,
+        help=(
+            "TOS order-history CSV (e.g. mes-order-history.csv) for the report's "
+            "live-fills cross-check section — context only, never a gate."
+        ),
+    ),
+    parity_status: str | None = typer.Option(
+        None,
+        "--parity-status",
+        help="Override the verbatim W2.5 parity status line in the evidence report.",
+    ),
     ablation: list[str] | None = typer.Option(
         None,
         "--ablation",
@@ -1029,10 +1080,18 @@ def replay(
     that instant (bar-close clock, no lookahead). Output records feed the
     outcome joiner and tier table; pair with --out for downstream grading.
 
+    (bar-close clock, no lookahead). Output records feed the
+    outcome joiner and tier table; pair with --out for downstream grading.
+
     With --ablation, the baseline run anchors a delta table: each named
     overlay re-walks the same sessions with only its config fields changed
     (rule 1: the checklist code path is untouched, only config values).
+
+    With --report, everything the loop already computed is formatted into a
+    deterministic markdown evidence report (W2.6) — coverage manifest,
+    live-fills cross-check, tier × side tables, ablation deltas, parity line.
     """
+    started = time.monotonic()
     cfg = load_mes_config()
     if config is not None:
         cfg = MesChecklistConfig.from_dict(json.loads(Path(config).read_text()))
@@ -1096,6 +1155,7 @@ def replay(
         run_outcomes: list[TradeOutcome] = []
         run_fingerprint = config_fingerprint(run_cfg)
         overlay = config_delta(cfg, run_cfg)
+        tradeable_by_date: dict[str, int] = {}
         if len(run_names) > 1:
             overlay_text = ", ".join(f"{k} {v['from']}→{v['to']}" for k, v in overlay.items())
             console.print(
@@ -1119,6 +1179,7 @@ def replay(
             run_outcomes.extend(joined.outcomes)
             tiers = Counter(record.tier for record in walked.records if record.tradeable)
             tradeable = sum(1 for record in walked.records if record.tradeable)
+            tradeable_by_date[candidate.date] = tradeable
             tier_summary = ", ".join(f"{tier}: {count}" for tier, count in sorted(tiers.items()))
             prefix = f"[bold]{run_name}[/bold] " if len(run_names) > 1 else ""
             console.print(
@@ -1151,6 +1212,10 @@ def replay(
             "avg_r": round(sum(outcome.realized_r for outcome in run_outcomes) / len(run_outcomes), 3)
             if run_outcomes
             else None,
+            # Evidence-report inputs (W2.6): the emitter formats these as-is.
+            "tier_table": run_table,
+            "gate": gate,
+            "tradeable_by_date": tradeable_by_date,
         }
         all_records.extend(run_records)
 
@@ -1194,4 +1259,21 @@ def replay(
                 handle.write(json.dumps(dataclasses.asdict(record), default=str) + "\n")
         scope = f" across {len(run_names)} runs" if len(run_names) > 1 else ""
         console.print(f"[green]Wrote {len(all_records)} records to {out}{scope}[/green]")
+
+    if report is not None:
+        # Pure emitter over the in-memory structures — no second walk. The git
+        # SHA and timestamp are captured here (CLI layer), never inside report.py.
+        report_text = build_evidence_report(
+            manifest=candidates,
+            run_stats=run_stats,
+            parity_status=parity_status if parity_status is not None else PARITY_STATUS,
+            git_sha=_git_sha(),
+            order_history=load_order_history(order_history) if order_history is not None else None,
+            generated_at=datetime.now(ZoneInfo(cfg.session_timezone)).isoformat(timespec="seconds"),
+            data_dir=str(data_dir),
+            wall_clock_seconds=round(time.monotonic() - started, 1),
+        )
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(report_text, encoding="utf-8")
+        console.print(f"[green]Wrote evidence report to {report}[/green]")
 
