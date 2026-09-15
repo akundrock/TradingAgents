@@ -1,7 +1,7 @@
 # MES backtest evidence — full corpus
 
-generated 2026-09-15T13:02:18-04:00 · git 278a73505215 · data dir ../thinkorswim-scripts/tos-market-data/data · wall-clock 46.1s
-corpus: sessions walked: 61 / excluded: 19
+generated 2026-09-15T13:31:27-04:00 · git 25d04b2861c3 · data dir ../thinkorswim-scripts/tos-market-data/data · wall-clock 88.0s
+corpus: sessions walked: 117 / excluded: 34
 
 ## Coverage manifest
 
@@ -80,15 +80,86 @@ corpus: sessions walked: 61 / excluded: 19
 | 2026-06-14 | 0 | 0 | excluded |
 | 2026-06-15 | 174 | 186 | included |
 | 2026-06-16 | 174 | 186 | included |
-| 2026-06-17 | 174 | 186 | included |
+| 2026-06-17 | 127 | 186 | included |
 | 2026-06-18 | 174 | 126 | included |
 | 2026-06-19 | 0 | 0 | excluded |
 | 2026-06-21 | 0 | 0 | excluded |
 | 2026-06-22 | 174 | 186 | included |
-| 2026-06-23 | 174 | 126 | included |
-| 2026-06-24 | 0 | 0 | excluded |
+| 2026-06-23 | 174 | 186 | included |
+| 2026-06-24 | 174 | 186 | included |
+| 2026-06-25 | 174 | 186 | included |
+| 2026-06-26 | 90 | 126 | included |
+| 2026-06-28 | 0 | 0 | excluded |
+| 2026-06-29 | 174 | 186 | included |
+| 2026-06-30 | 174 | 186 | included |
+| 2026-07-01 | 174 | 186 | included |
+| 2026-07-02 | 174 | 126 | included |
+| 2026-07-03 | 0 | 0 | excluded |
+| 2026-07-05 | 0 | 0 | excluded |
+| 2026-07-06 | 174 | 186 | included |
+| 2026-07-07 | 174 | 186 | included |
+| 2026-07-08 | 174 | 185 | included |
+| 2026-07-09 | 174 | 186 | included |
+| 2026-07-10 | 90 | 126 | included |
+| 2026-07-12 | 0 | 0 | excluded |
+| 2026-07-13 | 174 | 186 | included |
+| 2026-07-14 | 174 | 186 | included |
+| 2026-07-15 | 174 | 185 | included |
+| 2026-07-16 | 174 | 186 | included |
+| 2026-07-17 | 90 | 126 | included |
+| 2026-07-19 | 0 | 0 | excluded |
+| 2026-07-20 | 174 | 186 | included |
+| 2026-07-21 | 174 | 186 | included |
+| 2026-07-22 | 174 | 186 | included |
+| 2026-07-23 | 174 | 186 | included |
+| 2026-07-24 | 90 | 124 | included |
+| 2026-07-26 | 0 | 0 | excluded |
+| 2026-07-27 | 174 | 186 | included |
+| 2026-07-28 | 174 | 186 | included |
+| 2026-07-29 | 174 | 186 | included |
+| 2026-07-30 | 174 | 186 | included |
+| 2026-07-31 | 90 | 126 | included |
+| 2026-08-02 | 0 | 0 | excluded |
+| 2026-08-03 | 174 | 186 | included |
+| 2026-08-04 | 174 | 186 | included |
+| 2026-08-05 | 174 | 186 | included |
+| 2026-08-06 | 174 | 186 | included |
+| 2026-08-07 | 90 | 125 | included |
+| 2026-08-09 | 0 | 0 | excluded |
+| 2026-08-10 | 174 | 186 | included |
+| 2026-08-11 | 174 | 185 | included |
+| 2026-08-12 | 174 | 186 | included |
+| 2026-08-13 | 174 | 186 | included |
+| 2026-08-14 | 90 | 124 | included |
+| 2026-08-16 | 0 | 0 | excluded |
+| 2026-08-17 | 174 | 185 | included |
+| 2026-08-18 | 174 | 186 | included |
+| 2026-08-19 | 174 | 186 | included |
+| 2026-08-20 | 174 | 185 | included |
+| 2026-08-21 | 90 | 126 | included |
+| 2026-08-23 | 0 | 0 | excluded |
+| 2026-08-24 | 174 | 186 | included |
+| 2026-08-25 | 0 | 0 | excluded |
+| 2026-08-26 | 174 | 186 | included |
+| 2026-08-27 | 174 | 186 | included |
+| 2026-08-28 | 90 | 126 | included |
+| 2026-08-30 | 0 | 0 | excluded |
+| 2026-08-31 | 174 | 186 | included |
+| 2026-09-01 | 174 | 186 | included |
+| 2026-09-02 | 174 | 186 | included |
+| 2026-09-03 | 174 | 186 | included |
+| 2026-09-04 | 90 | 126 | included |
+| 2026-09-06 | 0 | 0 | excluded |
+| 2026-09-07 | 0 | 0 | excluded |
+| 2026-09-08 | 174 | 186 | included |
+| 2026-09-09 | 174 | 184 | included |
+| 2026-09-10 | 174 | 186 | included |
+| 2026-09-11 | 90 | 124 | included |
+| 2026-09-13 | 0 | 0 | excluded |
+| 2026-09-14 | 174 | 126 | included |
+| 2026-09-15 | 0 | 0 | excluded |
 
-sessions included: 61 / excluded: 19 (discovered: 80)
+sessions included: 117 / excluded: 34 (discovered: 151)
 - 2026-03-24: MES recording has 0 data bars (< min_bars=30)
 - 2026-03-25: no same-date spy_*.csv recording (SPY half of the checklist cannot run)
 - 2026-03-29: MES recording has 0 data bars (< min_bars=30)
@@ -107,7 +178,22 @@ sessions included: 61 / excluded: 19 (discovered: 80)
 - 2026-06-14: MES recording has 0 data bars (< min_bars=30)
 - 2026-06-19: MES recording has 0 data bars (< min_bars=30)
 - 2026-06-21: MES recording has 0 data bars (< min_bars=30)
-- 2026-06-24: MES recording has 0 data bars (< min_bars=30)
+- 2026-06-28: MES recording has 0 data bars (< min_bars=30)
+- 2026-07-03: MES recording has 0 data bars (< min_bars=30)
+- 2026-07-05: MES recording has 0 data bars (< min_bars=30)
+- 2026-07-12: MES recording has 0 data bars (< min_bars=30)
+- 2026-07-19: MES recording has 0 data bars (< min_bars=30)
+- 2026-07-26: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-02: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-09: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-16: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-23: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-25: MES recording has 0 data bars (< min_bars=30)
+- 2026-08-30: MES recording has 0 data bars (< min_bars=30)
+- 2026-09-06: MES recording has 0 data bars (< min_bars=30)
+- 2026-09-07: MES recording has 0 data bars (< min_bars=30)
+- 2026-09-13: MES recording has 0 data bars (< min_bars=30)
+- 2026-09-15: MES recording has 0 data bars (< min_bars=30)
 
 ## Cross-check (live fills)
 
@@ -120,12 +206,12 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| standard | long | 16 | 56% | +0.054 | +0.627 | -0.121 | 3 | +0.86 |
-| standard | short | 11 | 73% | +0.139 | +0.179 | -0.122 | 2 | +1.53 |
-| marginal | long | 227 | 58% | +0.098 | +0.260 | -0.299 | 3 | +22.26 |
-| marginal | short | 162 | 59% | +0.157 | +0.132 | -0.275 | 2 | +25.41 |
+| standard | long | 29 | 52% | -0.050 | +0.257 | -0.037 | 2 | -1.45 |
+| standard | short | 37 | 65% | +0.132 | +0.165 | -0.163 | 2 | +4.90 |
+| marginal | long | 350 | 56% | +0.079 | +0.257 | -0.317 | 3 | +27.72 |
+| marginal | short | 337 | 56% | +0.084 | +0.172 | -0.273 | 2 | +28.38 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Tier × side — divergence-veto-off
 
@@ -134,12 +220,12 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| standard | long | 15 | 60% | +0.124 | +0.401 | -0.114 | 3 | +1.86 |
-| standard | short | 11 | 73% | +0.139 | +0.179 | -0.122 | 2 | +1.53 |
-| marginal | long | 232 | 59% | +0.104 | +0.246 | -0.294 | 3 | +24.04 |
-| marginal | short | 191 | 58% | +0.127 | +0.135 | -0.306 | 2 | +24.31 |
+| standard | long | 28 | 54% | -0.016 | +0.229 | -0.019 | 2 | -0.45 |
+| standard | short | 38 | 63% | +0.129 | +0.172 | -0.211 | 2 | +4.90 |
+| marginal | long | 363 | 57% | +0.088 | +0.259 | -0.302 | 3 | +32.09 |
+| marginal | short | 374 | 56% | +0.078 | +0.180 | -0.286 | 2 | +29.10 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Tier × side — dynamic-threshold-off
 
@@ -148,12 +234,12 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| standard | long | 9 | 56% | +0.170 | +0.870 | -0.226 | 3 | +1.53 |
-| standard | short | 9 | 67% | +0.131 | +0.198 | -0.122 | 2 | +1.18 |
-| marginal | long | 160 | 54% | +0.101 | +0.294 | -0.281 | 3 | +16.08 |
-| marginal | short | 123 | 62% | +0.256 | +0.058 | -0.196 | 2 | +31.50 |
+| standard | long | 17 | 53% | +0.102 | +0.257 | -0.226 | 3 | +1.73 |
+| standard | short | 29 | 69% | +0.158 | +0.104 | -0.122 | 2 | +4.57 |
+| marginal | long | 240 | 57% | +0.146 | +0.273 | -0.300 | 3 | +35.15 |
+| marginal | short | 258 | 56% | +0.140 | +0.156 | -0.222 | 2 | +36.02 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Tier × side — engine-thresholds
 
@@ -162,12 +248,12 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| standard | long | 9 | 56% | +0.170 | +0.870 | -0.226 | 3 | +1.53 |
-| standard | short | 9 | 67% | +0.131 | +0.198 | -0.122 | 2 | +1.18 |
-| marginal | long | 160 | 54% | +0.101 | +0.294 | -0.281 | 3 | +16.08 |
-| marginal | short | 123 | 62% | +0.256 | +0.058 | -0.196 | 2 | +31.50 |
+| standard | long | 17 | 53% | +0.102 | +0.257 | -0.226 | 3 | +1.73 |
+| standard | short | 29 | 69% | +0.158 | +0.104 | -0.122 | 2 | +4.57 |
+| marginal | long | 240 | 57% | +0.146 | +0.273 | -0.300 | 3 | +35.15 |
+| marginal | short | 258 | 56% | +0.140 | +0.156 | -0.222 | 2 | +36.02 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Tier × side — internals-off
 
@@ -176,10 +262,10 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| marginal | long | 15 | 40% | -0.370 | +0.401 | -0.594 | 7 | -5.55 |
-| marginal | short | 8 | 62% | -0.111 | +0.123 | -0.148 | 2 | -0.89 |
+| marginal | long | 24 | 42% | -0.222 | +0.384 | -0.397 | 4.5 | -5.32 |
+| marginal | short | 25 | 68% | +0.035 | +0.000 | +0.000 | 1 | +0.87 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Tier × side — spy-gate-off
 
@@ -188,12 +274,12 @@ marked n<5 — not interpretable and never renders a bare percentage.
 
 | tier | side | n | hit rate | expectancy (R) | median MFE (R) | median MAE (R) | median hold bars | total R |
 |---|---|---|---|---|---|---|---|---:|
-| standard | long | 20 | 55% | -0.021 | +0.380 | -0.110 | 2.5 | -0.41 |
-| standard | short | 11 | 73% | -0.070 | +0.030 | -0.122 | 2 | -0.77 |
-| marginal | long | 302 | 59% | +0.059 | +0.168 | -0.212 | 2 | +17.96 |
-| marginal | short | 223 | 57% | +0.085 | +0.125 | -0.302 | 2 | +18.89 |
+| standard | long | 33 | 55% | -0.059 | +0.000 | +0.000 | 1 | -1.93 |
+| standard | short | 39 | 59% | -0.037 | +0.125 | -0.163 | 2 | -1.45 |
+| marginal | long | 513 | 57% | +0.035 | +0.178 | -0.260 | 2 | +18.17 |
+| marginal | short | 466 | 56% | +0.038 | +0.136 | -0.263 | 2 | +17.68 |
 
-Gate not evaluable: premium or standard tier produced no closed trades across 61 sessions.
+Gate not evaluable: premium or standard tier produced no closed trades across 117 sessions.
 
 ## Ablation deltas
 
@@ -206,20 +292,21 @@ All deltas anchored on baseline (fingerprint `0d24fbb01e19`).
 
 | metric | baseline | divergence-veto-off | delta |
 |---|---:|---:|---:|
-| records | +9635 | +9635 | 0 |
-| tradeable | +1369 | +1434 | +65 |
-| trades | +416 | +449 | +33 |
-| wins | +244 | +264 | +20 |
-| total_r | +50.0597 | +51.7482 | +1.6885 |
-| avg_r | +0.1200 | +0.1150 | -0.0050 |
+| records | +18408 | +18408 | 0 |
+| tradeable | +2553 | +2652 | +99 |
+| trades | +753 | +803 | +50 |
+| wins | +424 | +455 | +31 |
+| total_r | +59.5468 | +65.6332 | +6.0864 |
+| avg_r | +0.0790 | +0.0820 | +0.0030 |
 
 Tier shifts vs baseline (n per tier × side):
 
 | tier | side | baseline n | run n | delta |
 |---|---|---:|---:|---:|
-| marginal | long | 227 | 232 | +5 |
-| marginal | short | 162 | 191 | +29 |
-| standard | long | 16 | 15 | -1 |
+| marginal | long | 350 | 363 | +13 |
+| marginal | short | 337 | 374 | +37 |
+| standard | long | 29 | 28 | -1 |
+| standard | short | 37 | 38 | +1 |
 
 ### dynamic-threshold-off
 
@@ -228,21 +315,21 @@ Tier shifts vs baseline (n per tier × side):
 
 | metric | baseline | dynamic-threshold-off | delta |
 |---|---:|---:|---:|
-| records | +9635 | +9635 | 0 |
-| tradeable | +1369 | +884 | -485 |
-| trades | +416 | +301 | -115 |
-| wins | +244 | +174 | -70 |
-| total_r | +50.0597 | +50.2892 | +0.2295 |
-| avg_r | +0.1200 | +0.1670 | +0.0470 |
+| records | +18408 | +18408 | 0 |
+| tradeable | +2553 | +1627 | -926 |
+| trades | +753 | +544 | -209 |
+| wins | +424 | +309 | -115 |
+| total_r | +59.5468 | +77.4757 | +17.9289 |
+| avg_r | +0.0790 | +0.1420 | +0.0630 |
 
 Tier shifts vs baseline (n per tier × side):
 
 | tier | side | baseline n | run n | delta |
 |---|---|---:|---:|---:|
-| marginal | long | 227 | 160 | -67 |
-| marginal | short | 162 | 123 | -39 |
-| standard | long | 16 | 9 | -7 |
-| standard | short | 11 | 9 | -2 |
+| marginal | long | 350 | 240 | -110 |
+| marginal | short | 337 | 258 | -79 |
+| standard | long | 29 | 17 | -12 |
+| standard | short | 37 | 29 | -8 |
 
 ### engine-thresholds
 
@@ -251,21 +338,21 @@ Tier shifts vs baseline (n per tier × side):
 
 | metric | baseline | engine-thresholds | delta |
 |---|---:|---:|---:|
-| records | +9635 | +9635 | 0 |
-| tradeable | +1369 | +884 | -485 |
-| trades | +416 | +301 | -115 |
-| wins | +244 | +174 | -70 |
-| total_r | +50.0597 | +50.2892 | +0.2295 |
-| avg_r | +0.1200 | +0.1670 | +0.0470 |
+| records | +18408 | +18408 | 0 |
+| tradeable | +2553 | +1627 | -926 |
+| trades | +753 | +544 | -209 |
+| wins | +424 | +309 | -115 |
+| total_r | +59.5468 | +77.4757 | +17.9289 |
+| avg_r | +0.0790 | +0.1420 | +0.0630 |
 
 Tier shifts vs baseline (n per tier × side):
 
 | tier | side | baseline n | run n | delta |
 |---|---|---:|---:|---:|
-| marginal | long | 227 | 160 | -67 |
-| marginal | short | 162 | 123 | -39 |
-| standard | long | 16 | 9 | -7 |
-| standard | short | 11 | 9 | -2 |
+| marginal | long | 350 | 240 | -110 |
+| marginal | short | 337 | 258 | -79 |
+| standard | long | 29 | 17 | -12 |
+| standard | short | 37 | 29 | -8 |
 
 ### internals-off
 
@@ -274,21 +361,21 @@ Tier shifts vs baseline (n per tier × side):
 
 | metric | baseline | internals-off | delta |
 |---|---:|---:|---:|
-| records | +9635 | +9635 | 0 |
-| tradeable | +1369 | +26 | -1343 |
-| trades | +416 | +23 | -393 |
-| wins | +244 | +11 | -233 |
-| total_r | +50.0597 | -6.4356 | -56.4953 |
-| avg_r | +0.1200 | -0.2800 | -0.4000 |
+| records | +18408 | +18408 | 0 |
+| tradeable | +2553 | +53 | -2500 |
+| trades | +753 | +49 | -704 |
+| wins | +424 | +27 | -397 |
+| total_r | +59.5468 | -4.4505 | -63.9973 |
+| avg_r | +0.0790 | -0.0910 | -0.1700 |
 
 Tier shifts vs baseline (n per tier × side):
 
 | tier | side | baseline n | run n | delta |
 |---|---|---:|---:|---:|
-| marginal | long | 227 | 15 | -212 |
-| marginal | short | 162 | 8 | -154 |
-| standard | long | 16 | 0 | -16 |
-| standard | short | 11 | 0 | -11 |
+| marginal | long | 350 | 24 | -326 |
+| marginal | short | 337 | 25 | -312 |
+| standard | long | 29 | 0 | -29 |
+| standard | short | 37 | 0 | -37 |
 
 ### spy-gate-off
 
@@ -297,20 +384,21 @@ Tier shifts vs baseline (n per tier × side):
 
 | metric | baseline | spy-gate-off | delta |
 |---|---:|---:|---:|
-| records | +9635 | +9635 | 0 |
-| tradeable | +1369 | +1729 | +360 |
-| trades | +416 | +556 | +140 |
-| wins | +244 | +325 | +81 |
-| total_r | +50.0597 | +35.6640 | -14.3957 |
-| avg_r | +0.1200 | +0.0640 | -0.0560 |
+| records | +18408 | +18408 | 0 |
+| tradeable | +2553 | +3322 | +769 |
+| trades | +753 | +1051 | +298 |
+| wins | +424 | +595 | +171 |
+| total_r | +59.5468 | +32.4673 | -27.0795 |
+| avg_r | +0.0790 | +0.0310 | -0.0480 |
 
 Tier shifts vs baseline (n per tier × side):
 
 | tier | side | baseline n | run n | delta |
 |---|---|---:|---:|---:|
-| marginal | long | 227 | 302 | +75 |
-| marginal | short | 162 | 223 | +61 |
-| standard | long | 16 | 20 | +4 |
+| marginal | long | 350 | 513 | +163 |
+| marginal | short | 337 | 466 | +129 |
+| standard | long | 29 | 33 | +4 |
+| standard | short | 37 | 39 | +2 |
 
 ## Parity status (W2.5)
 
@@ -321,7 +409,7 @@ W2.5 parity spot-check over the frozen 5-session fixture (647 bars): verdict par
 - Verdicts are bar-replayed on 5-minute bars; the live checklist runs on
   1-minute snapshots from the TOS dashboard. Bar-level verdict parity is
   approximate — the W2.5 spot-check quantified the gap (see parity status).
-- SPY coverage is partial: 75/80
+- SPY coverage is partial: 144/151
   discovered sessions have same-date SPY recordings; sessions without SPY
   are excluded, so the walked corpus understates the recorded corpus.
 - W2.5-D1: the 3 unexplained per-bar verdict diffs on the frozen fixture
