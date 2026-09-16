@@ -34,6 +34,11 @@ _TUNER_FIELD_ALIASES: dict[str, str] = {
     "PatternRequireVWAPSide": "pattern_require_vwap_side",
     "PatternRequireSigmaExtreme": "pattern_require_sigma_extreme",
     "PatternExtremeSigma": "pattern_extreme_sigma",
+    # A-port: AZP mean-reversion knobs (default off; matrix §3 Option A).
+    "EnableMeanReversion": "enable_mean_reversion",
+    "MRZoneSigma": "mr_zone_sigma",
+    "MRMinConfirmations": "mr_min_confirmations",
+    "MRStopATRBuffer": "mr_stop_atr_buffer",
     "AddThreshold": "add_threshold",
     "TickThreshold": "tick_threshold",
     "UseDynamicThreshold": "use_dynamic_tick_threshold",
@@ -162,6 +167,18 @@ class MesChecklistConfig:
     enable_spy_context: bool = True
     divergence_veto: bool = True
     # --------------------------------------------------------------------------
+
+    # A-port: AZP mean-reversion path (azp-code-fidelity-matrix.md §3 Option A).
+    # Parallel counter-trend entry evaluated only when the close sits at least
+    # mr_zone_sigma volume-weighted deviations beyond VWAP and a reversal
+    # trigger fires; needs mr_min_confirmations of the flipped vetoes
+    # ($VOLD divergence agreement / $TICK exhaustion / volume surge); targets
+    # VWAP, stops beyond the trigger extreme ± mr_stop_atr_buffer·ATR.
+    # Default off — trend checklist behavior is untouched.
+    enable_mean_reversion: bool = False
+    mr_zone_sigma: float = 2.0
+    mr_min_confirmations: int = 2
+    mr_stop_atr_buffer: float = 1.0
 
     min_confirmations: int = 4
     enable_tier_min_confirmations: bool = True

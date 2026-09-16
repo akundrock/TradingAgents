@@ -94,6 +94,29 @@ def test_tuner_alias_override_maps_to_snake_case_field():
 
 
 @pytest.mark.unit
+def test_mean_reversion_alias_maps_to_snake_case_field():
+    cfg = load_mes_config({
+        "EnableMeanReversion": True,
+        "MRZoneSigma": 2.5,
+        "MRMinConfirmations": 1,
+        "MRStopATRBuffer": 2.5,
+    })
+    assert cfg.enable_mean_reversion is True
+    assert cfg.mr_zone_sigma == 2.5
+    assert cfg.mr_min_confirmations == 1
+    assert cfg.mr_stop_atr_buffer == 2.5
+
+
+@pytest.mark.unit
+def test_mean_reversion_defaults_off():
+    cfg = MesChecklistConfig()
+    assert cfg.enable_mean_reversion is False
+    assert cfg.mr_zone_sigma == 2.0
+    assert cfg.mr_min_confirmations == 2
+    assert cfg.mr_stop_atr_buffer == 1.0
+
+
+@pytest.mark.unit
 def test_divergence_veto_alias_maps_to_snake_case_field():
     cfg = load_mes_config({"DivergenceVeto": False})
     assert cfg.divergence_veto is False
