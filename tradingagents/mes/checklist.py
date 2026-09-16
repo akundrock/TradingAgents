@@ -63,6 +63,18 @@ class ChecklistResult:
     opening_range_low: float | None = None
     last_price: float = 0.0
 
+    # A-port: additive mean-reversion evaluation (default off). MR never
+    # widens `tradeable` — it surfaces as fields the CLI/runner consume.
+    mr_zone: bool = False
+    mr_trigger: bool = False
+    mr_side: str | None = None
+    mr_entry: bool = False
+    mr_confirmations: int = 0
+    mr_required: int = 0
+    mr_score: int = 0
+    mr_stop: float | None = None
+    mr_target: float | None = None
+
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -171,6 +183,79 @@ def _pattern(state: SeriesState, cfg: MesChecklistConfig, side: Side) -> bool:
     if cfg.pattern_require_vwap_side:
         confirmed = confirmed and state.vwap_ready and bar.close > state.vwap
     return confirmed and _sigma_extreme(False)
+
+
+def _mr_zone(snapshot: MesSnapshot, cfg: MesChecklistConfig, side_long: bool) -> bool:
+    """A-port zone: close >= mr_zone_sigma volume-weighted deviations beyond
+    VWAP on the fade side — (vwap - close)/sigma for a fade long, mirror short.
+    Zero sigma (no volume variance) never qualifies. A true −2σ hammer has
+    close < VWAP, so vwap_long=False — this is the counter-trend zone the
+    trend-side confirmation race can never confirm (matrix §1)."""
+    mes = snapshot.mes
+    if not cfg.enable_mean_reversion or not mes.vwap_ready or mes.vwap_sigma <= 0:
+        return False
+    offset = (mes.vwap - mes.close) if side_long else (mes.close - mes.vwap)
+    return (offset / mes.vwap_sigma) >= cfg.mr_zone_sigma
+
+
+def _mr_trigger(snapshot: MesSnapshot, cfg: MesChecklistConfig, side_long: bool) -> bool:
+    """A-port trigger: the existing hammer/inverse-hammer geometry +
+    retracement confirmation, reused as-is (matrix §3 Option A)."""
+    return _pattern(snapshot.mes, cfg, "long" if side_long else "short")
+
+
+def _mr_confirmations(snapshot: MesSnapshot, cfg: MesChecklistConfig, side_long: bool) -> int:
+    """A-port confirmations: the trend vetoes, flipped into fade-direction
+    confirms — $VOLD divergence agreement (bullish divergence for a fade
+    long: price down, $VOLD up), $TICK exhaustion extreme on the fade side,
+    volume surge."""
+    mes = snapshot.mes
+    divergence = detect_divergence(snapshot)
+    count = 0
+    if side_long and divergence == "bullish":
+        count += 1
+    if not side_long and divergence == "bearish":
+        count += 1
+    tick = snapshot.tick
+    if tick is not None and cfg.enable_tick:
+        if side_long and tick <= -cfg.tick_extreme_threshold:
+            count += 1
+        if not side_long and tick >= cfg.tick_extreme_threshold:
+            count += 1
+    if (
+        cfg.enable_volume_surge
+        and mes.volume_ready
+        and mes.last.volume > mes.avg_volume * cfg.volume_multiplier
+    ):
+        count += 1
+    return count
+
+
+def _mr_evaluate(snapshot: MesSnapshot) -> tuple[bool, str | None, int, int, float | None, float | None]:
+    """Parallel MR evaluation (additive; never widens the trend verdict).
+    Returns (mr_entry, mr_side, mr_confirmations, mr_score, mr_stop, mr_target)."""
+    cfg = snapshot.config
+    if not cfg.enable_mean_reversion:
+        return False, None, 0, 0, None, None
+    mes = snapshot.mes
+    for side_long in (True, False):
+        if _mr_zone(snapshot, cfg, side_long) and _mr_trigger(snapshot, cfg, side_long):
+            mr_confirmations = _mr_confirmations(snapshot, cfg, side_long)
+            mr_score = 1 + mr_confirmations  # zone+trigger point + confirmations
+            mr_entry = mr_confirmations >= cfg.mr_min_confirmations
+            mr_stop = mr_target = None
+            if mes.atr_ready and mes.atr > 0:
+                if side_long:
+                    mr_stop = mes.last.low - cfg.mr_stop_atr_buffer * mes.atr
+                else:
+                    mr_stop = mes.last.high + cfg.mr_stop_atr_buffer * mes.atr
+                mr_target = mes.vwap
+            return (
+                mr_entry and mes.has_session_start,
+                "long" if side_long else "short",
+                mr_confirmations, mr_score, mr_stop, mr_target,
+            )
+    return False, None, 0, 0, None, None
 
 
 def detect_divergence(snapshot: MesSnapshot) -> Divergence:
@@ -513,6 +598,12 @@ def evaluate(
     tier = score_tier(confirmations)
     no_trade = _no_trade_reasons(snapshot, resolved, spy_confirmations)
 
+    # A-port: parallel mean-reversion evaluation — additive only. It never
+    # widens the trend verdict (`tradeable` is untouched); when the trend
+    # path has no trade, an MR candidate at the ±zone with its own
+    # confirmations still reports as an MR entry for the operator/CLI.
+    mr_entry, mr_side, mr_confirmations, mr_score, mr_stop, mr_target = _mr_evaluate(snapshot)
+
     result = ChecklistResult(
         as_of_label=snapshot.as_of.strftime("%Y-%m-%d %H:%M ET"),
         side=resolved,
@@ -538,6 +629,15 @@ def evaluate(
         opening_range_high=snapshot.mes.opening_range_high,
         opening_range_low=snapshot.mes.opening_range_low,
         last_price=snapshot.mes.close,
+        mr_zone=_mr_zone(snapshot, cfg, mr_side == "long") if mr_side else False,
+        mr_trigger=bool(mr_side),
+        mr_side=mr_side,
+        mr_entry=mr_entry,
+        mr_confirmations=mr_confirmations,
+        mr_required=cfg.mr_min_confirmations if cfg.enable_mean_reversion else 0,
+        mr_score=mr_score,
+        mr_stop=mr_stop,
+        mr_target=mr_target,
         warnings=list(snapshot.warnings),
     )
     result.direction = resolved if result.tradeable else "none"
