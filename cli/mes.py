@@ -215,6 +215,14 @@ def _print_result(result: ChecklistResult, snapshot: MesSnapshot) -> None:
         console.print(f"  [red]no-trade:[/red] {reason}")
     for warning in snapshot.warnings + result.warnings:
         console.print(f"  [yellow]warning:[/yellow] {warning}")
+    if result.mr_side is not None:
+        mr_state = "ENTRY" if result.mr_entry else "watch"
+        body = (
+            f"[yellow]MR ({result.mr_side})[/] score {result.mr_score} "
+            f"conf {result.mr_confirmations}/{result.mr_required}"
+            + (f" stop {result.mr_stop:.2f} target {result.mr_target:.2f}" if result.mr_stop else "")
+        )
+        console.print(Panel(body, title=f"Mean-reversion {mr_state}", border_style="magenta"))
 
 
 def _sizing_payload(result: ChecklistResult, cfg, risk: float, stop_points: float | None) -> tuple[dict, str]:
