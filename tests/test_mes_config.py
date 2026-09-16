@@ -94,6 +94,14 @@ def test_tuner_alias_override_maps_to_snake_case_field():
 
 
 @pytest.mark.unit
+def test_divergence_veto_alias_maps_to_snake_case_field():
+    cfg = load_mes_config({"DivergenceVeto": False})
+    assert cfg.divergence_veto is False
+    cfg_on = load_mes_config({"DivergenceVeto": True})
+    assert cfg_on.divergence_veto is True
+
+
+@pytest.mark.unit
 def test_to_dict_from_dict_round_trip():
     cfg = load_mes_config({"add_threshold": 321.0, "max_contracts": 4, "allow_orb_window": True})
     restored = MesChecklistConfig.from_dict(cfg.to_dict())

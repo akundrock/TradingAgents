@@ -43,6 +43,13 @@ _TUNER_FIELD_ALIASES: dict[str, str] = {
     "TickBurstMultiplier": "tick_burst_multiplier",
     "VOLDThreshold": "vold_threshold",
     "VOLDUseTrend": "vold_use_trend",
+    # W2.5.2 alignment: profiles/baseline.json gained "DivergenceVeto" (commit
+    # 4c97d90, divergence-veto ablation spec) but the alias table was never
+    # updated, so mes-tuner's partition test (_ta_mes_loader.py:267) failed
+    # with "keys not covered by the W2.5.2 alignment: ['DivergenceVeto']" and
+    # from_dict silently dropped the key. Value is behavior-neutral: the
+    # profile's true equals this field's default True.
+    "DivergenceVeto": "divergence_veto",
     "VOLDZScoreLookback": "vold_zscore_lookback",
     "MinConfirmations": "min_confirmations",
     "EnableTierMinConfirmations": "enable_tier_min_confirmations",
