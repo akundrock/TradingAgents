@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -50,6 +52,27 @@ from tradingagents.mes import (
     suggest_stop_distance_points,
 )
 from tradingagents.mes.stop_quality import build_stop_quality_report
+from tradingagents.mes.backtest import (
+    ReplayRecord,
+    TradeOutcome,
+    apply_ablation,
+    build_tier_table,
+    config_delta,
+    config_fingerprint,
+    discover_sessions,
+    evaluate_gate,
+    format_tier_table,
+    get_ablation,
+    join_outcomes,
+    list_ablations,
+    load_session,
+)
+from tradingagents.mes.backtest.report import (
+    PARITY_STATUS,
+    build_evidence_report,
+    load_order_history,
+)
+from tradingagents.mes.config import MesChecklistConfig
 from tradingagents.mes.levels import (
     render_trade_levels_hint,
     suggest_trade_levels_from_snapshot,
@@ -969,4 +992,288 @@ def trade_adjust(
     elif note:
         journal.append_trade_adjusted(stamp.strftime("%Y-%m-%d"), note=note)
         console.print(f"[green]Noted:[/green] {note}")
+
+
+def _git_sha() -> str:
+    """Best-effort repo HEAD SHA for the evidence-report header.
+
+    Shells out to ``git rev-parse`` (CLI-layer capture, per W2.6: the pure
+    emitter takes the SHA as a parameter and never shells out itself).
+    Outside a repo — or if git is unavailable — the header says ``unknown``
+    instead of failing the run.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = result.stdout.strip()
+    return sha if result.returncode == 0 and sha else "unknown"
+
+
+@mes_app.command("replay")
+def replay(
+    data_dir: Path | None = typer.Option(
+        None,
+        "--data-dir",
+        exists=True,
+        file_okay=False,
+        help="Directory of recorded mes_YYYY-MM-DD.csv / spy_YYYY-MM-DD.csv bar files (required unless --list-ablations).",
+    ),
+    date: list[str] | None = typer.Option(
+        None, "--date", help="Walk only this session date (YYYY-MM-DD, repeatable)."
+    ),
+    start: str | None = typer.Option(None, "--start", help="First session date (YYYY-MM-DD)."),
+    end: str | None = typer.Option(None, "--end", help="Last session date (YYYY-MM-DD)."),
+    min_bars: int = typer.Option(
+        30, "--min-bars", help="Exclude MES recordings with fewer data rows."
+    ),
+    config: Path | None = typer.Option(
+        None, "--config", help="JSON profile merged over defaults (tuner aliases allowed)."
+    ),
+    out: Path | None = typer.Option(
+        None, "--out", help="Write per-bar checklist records as JSONL (overwrites)."
+    ),
+    report: Path | None = typer.Option(
+        None,
+        "--report",
+        help=(
+            "Write the deterministic markdown evidence report (W2.6) to PATH "
+            "(parent dirs created; reuses the run's in-memory stats — no second walk)."
+        ),
+    ),
+    order_history: Path | None = typer.Option(
+        None,
+        "--order-history",
+        exists=True,
+        dir_okay=False,
+        help=(
+            "TOS order-history CSV (e.g. mes-order-history.csv) for the report's "
+            "live-fills cross-check section — context only, never a gate."
+        ),
+    ),
+    parity_status: str | None = typer.Option(
+        None,
+        "--parity-status",
+        help="Override the verbatim W2.5 parity status line in the evidence report.",
+    ),
+    ablation: list[str] | None = typer.Option(
+        None,
+        "--ablation",
+        help=(
+            "Named ablation overlay to run after the baseline (repeatable; "
+            "'all' runs every ablation). See --list-ablations."
+        ),
+    ),
+    list_ablations_only: bool = typer.Option(
+        False, "--list-ablations", help="Print the ablation matrix and exit."
+    ),
+):
+    """Replay recorded sessions bar by bar through the unmodified checklist.
+
+    Every MES bar close is evaluated with exactly the data that was visible at
+    that instant (bar-close clock, no lookahead). Output records feed the
+    outcome joiner and tier table; pair with --out for downstream grading.
+
+    (bar-close clock, no lookahead). Output records feed the
+    outcome joiner and tier table; pair with --out for downstream grading.
+
+    With --ablation, the baseline run anchors a delta table: each named
+    overlay re-walks the same sessions with only its config fields changed
+    (rule 1: the checklist code path is untouched, only config values).
+
+    With --report, everything the loop already computed is formatted into a
+    deterministic markdown evidence report (W2.6) — coverage manifest,
+    live-fills cross-check, tier × side tables, ablation deltas, parity line.
+    """
+    started = time.monotonic()
+    cfg = load_mes_config()
+    if config is not None:
+        cfg = MesChecklistConfig.from_dict(json.loads(Path(config).read_text()))
+
+    if list_ablations_only:
+        matrix = Table(title="Ablation matrix (W2.4)")
+        matrix.add_column("Name")
+        matrix.add_column("Base")
+        matrix.add_column("Question")
+        matrix.add_column("Config delta vs this profile")
+        for entry in list_ablations():
+            delta = config_delta(cfg, apply_ablation(cfg, entry.name))
+            delta_text = ", ".join(f"{k}: {v['from']}→{v['to']}" for k, v in delta.items())
+            matrix.add_row(entry.name, entry.base, entry.question, delta_text or "(none)")
+        console.print(matrix)
+        raise typer.Exit()
+
+    if data_dir is None:
+        raise typer.BadParameter(
+            "--data-dir is required (directory of recorded MES/SPY bar files).",
+            param_hint="--data-dir",
+        )
+
+    requested_ablations = list(ablation or [])
+    if "all" in requested_ablations:
+        requested_ablations = [entry.name for entry in list_ablations()]
+    for name in requested_ablations:
+        get_ablation(name)  # fail fast with the known-names message
+
+    run_names = ["baseline", *requested_ablations] if requested_ablations else ["baseline"]
+
+    wanted_dates = set(date or [])
+    candidates = discover_sessions(data_dir, start=start, end=end, min_bars=min_bars)
+    if wanted_dates:
+        candidates = [candidate for candidate in candidates if candidate.date in wanted_dates]
+
+    manifest = Table(title="Session manifest")
+    manifest.add_column("Date")
+    manifest.add_column("MES bars", justify="right")
+    manifest.add_column("SPY bars", justify="right")
+    manifest.add_column("Status")
+    for candidate in candidates:
+        if candidate.excluded is None:
+            status = "[green]walkable[/green]"
+        else:
+            status = f"[red]{candidate.excluded}[/red]"
+        manifest.add_row(candidate.date, str(candidate.mes_bars), str(candidate.spy_bars), status)
+    console.print(manifest)
+
+    walkable = [candidate for candidate in candidates if candidate.excluded is None]
+    if not walkable:
+        console.print("[yellow]No walkable sessions matched the selection.[/yellow]")
+        raise typer.Exit(code=1)
+
+    all_records: list[ReplayRecord] = []
+    run_stats: dict[str, dict] = {}
+    sessions_by_date: dict[str, ReplaySession] = {}
+    for run_name in run_names:
+        run_cfg = cfg if run_name == "baseline" else apply_ablation(cfg, run_name)
+        run_records: list[ReplayRecord] = []
+        run_outcomes: list[TradeOutcome] = []
+        run_fingerprint = config_fingerprint(run_cfg)
+        overlay = config_delta(cfg, run_cfg)
+        tradeable_by_date: dict[str, int] = {}
+        if len(run_names) > 1:
+            overlay_text = ", ".join(f"{k} {v['from']}→{v['to']}" for k, v in overlay.items())
+            console.print(
+                f"\n[bold cyan]=== run: {run_name} ===[/bold cyan] "
+                f"config {run_fingerprint} · {overlay_text or 'untouched profile'}"
+            )
+        for candidate in walkable:
+            template = sessions_by_date.get(candidate.date)
+            if template is None:
+                session = load_session(
+                    candidate.mes_path, candidate.spy_path, run_cfg, ablation=run_name
+                )
+                sessions_by_date[candidate.date] = session
+            else:
+                # Bars are parsed once per session; re-armed per run with the
+                # overlaid config (bar lists are shared, never mutated).
+                session = dataclasses.replace(template, cfg=run_cfg, ablation=run_name)
+            walked = session.walk()
+            run_records.extend(walked.records)
+            joined = join_outcomes(walked.records, session.mes_bars, run_cfg)
+            run_outcomes.extend(joined.outcomes)
+            tiers = Counter(record.tier for record in walked.records if record.tradeable)
+            tradeable = sum(1 for record in walked.records if record.tradeable)
+            tradeable_by_date[candidate.date] = tradeable
+            tier_summary = ", ".join(f"{tier}: {count}" for tier, count in sorted(tiers.items()))
+            prefix = f"[bold]{run_name}[/bold] " if len(run_names) > 1 else ""
+            console.print(
+                f"{prefix}[bold]{candidate.date}[/bold]: {len(walked.records)} bars evaluated, "
+                f"{walked.skipped_bars} skipped (insufficient data), "
+                f"{tradeable} tradeable — {tier_summary or 'no tiers reached'}; "
+                f"{len(joined.outcomes)} closed trades "
+                f"({joined.skipped_no_levels} no-levels, {joined.skipped_no_fill_bar} no-fill-bar)"
+            )
+            for warning in walked.warnings:
+                console.print(f"  [yellow]! {warning}[/yellow]")
+
+        run_table = build_tier_table(run_outcomes, sessions=len(walkable))
+        console.print()
+        console.print(f"[bold]Tier × side table — {run_name} ({len(walkable)} included sessions)[/bold]")
+        console.print(format_tier_table(run_table))
+        gate = evaluate_gate(run_table)
+        style = "green" if gate.met else ("red" if gate.met is False else "yellow")
+        console.print(f"[{style}]{gate.message}[/{style}]")
+
+        total_r = round(sum(outcome.realized_r for outcome in run_outcomes), 4)
+        run_stats[run_name] = {
+            "config_fingerprint": run_fingerprint,
+            "config_delta": overlay,
+            "records": len(run_records),
+            "tradeable": sum(1 for record in run_records if record.tradeable),
+            "trades": len(run_outcomes),
+            "wins": sum(1 for outcome in run_outcomes if outcome.realized_r > 0),
+            "total_r": total_r,
+            "avg_r": round(sum(outcome.realized_r for outcome in run_outcomes) / len(run_outcomes), 3)
+            if run_outcomes
+            else None,
+            # Evidence-report inputs (W2.6): the emitter formats these as-is.
+            "tier_table": run_table,
+            "gate": gate,
+            "tradeable_by_date": tradeable_by_date,
+        }
+        all_records.extend(run_records)
+
+    if requested_ablations:
+        baseline_stats = run_stats["baseline"]
+        console.print()
+        console.print(
+            "[bold]Ablation deltas vs baseline "
+            f"(records={baseline_stats['records']}, tradeable={baseline_stats['tradeable']}, "
+            f"trades={baseline_stats['trades']}, total R={baseline_stats['total_r']})[/bold]"
+        )
+        delta_table = Table()
+        delta_table.add_column("Ablation")
+        delta_table.add_column("Config delta")
+        for column in ("Records Δ", "Tradeable Δ", "Trades Δ", "Wins Δ", "Total R Δ", "Avg R"):
+            delta_table.add_column(column, justify="right")
+        for run_name in run_names[1:]:
+            stats = run_stats[run_name]
+            base = run_stats["baseline"]
+            avg_delta = (
+                None
+                if stats["avg_r"] is None or base["avg_r"] is None
+                else round(stats["avg_r"] - base["avg_r"], 3)
+            )
+            delta_table.add_row(
+                run_name,
+                ", ".join(f"{k} {v['from']}→{v['to']}" for k, v in stats["config_delta"].items()),
+                str(stats["records"] - base["records"]),
+                str(stats["tradeable"] - base["tradeable"]),
+                str(stats["trades"] - base["trades"]),
+                str(stats["wins"] - base["wins"]),
+                f"{stats['total_r'] - base['total_r']:+.2f}",
+                "n/a" if avg_delta is None else f"{avg_delta:+.3f}",
+            )
+        console.print(delta_table)
+
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w", encoding="utf-8") as handle:
+            for record in all_records:
+                handle.write(json.dumps(dataclasses.asdict(record), default=str) + "\n")
+        scope = f" across {len(run_names)} runs" if len(run_names) > 1 else ""
+        console.print(f"[green]Wrote {len(all_records)} records to {out}{scope}[/green]")
+
+    if report is not None:
+        # Pure emitter over the in-memory structures — no second walk. The git
+        # SHA and timestamp are captured here (CLI layer), never inside report.py.
+        report_text = build_evidence_report(
+            manifest=candidates,
+            run_stats=run_stats,
+            parity_status=parity_status if parity_status is not None else PARITY_STATUS,
+            git_sha=_git_sha(),
+            order_history=load_order_history(order_history) if order_history is not None else None,
+            generated_at=datetime.now(ZoneInfo(cfg.session_timezone)).isoformat(timespec="seconds"),
+            data_dir=str(data_dir),
+            wall_clock_seconds=round(time.monotonic() - started, 1),
+        )
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(report_text, encoding="utf-8")
+        console.print(f"[green]Wrote evidence report to {report}[/green]")
 

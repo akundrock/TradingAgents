@@ -61,6 +61,17 @@ _TUNER_FIELD_ALIASES: dict[str, str] = {
     "BlockMorningUntil": "block_morning_until",
     "AllowORBWindow": "allow_orb_window",
     "AllowMissingInternals": "allow_missing_internals",
+    # W1.3 SPY-context gate port: the checklist's discretionary SPY thresholds
+    # (config.py add_trend_threshold/add_chop_threshold/tick_extreme_threshold/
+    # tick_sustain_bars/vold_slope_bars) are the promotion targets for tuned
+    # tuner values. EnableSPYContext is intentionally unmapped: the checklist
+    # gate is always-on and the toggle exists only for default-off engine
+    # parity (mes_tuner/engine/spy_context.py).
+    "SPYAddTrendThreshold": "add_trend_threshold",
+    "SPYAddChopThreshold": "add_chop_threshold",
+    "SPYTickExtremeThreshold": "tick_extreme_threshold",
+    "SPYTickSustainBars": "tick_sustain_bars",
+    "VOLDTrendBars": "vold_slope_bars",
 }
 
 
@@ -104,10 +115,11 @@ class MesChecklistConfig:
     vold_zscore_lookback: int = 20
 
     # Candle granularity the internals series is fetched at, before
-    # aggregation into the 5m frame ("5m" = direct candles, the default).
-    # 1m gives ~5 raw readings per bar, so a single defective candle no
-    # longer blanks the bar. See NOTES.md data-fidelity census.
-    internals_source_interval: str = "5m"
+    # aggregation into the 5m frame ("1m" = raw 1m candles, the default;
+    # "5m" = direct 5m candles). 1m gives ~5 raw readings per bar, so a
+    # single defective candle no longer blanks the bar. See NOTES.md
+    # data-fidelity census.
+    internals_source_interval: str = "1m"
 
     # Discretionary SPY-context thresholds from azp-dual-chart-workflow.md.
     add_trend_threshold: float = 1000.0
@@ -115,6 +127,25 @@ class MesChecklistConfig:
     tick_extreme_threshold: float = 1000.0
     tick_sustain_bars: int = 3
     vold_slope_bars: int = 6
+
+    # ---- Replay-harness ablation knobs (AZP Phase 2 W2.4). -------------------
+    # Additive toggles the backtest ablation matrix overlays. Both default to
+    # the checklist's historic behavior, so every default-path verdict is
+    # byte-identical to before (guarded by tests/test_mes_ablations.py):
+    #
+    #   enable_spy_context=False  → ablation "spy-gate-off": the entire SPY half
+    #     ($ADD/$VOLD/$TICK breadth items, the 3-of-5 confluence requirement,
+    #     and the SPY no-trade vetoes) is skipped; the MES half alone drives
+    #     verdicts. Mirrors W1.3's tuner-side ``EnableSPYContext=False``.
+    #   divergence_veto=False     → ablation "divergence-veto-off": the
+    #     $VOLD-bullish-vs-price-up / bearish-vs-down opposite-side no-trade
+    #     veto is dropped (item scoring itself is untouched).
+    #
+    # Both are consumed by checklist.py and by nothing else; live behavior is
+    # unchanged because both default to the gate being active.
+    enable_spy_context: bool = True
+    divergence_veto: bool = True
+    # --------------------------------------------------------------------------
 
     min_confirmations: int = 4
     enable_tier_min_confirmations: bool = True

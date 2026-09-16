@@ -574,13 +574,60 @@ def snapshot_from_csv(
     if not mes_bars or not spy_bars:
         raise ValueError(f"no bars at or before {as_of} in the supplied CSVs")
 
+    return snapshot_from_bars(mes_bars, spy_bars, as_of, cfg)
+
+
+def load_csv_bars(path: str | Path) -> list[Bar]:
+    """Load a full recorded ``timestamp,open,high,low,close,volume,add,tick,vold`` CSV.
+
+    Timestamps are parsed then tz-stripped exactly like :func:`snapshot_from_csv`
+    (recorded files carry ``-05:00`` offsets but are read as naive ET wall clock),
+    and sorted ascending. No ``as_of`` filtering happens here — callers slice via
+    :func:`snapshot_from_bars` so one load serves every bar of a replay.
+    """
+    frame = pd.read_csv(path)
+    frame["Date"] = pd.to_datetime(frame["timestamp"]).dt.tz_localize(None)
+    frame = frame.sort_values("Date")
+    frame = frame.rename(
+        columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )
+    return _frame_to_bars(frame, None)
+
+
+def snapshot_from_bars(
+    mes_bars: list[Bar],
+    spy_bars: list[Bar],
+    as_of: datetime,
+    cfg: MesChecklistConfig,
+) -> MesSnapshot:
+    """Build a point-in-time snapshot from pre-loaded bar series.
+
+    Both series are filtered to bars at or before ``as_of`` (the bar-close clock:
+    a bar stamped ``T`` is treated as visible once ``as_of == T``) and replayed
+    through the same streaming-indicator path as :func:`build_snapshot`, so a
+    replayed snapshot is indistinguishable from one built live at that instant.
+
+    ``tradingagents.mes.backtest`` walks sessions by slicing the same pre-loaded
+    lists once per bar instead of re-reading CSVs.
+    """
+    mes_sliced = [bar for bar in mes_bars if bar.timestamp <= as_of]
+    spy_sliced = [bar for bar in spy_bars if bar.timestamp <= as_of]
+    if not mes_sliced or not spy_sliced:
+        raise ValueError(f"no bars at or before {as_of} in the supplied series")
+
     return MesSnapshot(
         as_of=as_of,
         session_date=as_of.strftime("%Y-%m-%d"),
         config=cfg,
-        mes=_replay(cfg.mes_symbol, mes_bars, cfg),
-        spy=_replay(cfg.spy_symbol, spy_bars, cfg),
-        prior_mes=prior_session_levels(mes_bars, as_of, cfg, cfg.mes_tick_size),
-        prior_spy=prior_session_levels(spy_bars, as_of, cfg, cfg.spy_tick_size),
-        overnight_mes=overnight_range(mes_bars, as_of, cfg),
+        mes=_replay(cfg.mes_symbol, mes_sliced, cfg),
+        spy=_replay(cfg.spy_symbol, spy_sliced, cfg),
+        prior_mes=prior_session_levels(mes_sliced, as_of, cfg, cfg.mes_tick_size),
+        prior_spy=prior_session_levels(spy_sliced, as_of, cfg, cfg.spy_tick_size),
+        overnight_mes=overnight_range(mes_sliced, as_of, cfg),
     )
