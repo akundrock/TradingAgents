@@ -147,17 +147,30 @@ def _pattern(state: SeriesState, cfg: MesChecklistConfig, side: Side) -> bool:
     body_ratio_ok = (body / total_range) <= cfg.max_body_to_range_ratio
     retrace = cfg.retracement_percent / 100.0
 
+    # B-port: MES_PatternDetector.tos sigma-extreme gate (requireVwapExtreme).
+    # The close must sit >= pattern_extreme_sigma volume-weighted standard
+    # deviations on the pattern's VWAP side: (vwap - close) / sigma for a
+    # hammer long, (close - vwap) for an inverse hammer. Zero sigma (no
+    # volume yet) never passes — matches the tuner's SessionVWAP.sigma().
+    def _sigma_extreme(side_long: bool) -> bool:
+        if not cfg.pattern_require_sigma_extreme:
+            return True
+        if not state.vwap_ready or state.vwap_sigma <= 0:
+            return False
+        offset = (state.vwap - bar.close) if side_long else (bar.close - state.vwap)
+        return (offset / state.vwap_sigma) >= cfg.pattern_extreme_sigma
+
     if side == "long":
         hammer = lower_wick >= cfg.wick_to_body_ratio * body and body_ratio_ok
         confirmed = hammer and bar.close >= bar.low + retrace * total_range
         if cfg.pattern_require_vwap_side:
             confirmed = confirmed and state.vwap_ready and bar.close < state.vwap
-        return confirmed
+        return confirmed and _sigma_extreme(True)
     inverse = upper_wick >= cfg.wick_to_body_ratio * body and body_ratio_ok
     confirmed = inverse and bar.close <= bar.high - retrace * total_range
     if cfg.pattern_require_vwap_side:
         confirmed = confirmed and state.vwap_ready and bar.close > state.vwap
-    return confirmed
+    return confirmed and _sigma_extreme(False)
 
 
 def detect_divergence(snapshot: MesSnapshot) -> Divergence:

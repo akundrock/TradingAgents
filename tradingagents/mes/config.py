@@ -32,6 +32,8 @@ _TUNER_FIELD_ALIASES: dict[str, str] = {
     "MaxBodyToRangeRatio": "max_body_to_range_ratio",
     "RetracementPercent": "retracement_percent",
     "PatternRequireVWAPSide": "pattern_require_vwap_side",
+    "PatternRequireSigmaExtreme": "pattern_require_sigma_extreme",
+    "PatternExtremeSigma": "pattern_extreme_sigma",
     "AddThreshold": "add_threshold",
     "TickThreshold": "tick_threshold",
     "UseDynamicThreshold": "use_dynamic_tick_threshold",
@@ -99,6 +101,13 @@ class MesChecklistConfig:
     max_body_to_range_ratio: float = 0.6
     retracement_percent: float = 40.0
     pattern_require_vwap_side: bool = False
+    # B-port: MES_PatternDetector.tos requireVwapExtreme/extremeSigma. When on,
+    # pattern confirmations additionally require the close to sit at least
+    # ``pattern_extreme_sigma`` volume-weighted standard deviations on the
+    # pattern's VWAP side (see mes-tuner PatternRequireSigmaExtreme). Default
+    # off = recorded baseline; flip only after ablation evidence.
+    pattern_require_sigma_extreme: bool = False
+    pattern_extreme_sigma: float = 1.5
 
     # Engine-level internals thresholds (mes-tuner parity when dynamic is off).
     add_threshold: float = 250.0
