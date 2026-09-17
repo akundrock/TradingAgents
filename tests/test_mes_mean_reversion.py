@@ -131,3 +131,35 @@ def test_mr_cli_panel_renders_stop_and_target(capsys):
     mes_cli._print_result(zero_stop, snapshot)
     out2 = capsys.readouterr().out
     assert "stop 0.00" in out2  # is-not-None: 0.0 is a set value, not "no plan"
+
+
+@pytest.mark.unit
+def test_mr_bullish_divergence_counts_as_long_confirmation():
+    """R2: $VOLD divergence-agreement counts as a fade-direction confirm
+    (bullish divergence for a fade long: price down, $VOLD up)."""
+    # SPY close falls 500.0 -> 499.0 bar-over-bar while $VOLD 1500.0 sits
+    # above the zero line (vold_threshold 0.0) -> bullish divergence.
+    spy = make_spy_series(internals=[(300.0, 100.0, 1500.0)] * 6, close=499.0)
+    spy.bars[-2].close = 500.0  # factory bars share one close; make the prior bar 500.0 so price truly falls bar-over-bar
+    mes = make_mes_series(bar_kwargs={**LONG_HAMMER_BAR, "volume": 1000.0})
+    cfg = _mr_cfg(mr_min_confirmations=1)
+    result = evaluate(make_snapshot(cfg=cfg, mes=mes, spy=spy), "long")
+    assert result.mr_side == "long"
+    assert result.mr_entry is True
+    assert result.mr_confirmations == 1  # divergence alone supplies it
+    assert result.mr_score == 2
+
+
+@pytest.mark.unit
+def test_mr_wrong_side_divergence_does_not_confirm():
+    """Bearish divergence (price up, $VOLD < 0) is not a fade-LONG confirm."""
+    # SPY close rises 498.0 -> 499.0 bar-over-bar while $VOLD -1500.0 sits
+    # below the zero line (vold_threshold 0.0) -> bearish divergence.
+    spy = make_spy_series(internals=[(300.0, 100.0, -1500.0)] * 6, close=499.0)
+    spy.bars[-2].close = 498.0  # factory bars share one close; make the prior bar 498.0 so price truly rises
+    mes = make_mes_series(bar_kwargs=LONG_HAMMER_BAR)
+    cfg = _mr_cfg(mr_min_confirmations=1)
+    result = evaluate(make_snapshot(cfg=cfg, mes=mes, spy=spy), "long")
+    assert result.mr_side == "long"
+    assert result.mr_entry is False
+    assert result.mr_confirmations == 0  # bearish divergence is short-side only
