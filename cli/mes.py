@@ -220,7 +220,7 @@ def _print_result(result: ChecklistResult, snapshot: MesSnapshot) -> None:
         body = (
             f"[yellow]MR ({result.mr_side})[/] score {result.mr_score} "
             f"conf {result.mr_confirmations}/{result.mr_required}"
-            + (f" stop {result.mr_stop:.2f} target {result.mr_target:.2f}" if result.mr_stop else "")
+            + (f" stop {result.mr_stop:.2f} target {result.mr_target:.2f}" if result.mr_stop is not None else "")
         )
         console.print(Panel(body, title=f"Mean-reversion {mr_state}", border_style="magenta"))
 

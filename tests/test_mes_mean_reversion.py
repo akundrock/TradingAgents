@@ -6,8 +6,11 @@ hammer (close 97.5) sits at z=+3.0. Mirror short: (close - 99.0)/0.5, the
 factory inverse hammer at close 100.0 -> z=+2.0. Never reuse tuner numbers.
 """
 
+import dataclasses
+
 import pytest
 
+from cli import mes as mes_cli
 from tradingagents.mes.checklist import evaluate
 from tradingagents.mes.config import MesChecklistConfig, load_mes_config
 
@@ -108,3 +111,23 @@ def test_mr_additive_never_touches_trend_verdict():
     assert on.side == off.side == "long"
     assert on.direction == off.direction == "none"
     assert on.tier == off.tier == "marginal"
+
+
+@pytest.mark.unit
+def test_mr_cli_panel_renders_stop_and_target(capsys):
+    """Durable MR-panel render test: _print_result surfaces the MR panel with
+    the trade plan. Guards the is-not-None stop check (a falsy-but-set stop
+    must still render) — final-review Minors."""
+    mes = make_mes_series(bar_kwargs={**LONG_HAMMER_BAR, "volume": 1500.0})
+    cfg = _mr_cfg(mr_min_confirmations=1)
+    snapshot = make_snapshot(cfg=cfg, mes=mes)
+    result = evaluate(snapshot, "long")
+    assert result.mr_entry is True and result.mr_stop is not None
+    mes_cli._print_result(result, snapshot)
+    out = capsys.readouterr().out
+    assert "Mean-reversion ENTRY" in out
+    assert f"stop {result.mr_stop:.2f}" in out and f"target {result.mr_target:.2f}" in out
+    zero_stop = dataclasses.replace(result, mr_stop=0.0, mr_target=0.0)
+    mes_cli._print_result(zero_stop, snapshot)
+    out2 = capsys.readouterr().out
+    assert "stop 0.00" in out2  # is-not-None: 0.0 is a set value, not "no plan"
