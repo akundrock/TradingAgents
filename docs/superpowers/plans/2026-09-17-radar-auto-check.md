@@ -294,7 +294,7 @@ git commit -m "refactor(mes): extract _run_check_once from mes check loop"
 - Test: `tests/test_mes_radar.py`
 
 **Interfaces:**
-- Consumes: `SetupState` enum already defined in `tradingagents/mes/radar.py` (values: `GATES_CLOSED`, `BLOCKED`, `LOW_CONVICTION`, `AT_LEVEL_MISSING_CONFLUENCE`, `CONFLUENCE_OK_WAITING_LOCATION`, `READY`).
+- Consumes: `SetupState` enum already defined in `tradingagents/mes/radar.py` (values: `GATES_CLOSED`, `BLOCKED`, `BUILDING`, `AT_LEVEL_MISSING_CONFLUENCE`, `CONFLUENCE_OK_WAITING_LOCATION`, `READY`).
 - Produces: `should_auto_check(state: SetupState, prev_state: SetupState | None, last_fired: datetime | None, now: datetime, cooldown_seconds: float) -> bool` — exported from `tradingagents.mes.radar` and re-exported from `tradingagents.mes`. Task 3 imports it in `cli/mes.py` as `from tradingagents.mes.radar import should_auto_check` and calls it per radar tick.
 
 - [ ] **Step 1: Write the failing tests**
@@ -327,7 +327,7 @@ def test_should_auto_check_never_fires_outside_ready():
     non_ready = [
         SetupState.GATES_CLOSED,
         SetupState.BLOCKED,
-        SetupState.LOW_CONVICTION,
+        SetupState.BUILDING,
         SetupState.AT_LEVEL_MISSING_CONFLUENCE,
         SetupState.CONFLUENCE_OK_WAITING_LOCATION,
     ]

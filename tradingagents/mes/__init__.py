@@ -31,7 +31,13 @@ from .levels import (
 )
 from .management import MgmtEvent, MgmtReport, OpenTrade, evaluate_management
 from .profile import VolumeProfile, volume_profile
-from .radar import LevelDistance, ProximityReport, SetupState, build_proximity
+from .radar import (
+    LevelDistance,
+    ProximityReport,
+    SetupState,
+    build_proximity,
+    should_auto_check,
+)
 from .render import render_checklist, render_market_context
 from .sizing import SizingResult, size_position, suggest_stop_distance_points
 from .snapshot import (
@@ -84,6 +90,7 @@ __all__ = [
     "required_confirmations",
     "score_tier",
     "session_bounds",
+    "should_auto_check",
     "size_position",
     "snapshot_from_csv",
     "suggest_stop_distance_points",

@@ -17,6 +17,7 @@ and :class:`~.snapshot.MesSnapshot` and returns a :class:`ProximityReport` conta
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 
 from .checklist import ChecklistResult
@@ -283,3 +284,25 @@ def build_proximity(
         warnings=list(snapshot.warnings),
         internals_status=format_internals_status(snapshot),
     )
+
+
+def should_auto_check(
+    state: SetupState,
+    prev_state: SetupState | None,
+    last_fired: datetime | None,
+    now: datetime,
+    cooldown_seconds: float,
+) -> bool:
+    """Decide whether an auto-check should fire on this radar tick.
+
+    Fires on any entry into :attr:`SetupState.READY` — including the very first
+    tick if radar started while READY — and re-fires at most once per
+    ``cooldown_seconds`` while READY persists. Never fires outside READY.
+    """
+    if state is not SetupState.READY:
+        return False
+    if prev_state is not SetupState.READY:
+        return True
+    if last_fired is None:
+        return True
+    return (now - last_fired).total_seconds() >= cooldown_seconds

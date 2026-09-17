@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime
 
 import pytest
 from rich.console import Console
@@ -19,6 +20,7 @@ from tradingagents.mes.radar import (
     _level_distances,
     _missing_items,
     build_proximity,
+    should_auto_check,
 )
 from tradingagents.mes.render import format_internals_status, render_market_context
 from tests.mes_factories import (
@@ -735,4 +737,69 @@ def test_run_check_once_no_log_skips_journal():
     )
 
     assert stub.calls == []
+
+
+# ---------------------------------------------------------------------------
+# should_auto_check — radar --auto-check trigger decision (pure function)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_should_auto_check_fires_on_transition_into_ready():
+    now = datetime(2026, 3, 30, 11, 0)
+    assert should_auto_check(
+        SetupState.READY, SetupState.CONFLUENCE_OK_WAITING_LOCATION, None, now, 300.0
+    )
+
+
+@pytest.mark.unit
+def test_should_auto_check_fires_when_radar_starts_already_ready():
+    now = datetime(2026, 3, 30, 11, 0)
+    assert should_auto_check(SetupState.READY, None, None, now, 300.0)
+
+
+@pytest.mark.unit
+def test_should_auto_check_never_fires_outside_ready():
+    now = datetime(2026, 3, 30, 11, 0)
+    non_ready = [
+        SetupState.GATES_CLOSED,
+        SetupState.BLOCKED,
+        SetupState.BUILDING,
+        SetupState.AT_LEVEL_MISSING_CONFLUENCE,
+        SetupState.CONFLUENCE_OK_WAITING_LOCATION,
+    ]
+    for state in non_ready:
+        assert not should_auto_check(state, None, None, now, 300.0)
+        # even mid-cooldown with a fired history, non-READY never fires
+        assert not should_auto_check(state, state, now, now, 300.0)
+
+
+@pytest.mark.unit
+def test_should_auto_check_suppressed_within_cooldown():
+    now = datetime(2026, 3, 30, 11, 5)
+    last_fired = datetime(2026, 3, 30, 11, 2)
+    assert not should_auto_check(SetupState.READY, SetupState.READY, last_fired, now, 300.0)
+
+
+@pytest.mark.unit
+def test_should_auto_check_refires_after_cooldown():
+    now = datetime(2026, 3, 30, 11, 5)
+    last_fired = datetime(2026, 3, 30, 11, 0)
+    assert should_auto_check(SetupState.READY, SetupState.READY, last_fired, now, 300.0)
+
+
+@pytest.mark.unit
+def test_should_auto_check_zero_cooldown_refires_every_ready_tick():
+    now = datetime(2026, 3, 30, 11, 0)
+    assert should_auto_check(SetupState.READY, SetupState.READY, now, now, 0.0)
+
+
+@pytest.mark.unit
+def test_should_auto_check_transition_refires_even_within_cooldown():
+    """A fresh entry into READY is a new setup moment — it fires immediately."""
+    now = datetime(2026, 3, 30, 11, 8)
+    last_fired = datetime(2026, 3, 30, 11, 7)
+    assert should_auto_check(
+        SetupState.READY, SetupState.BLOCKED, last_fired, now, 300.0
+    )
 
