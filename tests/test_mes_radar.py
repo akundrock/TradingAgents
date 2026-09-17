@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from cli import mes as mes_cli
 from tradingagents.mes.checklist import CheckItem, ChecklistResult
+from tradingagents.mes.config import load_mes_config
 from tradingagents.mes.radar import (
     LevelDistance,
     ProximityReport,
@@ -637,3 +638,101 @@ def test_radar_panel_renders_report_without_warnings_cleanly(monkeypatch):
     report = build_proximity(snap, _make_result())
     text = _render_table_to_text(mes_cli._render_radar(report, snap.as_of))
     assert "warn:" not in text
+
+
+# ---------------------------------------------------------------------------
+# _run_check_once — shared full-check pass for `mes check` and radar --auto-check
+# ---------------------------------------------------------------------------
+
+
+class _StubJournal:
+    """Records append_check calls; stands in for MesJournal."""
+
+    def __init__(self):
+        self.calls = []
+
+    def append_check(self, *, snapshot, result, verdict_markdown="", sizing=None):
+        self.calls.append(
+            {
+                "snapshot": snapshot,
+                "result": result,
+                "verdict_markdown": verdict_markdown,
+                "sizing": sizing,
+            }
+        )
+
+
+def test_run_check_once_prints_deterministic_verdict_and_logs():
+    snap = _make_snapshot()
+    result = _make_result()
+    stub = _StubJournal()
+
+    sizing, sizing_note, verdict = mes_cli._run_check_once(
+        snapshot=snap,
+        result=result,
+        cfg=load_mes_config(),
+        journal=stub,
+        gatekeeper=None,
+        hypothesis="",
+        past_context="",
+        risk_dollars=1000.0,
+        stop_points=8.0,
+    )
+
+    assert "contracts" in sizing
+    assert "Risk $1,000" in sizing_note
+    assert verdict == ""  # no gatekeeper -> deterministic verdict path
+    assert len(stub.calls) == 1
+    assert stub.calls[0]["snapshot"] is snap
+    assert stub.calls[0]["result"] is result
+    assert stub.calls[0]["verdict_markdown"] == ""
+
+
+def test_run_check_once_calls_gatekeeper_and_logs_verdict():
+    snap = _make_snapshot()
+    result = _make_result()
+    stub = _StubJournal()
+
+    def fake_gatekeeper(**kwargs):
+        assert kwargs["tradeable"] is True
+        assert kwargs["hypothesis"] == "fade extremes into VWAP"
+        return "**Verdict**: Wait\n\nNot at level."
+
+    sizing, sizing_note, verdict = mes_cli._run_check_once(
+        snapshot=snap,
+        result=result,
+        cfg=load_mes_config(),
+        journal=stub,
+        gatekeeper=fake_gatekeeper,
+        hypothesis="fade extremes into VWAP",
+        past_context="",
+        risk_dollars=1000.0,
+        stop_points=8.0,
+    )
+
+    assert "Wait" in verdict
+    assert len(stub.calls) == 1
+    assert "Not at level" in stub.calls[0]["verdict_markdown"]
+    assert "contracts" in stub.calls[0]["sizing"]
+
+
+def test_run_check_once_no_log_skips_journal():
+    snap = _make_snapshot()
+    result = _make_result()
+    stub = _StubJournal()
+
+    mes_cli._run_check_once(
+        snapshot=snap,
+        result=result,
+        cfg=load_mes_config(),
+        journal=stub,
+        gatekeeper=None,
+        hypothesis="",
+        past_context="",
+        risk_dollars=1000.0,
+        stop_points=8.0,
+        no_log=True,
+    )
+
+    assert stub.calls == []
+

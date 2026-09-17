@@ -251,6 +251,87 @@ def _verdict_headline(verdict_markdown: str, tradeable: bool) -> str:
     return headline
 
 
+def _run_check_once(
+    *,
+    snapshot: MesSnapshot,
+    result: ChecklistResult,
+    cfg,
+    journal: MesJournal,
+    gatekeeper,
+    hypothesis: str,
+    past_context: str,
+    risk_dollars: float,
+    stop_points: float | None,
+    as_json: bool = False,
+    no_log: bool = False,
+) -> tuple[dict, str, str]:
+    """Run one full check pass on an already-built snapshot.
+
+    Shared by ``mes check`` and ``mes radar --auto-check``: sizes the trade,
+    prints the checklist result (or JSON), consults the gatekeeper when one is
+    provided, prints the verdict panel, and appends the check to the journal.
+    Returns ``(sizing, sizing_note, verdict_markdown)``.
+    """
+    sizing, sizing_note = _sizing_payload(result, cfg, risk_dollars, stop_points)
+
+    if as_json:
+        console.print_json(
+            json.dumps(
+                {
+                    "as_of": snapshot.as_of.isoformat(),
+                    "result": dataclasses.asdict(result),
+                    "sizing": sizing,
+                    "warnings": snapshot.warnings,
+                },
+                default=str,
+            )
+        )
+    else:
+        _print_result(result, snapshot)
+        console.print(f"[dim]{sizing_note}[/dim]")
+
+    verdict = ""
+    if gatekeeper is not None:
+        try:
+            levels_hint = suggest_trade_levels_from_snapshot(result.side, snapshot, result)
+            verdict = gatekeeper(
+                checklist_markdown=render_checklist(result, live=snapshot.rth_started),
+                market_context=render_market_context(snapshot),
+                hypothesis=hypothesis,
+                past_context=past_context,
+                tradeable=result.tradeable,
+                sizing_note=sizing_note,
+                current_price=snapshot.mes.close,
+                trade_levels_hint=render_trade_levels_hint(levels_hint) if levels_hint else "",
+            )
+        except Exception as exc:
+            console.print(f"[yellow]Gatekeeper call failed:[/yellow] {exc}")
+
+    if verdict and not as_json:
+        headline = _verdict_headline(verdict, result.tradeable)
+        console.print(
+            Panel(
+                Markdown(verdict),
+                title=f"Verdict: {headline}",
+                border_style=_VERDICT_STYLE[headline].split()[-1],
+            )
+        )
+    elif not verdict and not as_json:
+        call = "TRADEABLE" if result.tradeable else "STAND DOWN"
+        style = "bold green" if result.tradeable else "bold red"
+        console.print(Panel(f"[{style}]{call}[/{style}]", title="Deterministic Verdict"))
+
+    if not no_log:
+        journal.append_check(
+            snapshot=snapshot,
+            result=result,
+            verdict_markdown=verdict,
+            sizing=sizing,
+        )
+
+    return sizing, sizing_note, verdict
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -350,62 +431,19 @@ def check(
             raise typer.Exit(code=1)
 
         result = evaluate(snapshot, side)
-        sizing, sizing_note = _sizing_payload(result, cfg, risk_dollars, stop_points)
-
-        if as_json:
-            console.print_json(
-                json.dumps(
-                    {
-                        "as_of": snapshot.as_of.isoformat(),
-                        "result": dataclasses.asdict(result),
-                        "sizing": sizing,
-                        "warnings": snapshot.warnings,
-                    },
-                    default=str,
-                )
-            )
-        else:
-            _print_result(result, snapshot)
-            console.print(f"[dim]{sizing_note}[/dim]")
-
-        verdict = ""
-        if gatekeeper is not None:
-            try:
-                levels_hint = suggest_trade_levels_from_snapshot(result.side, snapshot, result)
-                verdict = gatekeeper(
-                    checklist_markdown=render_checklist(result, live=snapshot.rth_started),
-                    market_context=render_market_context(snapshot),
-                    hypothesis=hypothesis,
-                    past_context=past_context,
-                    tradeable=result.tradeable,
-                    sizing_note=sizing_note,
-                    current_price=snapshot.mes.close,
-                    trade_levels_hint=render_trade_levels_hint(levels_hint) if levels_hint else "",
-                )
-            except Exception as exc:
-                console.print(f"[yellow]Gatekeeper call failed:[/yellow] {exc}")
-
-        if verdict and not as_json:
-            headline = _verdict_headline(verdict, result.tradeable)
-            console.print(
-                Panel(
-                    Markdown(verdict),
-                    title=f"Verdict: {headline}",
-                    border_style=_VERDICT_STYLE[headline].split()[-1],
-                )
-            )
-        elif not verdict and not as_json:
-            call = "TRADEABLE" if result.tradeable else "STAND DOWN"
-            style = "bold green" if result.tradeable else "bold red"
-            console.print(Panel(f"[{style}]{call}[/{style}]", title="Deterministic Verdict"))
-
-        if not no_log:
-            journal.append_check(
-                snapshot=snapshot,
-                result=result,
-                verdict_markdown=verdict,
-                sizing=sizing,
-            )
+        _run_check_once(
+            snapshot=snapshot,
+            result=result,
+            cfg=cfg,
+            journal=journal,
+            gatekeeper=gatekeeper,
+            hypothesis=hypothesis,
+            past_context=past_context,
+            risk_dollars=risk_dollars,
+            stop_points=stop_points,
+            as_json=as_json,
+            no_log=no_log,
+        )
 
         if not watch:
             break
