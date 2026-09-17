@@ -783,15 +783,23 @@ def radar(
 
     # ---- Watch loop with Rich Live ----
     prev_state: SetupState | None = None
+    last_fired: datetime | None = None
     with Live(console=console, refresh_per_second=1, screen=False) as live:
         while True:
             stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
             try:
-                report = _one_shot(stamp)
+                snapshot, result, report = _one_shot(stamp)
                 panel = Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue")
                 live.update(panel)
                 if alert and report.state in _ALERT_STATES and report.state != prev_state:
                     console.print("\a", end="")
+                if should_auto_check(report.state, prev_state, last_fired, stamp, cooldown_seconds):
+                    live.stop()
+                    try:
+                        _fire_auto_check(snapshot, result, stamp)
+                    finally:
+                        live.start()
+                    last_fired = stamp
                 prev_state = report.state
             except Exception as exc:
                 live.update(Panel(f"[red]Snapshot error:[/red] {exc}", border_style="red"))

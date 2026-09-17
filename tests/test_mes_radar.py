@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime
+import time
 
 import pytest
 from rich.console import Console
@@ -930,6 +931,71 @@ def test_radar_auto_check_no_log_writes_nothing(monkeypatch, tmp_path):
     )
     assert result.exit_code == 0
     assert "Deterministic Verdict" in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    assert journal.load_day("2026-03-30") == []
+
+
+# ---------------------------------------------------------------------------
+# radar --auto-check in watch mode: transition fire + cooldown re-fire
+# ---------------------------------------------------------------------------
+
+
+def _invoke_radar_watch(monkeypatch, tmp_path, ticks: int, extra_args=None):
+    """Run `radar --watch 1 --auto-check` for exactly `ticks` ticks.
+
+    The first `ticks - 1` sleeps pass, then sleep raises KeyboardInterrupt so
+    the loop exits after `ticks` iterations. All ticks use the same stamp.
+    """
+    _ready_fixture(monkeypatch, tmp_path)
+    sleeps: list[int] = []
+
+    def fake_sleep(seconds):
+        if len(sleeps) >= ticks - 1:
+            raise KeyboardInterrupt
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    return radar_runner.invoke(mes_cli.mes_app, ["radar", "--watch", "1", "--auto-check", "--no-llm"] + (extra_args or []))
+
+
+@pytest.mark.unit
+def test_radar_watch_auto_check_fires_once_and_cooldown_suppresses_refire(monkeypatch, tmp_path):
+    result = _invoke_radar_watch(monkeypatch, tmp_path, ticks=2, extra_args=["--auto-check-cooldown", "5"])
+    assert result.exit_code == 0, result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    records = [e for e in journal.load_day("2026-03-30") if e["kind"] == "check"]
+    # Tick 1: transition into READY fires. Tick 2: still READY within the
+    # 5-minute cooldown on the same stamp -> suppressed.
+    assert len(records) == 1
+
+
+@pytest.mark.unit
+def test_radar_watch_auto_check_refires_after_cooldown(monkeypatch, tmp_path):
+    result = _invoke_radar_watch(monkeypatch, tmp_path, ticks=2, extra_args=["--auto-check-cooldown", "0"])
+    assert result.exit_code == 0, result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    records = [e for e in journal.load_day("2026-03-30") if e["kind"] == "check"]
+    # Cooldown 0: the second READY tick is already at/past the cooldown -> refire.
+    assert len(records) == 2
+
+
+@pytest.mark.unit
+def test_radar_watch_without_auto_check_writes_no_journal(monkeypatch, tmp_path):
+    snap = _make_snapshot(overnight_high=7681.0)
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: DEFAULT_AS_OF)
+    monkeypatch.setattr(mes_cli, "DEFAULT_CONFIG", {"mes_journal_dir": str(tmp_path)})
+    monkeypatch.setattr(mes_cli, "evaluate", lambda s, side: _make_result())
+    sleeps: list[int] = []
+
+    def fake_sleep(seconds):
+        if sleeps:
+            raise KeyboardInterrupt
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    result = radar_runner.invoke(mes_cli.mes_app, ["radar", "--watch", "1"])
+    assert result.exit_code == 0, result.output
     journal = MesJournal({"mes_journal_dir": str(tmp_path)})
     assert journal.load_day("2026-03-30") == []
 
