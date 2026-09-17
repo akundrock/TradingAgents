@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 from cli import mes as mes_cli
 from tradingagents.mes.checklist import CheckItem, ChecklistResult
 from tradingagents.mes.config import load_mes_config
+from tradingagents.mes.journal import MesJournal
 from tradingagents.mes.radar import (
     LevelDistance,
     ProximityReport,
@@ -802,4 +803,133 @@ def test_should_auto_check_transition_refires_even_within_cooldown():
     assert should_auto_check(
         SetupState.READY, SetupState.BLOCKED, last_fired, now, 300.0
     )
+
+
+# ---------------------------------------------------------------------------
+# radar --auto-check: fires the full check path on READY
+# ---------------------------------------------------------------------------
+
+
+def _ready_fixture(monkeypatch, tmp_path):
+    """Patches the CLI so radar evaluates a genuinely READY setup.
+
+    overnight_high=7681.0 is 2.25 pts above price 7678.75 -> within the default
+    band, and _make_result() is tradeable -> build_proximity reports READY.
+    Journal writes go to tmp_path via a patched DEFAULT_CONFIG.
+    """
+    snap = _make_snapshot(overnight_high=7681.0)
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: DEFAULT_AS_OF)
+    monkeypatch.setattr(mes_cli, "DEFAULT_CONFIG", {"mes_journal_dir": str(tmp_path)})
+    # Pin the checklist result so the test exercises the auto-check trigger,
+    # not the real checklist thresholds on factory data.
+    monkeypatch.setattr(mes_cli, "evaluate", lambda snapshot, side: _make_result())
+    return snap
+
+
+@pytest.mark.unit
+def test_radar_auto_check_fires_on_ready_one_shot(monkeypatch, tmp_path):
+    _ready_fixture(monkeypatch, tmp_path)
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--auto-check", "--no-llm"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deterministic Verdict" in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    records = [e for e in journal.load_day("2026-03-30") if e["kind"] == "check"]
+    assert len(records) == 1
+    assert records[0]["tradeable"] is True
+
+
+@pytest.mark.unit
+def test_radar_without_auto_check_still_never_writes_journal(monkeypatch, tmp_path):
+    _ready_fixture(monkeypatch, tmp_path)
+    result = radar_runner.invoke(mes_cli.mes_app, ["radar", "--no-watch"])
+    assert result.exit_code == 0
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    assert journal.load_day("2026-03-30") == []
+
+
+@pytest.mark.unit
+def test_radar_auto_check_skipped_when_not_ready(monkeypatch, tmp_path):
+    """Gates closed -> never READY -> no check run even with --auto-check."""
+    snap = _make_snapshot()
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: DEFAULT_AS_OF)
+    monkeypatch.setattr(mes_cli, "DEFAULT_CONFIG", {"mes_journal_dir": str(tmp_path)})
+    monkeypatch.setattr(
+        mes_cli, "evaluate",
+        lambda snapshot, side: _make_result(gates_ok=False, gate_reasons=["outside RTH"]),
+    )
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--auto-check", "--no-llm"]
+    )
+    assert result.exit_code == 0
+    assert "Deterministic Verdict" not in result.output
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--auto-check", "--no-llm"]
+    )
+    assert result.exit_code == 0
+    assert "Deterministic Verdict" not in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    assert journal.load_day("2026-03-30") == []
+
+
+@pytest.mark.unit
+def test_radar_auto_check_no_llm_never_builds_gatekeeper(monkeypatch, tmp_path):
+    def _boom(*args, **kwargs):
+        raise AssertionError("gatekeeper must not be created with --no-llm")
+
+    _ready_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(mes_cli, "create_mes_gatekeeper_agent", _boom)
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--auto-check", "--no-llm"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deterministic Verdict" in result.output
+
+
+@pytest.mark.unit
+def test_radar_auto_check_calls_gatekeeper_and_logs_verdict(monkeypatch, tmp_path):
+    _ready_fixture(monkeypatch, tmp_path)
+
+    def fake_gatekeeper(**kwargs):
+        return "**Verdict**: Wait\n\nSizing unclear."
+
+    monkeypatch.setattr(mes_cli, "_make_llm", lambda config, deep=False: object())
+    monkeypatch.setattr(mes_cli, "create_mes_gatekeeper_agent", lambda llm: fake_gatekeeper)
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--auto-check"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Verdict: Wait" in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    records = [e for e in journal.load_day("2026-03-30") if e["kind"] == "check"]
+    assert len(records) == 1
+    assert "Wait" in records[0]["verdict"]
+
+
+@pytest.mark.unit
+def test_radar_auto_check_json_mode_ignores_flag(monkeypatch, tmp_path):
+    _ready_fixture(monkeypatch, tmp_path)
+    result = radar_runner.invoke(
+        mes_cli.mes_app, ["radar", "--no-watch", "--json", "--auto-check", "--no-llm"]
+    )
+    assert result.exit_code == 0, result.output
+    assert '"state"' in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    assert journal.load_day("2026-03-30") == []
+
+
+@pytest.mark.unit
+def test_radar_auto_check_no_log_writes_nothing(monkeypatch, tmp_path):
+    _ready_fixture(monkeypatch, tmp_path)
+    result = radar_runner.invoke(
+        mes_cli.mes_app,
+        ["radar", "--no-watch", "--auto-check", "--no-llm", "--no-log"],
+    )
+    assert result.exit_code == 0
+    assert "Deterministic Verdict" in result.output
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    assert journal.load_day("2026-03-30") == []
 

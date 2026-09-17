@@ -84,6 +84,7 @@ from tradingagents.mes.management import (
     _tighter,
     evaluate_management,
 )
+from tradingagents.mes.radar import should_auto_check
 
 console = Console()
 
@@ -667,6 +668,18 @@ def radar(
     alert: bool = typer.Option(
         False, "--alert", help="Print a bell character when state is READY or AT_LEVEL."
     ),
+    auto_check: bool = typer.Option(
+        False,
+        "--auto-check",
+        help="Run the full check path (checklist + gatekeeper unless --no-llm, journal write) whenever state is READY. Ignored with --json.",
+    ),
+    auto_check_cooldown: float = typer.Option(
+        5.0,
+        "--auto-check-cooldown",
+        help="Minimum minutes between auto-checks while READY persists.",
+    ),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Deterministic checklist only; skip the gatekeeper."),
+    no_log: bool = typer.Option(False, "--no-log", help="Do not append auto-check results to the journal."),
     as_of: str | None = typer.Option(None, "--as-of", help="Bar timestamp to evaluate. Defaults to now."),
     date: str | None = typer.Option(None, "--date", help="Session date when --as-of is a bare time."),
     as_json: bool = typer.Option(False, "--json", help="Emit ProximityReport as JSON then exit."),
@@ -676,16 +689,22 @@ def radar(
     """Compact live proximity view: how close is a valid MES trade entry?
 
     Shows the live $ADD/$TICK/$VOLD readings and any snapshot data warnings
-    (e.g. sparse $TICK coverage) alongside the setup state. Runs without the
-    LLM gatekeeper and does not write to the journal.
-    When state is READY or AT_LEVEL_MISSING_CONFLUENCE, run `mes check` for the
-    full gatekeeper verdict.
+    (e.g. sparse $TICK coverage) alongside the setup state. Without --auto-check
+    it runs without the LLM gatekeeper and never writes to the journal.
+
+    With --auto-check, whenever the state is READY the full check path runs on
+    the same bar the radar just evaluated: checklist render, gatekeeper verdict
+    (skipped with --no-llm), and a journal write (skipped with --no-log). While
+    READY persists it re-fires at most once per --auto-check-cooldown minutes.
+    Ignored in --json mode (pure machine query).
 
     Examples:
 
         tradingagents mes radar
 
         tradingagents mes radar --watch 15 --within 3 --side long --alert
+
+        tradingagents mes radar --auto-check --auto-check-cooldown 5
 
         tradingagents mes radar --no-watch --json
     """
@@ -697,36 +716,69 @@ def radar(
 
     _ALERT_STATES = {SetupState.READY, SetupState.AT_LEVEL_MISSING_CONFLUENCE}
 
-    import dataclasses as _dc
+    cooldown_seconds = auto_check_cooldown * 60.0
 
-    def _one_shot(stamp: datetime) -> ProximityReport:
+    journal: MesJournal | None = None
+    gatekeeper = None
+    past_context = ""
+    if auto_check:
+        app_config = DEFAULT_CONFIG.copy()
+        journal = MesJournal(app_config)
+        if not no_llm:
+            try:
+                gatekeeper = create_mes_gatekeeper_agent(_make_llm(app_config))
+                past_context = _past_context(app_config)
+            except Exception as exc:
+                console.print(f"[yellow]Gatekeeper unavailable, running deterministic only:[/yellow] {exc}")
+
+    def _one_shot(stamp: datetime) -> tuple[MesSnapshot, ChecklistResult, ProximityReport]:
         snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
         result = evaluate(snapshot, side)
-        return build_proximity(snapshot, result, proximity_band=within)
+        report = build_proximity(snapshot, result, proximity_band=within)
+        return snapshot, result, report
+
+    def _fire_auto_check(snapshot: MesSnapshot, result: ChecklistResult, stamp: datetime) -> None:
+        """Full check path on the radar's in-hand snapshot (same bar, zero skew)."""
+        if journal is None:
+            return
+        hypothesis_record = journal.load_hypothesis(stamp.strftime("%Y-%m-%d"))
+        hypothesis = (hypothesis_record or {}).get("hypothesis", "")
+        _run_check_once(
+            snapshot=snapshot,
+            result=result,
+            cfg=cfg,
+            journal=journal,
+            gatekeeper=gatekeeper,
+            hypothesis=hypothesis,
+            past_context=past_context,
+            risk_dollars=cfg.default_risk_dollars,
+            stop_points=None,
+            as_json=False,
+            no_log=no_log,
+        )
 
     if as_json:
         stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
         try:
-            report = _one_shot(stamp)
+            _, _, report = _one_shot(stamp)
         except Exception as exc:
             console.print(f"[red]Snapshot failed:[/red] {exc}")
             raise typer.Exit(code=1)
-        import dataclasses as _dc2
-        console.print_json(
-            __import__("json").dumps(_dc2.asdict(report), default=str)
-        )
+        console.print_json(json.dumps(dataclasses.asdict(report), default=str))
         return
 
     if no_watch or interval == 0:
         stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
         try:
-            report = _one_shot(stamp)
+            snapshot, result, report = _one_shot(stamp)
         except Exception as exc:
             console.print(f"[red]Snapshot failed:[/red] {exc}")
             raise typer.Exit(code=1)
         console.print(Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue"))
         if alert and report.state in _ALERT_STATES:
             console.print("\a", end="")
+        if auto_check and report.state == SetupState.READY:
+            _fire_auto_check(snapshot, result, stamp)
         return
 
     # ---- Watch loop with Rich Live ----
