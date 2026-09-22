@@ -815,27 +815,21 @@ def radar(
 # ---------------------------------------------------------------------------
 
 
+_CLOSE_REASONS = {"stopped_out": "stop", "target": "target"}
+
+
 def _copilot_tick(
-    stamp: datetime,
-    cfg,
-    journal: MesJournal,
-    side: str,
-    within: float | None,
-    mes_csv: Path | None,
-    spy_csv: Path | None,
-    gatekeeper,
-    past_context: str,
-    manager,
-    manager_every: float,
-    alert: bool,
-    no_log: bool,
-    prev_state,           # SetupState | None
-    last_fired,           # datetime | None
-    last_manager,         # datetime | None
-    seen: set[str],
-    live=None,            # rich Live | None
+    stamp: datetime, cfg, journal: MesJournal, side: str,
+    within: float | None, mes_csv: Path | None, spy_csv: Path | None,
+    gatekeeper, past_context: str, manager, manager_every: float,
+    alert: bool, no_log: bool,
+    auto_check: bool = False, auto_check_cooldown: float = 5.0,
+    prev_state=None, last_fired=None, last_manager=None,
+    seen: set[str] | None = None, live=None,
 ) -> tuple[str, object, object, object | None, datetime | None, datetime | None]:
     """One copilot tick. Returns (mode, snapshot, payload, prev_state, last_fired, last_manager)."""
+    if seen is None:
+        seen = set()
     stamp_date = stamp.strftime("%Y-%m-%d")
     trade = journal.find_open_trade(stamp_date)
     snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
@@ -846,7 +840,29 @@ def _copilot_tick(
             live.update(Panel(_render_radar(report, stamp),
                               title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
                               border_style="blue"))
-        return "flat", snapshot, report, prev_state, last_fired, last_manager
+        # Radar's three rules (should_auto_check, radar.py:289-308) with the
+        # eligibility state swapped: flat instead of SetupState.READY.
+        if auto_check:
+            entered = prev_state != "flat"
+            cooled = last_fired is None or (
+                (stamp - last_fired).total_seconds() >= auto_check_cooldown * 60
+            )
+            if entered or cooled:
+                hypothesis = (journal.load_hypothesis(stamp_date) or {}).get("hypothesis", "")
+                if live is not None:
+                    live.stop()
+                try:
+                    _run_check_once(          # same call shape as radar's _fire_auto_check (cli/mes.py:746)
+                        snapshot=snapshot, result=result, cfg=cfg, journal=journal,
+                        gatekeeper=gatekeeper, hypothesis=hypothesis,
+                        past_context=past_context, risk_dollars=cfg.default_risk_dollars,
+                        stop_points=None, as_json=False, no_log=no_log,
+                    )
+                finally:
+                    if live is not None:
+                        live.start()
+                last_fired = stamp
+        return "flat", snapshot, report, "flat", last_fired, last_manager
     updated, mgmt = evaluate_management(snapshot, result, trade, cfg)
     for event in mgmt.events:  # persist each ladder event exactly once
         key = f"{event.name}@{event.as_of.isoformat(timespec='minutes')}"
@@ -859,11 +875,19 @@ def _copilot_tick(
                 note=f"{event.name}: {event.detail}",
                 as_of=event.as_of.isoformat(timespec="minutes"),
             )
+        if mgmt.recommendation == "CLOSED":  # terminal event: bell + one-time close hint
+            if alert:
+                console.print("\a", end="")
+            console.print(
+                f"[bold yellow]Trade over — run:[/bold yellow] mes trade close "
+                f"--price {snapshot.mes.close:.2f} "
+                f"--reason {_CLOSE_REASONS.get(event.name, 'manual')}"
+            )
     if live is not None:
         live.update(Panel(_render_mgmt_panel(updated, mgmt, snapshot.mes.close),
                           title=f"MES Copilot — managing   {stamp:%H:%M:%S}",
                           border_style="green"))
-    return "managing", snapshot, (updated, mgmt), prev_state, last_fired, last_manager
+    return "managing", snapshot, (updated, mgmt), "managing", last_fired, last_manager
 
 
 @mes_app.command("copilot")
@@ -905,29 +929,67 @@ def copilot(
     """
     cfg = load_mes_config()
     journal = _trade_journal(cfg, journal_dir)
+    # Gatekeeper construction mirrors radar verbatim (cli/mes.py:722-732).
+    gatekeeper = None
+    past_context = ""
+    if auto_check and not no_llm:
+        try:
+            app_config = DEFAULT_CONFIG.copy()
+            gatekeeper = create_mes_gatekeeper_agent(_make_llm(app_config))
+            past_context = _past_context(app_config)
+        except Exception as exc:
+            console.print(f"[yellow]Gatekeeper unavailable, running deterministic only:[/yellow] {exc}")
     seen: set[str] = set()
-    stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
-    mode, snapshot, payload, _, _, _ = _copilot_tick(
-        stamp, cfg, journal, side, within, mes_csv, spy_csv,
-        gatekeeper=None, past_context="", manager=None, manager_every=0.0,
-        alert=alert, no_log=no_log,
-        prev_state=None, last_fired=None, last_manager=None, seen=seen,
-    )
-    if json_output:
-        body = {"mode": mode, "as_of": stamp.isoformat(timespec="minutes")}
-        if mode == "flat":
-            body["proximity"] = dataclasses.asdict(payload)
+    prev_state = None
+    last_fired = None
+    last_manager = None
+    if no_watch or json_output:  # one-shot branch (Task 1 behavior)
+        stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+        mode, snapshot, payload, _, _, _ = _copilot_tick(
+            stamp, cfg, journal, side, within, mes_csv, spy_csv,
+            gatekeeper=gatekeeper, past_context=past_context,
+            manager=None, manager_every=0.0,  # Task 3 threads the real throttle
+            alert=alert, no_log=no_log,
+            auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
+            prev_state=prev_state, last_fired=last_fired,
+            last_manager=last_manager, seen=seen, live=None,
+        )
+        if json_output:
+            body = {"mode": mode, "as_of": stamp.isoformat(timespec="minutes")}
+            if mode == "flat":
+                body["proximity"] = dataclasses.asdict(payload)
+            else:
+                body["management"] = dataclasses.asdict(payload[1])
+            console.print_json(json.dumps(body))
+            return
+        if mode == "managing":
+            updated, mgmt = payload
+            console.print(_render_mgmt_panel(updated, mgmt, snapshot.mes.close))
         else:
-            body["management"] = dataclasses.asdict(payload[1])
-        console.print_json(json.dumps(body))
+            console.print(Panel(_render_radar(payload, stamp),
+                                title="MES Radar", border_style="blue"))
         return
-    if mode == "managing":
-        updated, mgmt = payload
-        console.print(_render_mgmt_panel(updated, mgmt, snapshot.mes.close))
-    else:
-        console.print(Panel(_render_radar(payload, stamp),
-                            title="MES Radar", border_style="blue"))
-    return
+    # ---- Watch loop with Rich Live ----
+    with Live(console=console, refresh_per_second=1, screen=False) as live:
+        while True:
+            stamp = _market_now(cfg)
+            try:
+                mode, snapshot, payload, prev_state, last_fired, last_manager = _copilot_tick(
+                    stamp, cfg, journal, side, within, mes_csv, spy_csv,
+                    gatekeeper=gatekeeper, past_context=past_context,
+                    manager=None, manager_every=0.0,  # Task 3 threads the real throttle
+                    alert=alert, no_log=no_log,
+                    auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
+                    prev_state=prev_state, last_fired=last_fired,
+                    last_manager=last_manager, seen=seen, live=live,
+                )
+            except Exception as exc:
+                live.update(Panel(f"[red]Snapshot error:[/red] {exc}", border_style="red"))
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                break
+    console.print("[dim]Copilot stopped.[/dim]")
 
 
 # ---------------------------------------------------------------------------
