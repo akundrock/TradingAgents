@@ -811,6 +811,126 @@ def radar(
 
 
 # ---------------------------------------------------------------------------
+# Copilot
+# ---------------------------------------------------------------------------
+
+
+def _copilot_tick(
+    stamp: datetime,
+    cfg,
+    journal: MesJournal,
+    side: str,
+    within: float | None,
+    mes_csv: Path | None,
+    spy_csv: Path | None,
+    gatekeeper,
+    past_context: str,
+    manager,
+    manager_every: float,
+    alert: bool,
+    no_log: bool,
+    prev_state,           # SetupState | None
+    last_fired,           # datetime | None
+    last_manager,         # datetime | None
+    seen: set[str],
+    live=None,            # rich Live | None
+) -> tuple[str, object, object, object | None, datetime | None, datetime | None]:
+    """One copilot tick. Returns (mode, snapshot, payload, prev_state, last_fired, last_manager)."""
+    stamp_date = stamp.strftime("%Y-%m-%d")
+    trade = journal.find_open_trade(stamp_date)
+    snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
+    result = evaluate(snapshot, trade.side if trade is not None else side)
+    if trade is None:
+        report = build_proximity(snapshot, result, proximity_band=within)
+        if live is not None:
+            live.update(Panel(_render_radar(report, stamp),
+                              title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
+                              border_style="blue"))
+        return "flat", snapshot, report, prev_state, last_fired, last_manager
+    updated, mgmt = evaluate_management(snapshot, result, trade, cfg)
+    for event in mgmt.events:  # persist each ladder event exactly once
+        key = f"{event.name}@{event.as_of.isoformat(timespec='minutes')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        if not no_log:
+            journal.append_trade_adjusted(
+                stamp_date, stop=updated.stop,
+                note=f"{event.name}: {event.detail}",
+                as_of=event.as_of.isoformat(timespec="minutes"),
+            )
+    if live is not None:
+        live.update(Panel(_render_mgmt_panel(updated, mgmt, snapshot.mes.close),
+                          title=f"MES Copilot — managing   {stamp:%H:%M:%S}",
+                          border_style="green"))
+    return "managing", snapshot, (updated, mgmt), prev_state, last_fired, last_manager
+
+
+@mes_app.command("copilot")
+def copilot(
+    side: str = typer.Option("auto", "--side", help="Radar evaluate 'long', 'short', or 'auto'."),
+    interval: int = typer.Option(15, "--interval", help="Seconds between ticks."),
+    within: float | None = typer.Option(
+        None, "--within", help="Proximity band in points (default: min(4.0, 0.5 x ATR))."
+    ),
+    alert: bool = typer.Option(
+        False, "--alert", help="Bell on READY/AT_LEVEL entries and ladder terminal events."
+    ),
+    auto_check: bool = typer.Option(False, "--auto-check", help="Gatekeeper check on READY while flat."),
+    auto_check_cooldown: float = typer.Option(5.0, "--auto-check-cooldown", help="Minutes between gatekeeper firings."),
+    manager_every: float = typer.Option(
+        10.0, "--manager-every", help="Minutes between manager-advisory LLM calls while managing (0 disables)."
+    ),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Skip both gatekeeper and manager agents."),
+    no_log: bool = typer.Option(
+        False, "--no-log", help="Do not append gatekeeper checks to the journal (ladder events still persist)."
+    ),
+    no_watch: bool = typer.Option(False, "--no-watch", help="Run one tick then exit."),
+    json_output: bool = typer.Option(False, "--json", help="Machine-readable one-shot summary."),
+    date: str | None = typer.Option(None, "--date", help="Trade date (defaults to today)."),
+    as_of: str | None = typer.Option(None, "--as-of", help="Simulated timestamp (one-shot only), e.g. 12:35 or 12:35:00."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+    mes_csv: Path | None = typer.Option(None, "--mes-csv"),
+    spy_csv: Path | None = typer.Option(None, "--spy-csv"),
+):
+    """One loop for the whole day: radar while flat, ladder while managing.
+
+    Flat: the radar proximity panel (identical to `mes radar --watch`), with
+    optional --auto-check gatekeeper verdicts on READY. Once `mes trade enter`
+    has been run in any terminal, the panel switches to the trade-management
+    ladder view; when the trade is closed (`mes trade close`), it reverts.
+    Execution stays in TOS: this command never places orders and never closes
+    a trade in the journal — it tells you when and at what price to run
+    `mes trade close`.
+    """
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    seen: set[str] = set()
+    stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
+    mode, snapshot, payload, _, _, _ = _copilot_tick(
+        stamp, cfg, journal, side, within, mes_csv, spy_csv,
+        gatekeeper=None, past_context="", manager=None, manager_every=0.0,
+        alert=alert, no_log=no_log,
+        prev_state=None, last_fired=None, last_manager=None, seen=seen,
+    )
+    if json_output:
+        body = {"mode": mode, "as_of": stamp.isoformat(timespec="minutes")}
+        if mode == "flat":
+            body["proximity"] = dataclasses.asdict(payload)
+        else:
+            body["management"] = dataclasses.asdict(payload[1])
+        console.print_json(json.dumps(body))
+        return
+    if mode == "managing":
+        updated, mgmt = payload
+        console.print(_render_mgmt_panel(updated, mgmt, snapshot.mes.close))
+    else:
+        console.print(Panel(_render_radar(payload, stamp),
+                            title="MES Radar", border_style="blue"))
+    return
+
+
+# ---------------------------------------------------------------------------
 # Trade management
 # ---------------------------------------------------------------------------
 
