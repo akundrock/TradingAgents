@@ -930,7 +930,7 @@ def copilot(
     ),
     auto_check: bool = typer.Option(
         False, "--auto-check",
-        help="While flat, run a gatekeeper LLM check on every tick the radar is READY (throttled by --auto-check-cooldown).",
+        help="Gatekeeper LLM check while flat (first flat tick fires, then at most once per --auto-check-cooldown).",
     ),
     auto_check_cooldown: float = typer.Option(5.0, "--auto-check-cooldown", help="Minutes between gatekeeper firings."),
     manager_every: float = typer.Option(
@@ -951,8 +951,8 @@ def copilot(
     """One loop for the whole day: radar while flat, ladder while managing.
 
     Flat: the radar proximity panel (identical to `mes radar --watch`), with
-    optional automatic gatekeeper checks — each flat tick on a READY signal
-    fires a gatekeeper LLM verdict, throttled by --auto-check-cooldown. Once
+    optional automatic gatekeeper checks — the first flat tick fires a
+    gatekeeper LLM verdict, then at most once per --auto-check-cooldown. Once
     `mes trade enter` has been run in any terminal, the panel switches to the
     trade-management ladder view; when the trade is closed (`mes trade close`),
     it reverts.
