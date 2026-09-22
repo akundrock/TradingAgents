@@ -864,25 +864,28 @@ def _copilot_tick(
                 last_fired = stamp
         return "flat", snapshot, report, "flat", last_fired, last_manager
     updated, mgmt = evaluate_management(snapshot, result, trade, cfg)
+    last_new_event: str | None = None
     for event in mgmt.events:  # persist each ladder event exactly once
         key = f"{event.name}@{event.as_of.isoformat(timespec='minutes')}"
         if key in seen:
             continue
         seen.add(key)
+        last_new_event = event.name
         if not no_log:
             journal.append_trade_adjusted(
                 stamp_date, stop=updated.stop,
                 note=f"{event.name}: {event.detail}",
                 as_of=event.as_of.isoformat(timespec="minutes"),
             )
-        if mgmt.recommendation == "CLOSED":  # terminal event: bell + one-time close hint
-            if alert:
-                console.print("\a", end="")
-            console.print(
-                f"[bold yellow]Trade over — run:[/bold yellow] mes trade close "
-                f"--price {snapshot.mes.close:.2f} "
-                f"--reason {_CLOSE_REASONS.get(event.name, 'manual')}"
-            )
+    if last_new_event is not None and mgmt.recommendation == "CLOSED":
+        # Terminal tick: bell + close hint once per tick, not once per ladder event.
+        if alert:
+            console.print("\a", end="")
+        console.print(
+            f"[bold yellow]Trade over — run:[/bold yellow] mes trade close "
+            f"--price {snapshot.mes.close:.2f} "
+            f"--reason {_CLOSE_REASONS.get(last_new_event, 'manual')}"
+        )
     # Advisory LLM text never mutates state (same rule as trade watch, cli/mes.py:1184-1185).
     if manager is not None and manager_every > 0 and (
         last_manager is None
@@ -925,7 +928,10 @@ def copilot(
     alert: bool = typer.Option(
         False, "--alert", help="Bell on READY/AT_LEVEL entries and ladder terminal events."
     ),
-    auto_check: bool = typer.Option(False, "--auto-check", help="Gatekeeper check on READY while flat."),
+    auto_check: bool = typer.Option(
+        False, "--auto-check",
+        help="While flat, run a gatekeeper LLM check on every tick the radar is READY (throttled by --auto-check-cooldown).",
+    ),
     auto_check_cooldown: float = typer.Option(5.0, "--auto-check-cooldown", help="Minutes between gatekeeper firings."),
     manager_every: float = typer.Option(
         10.0, "--manager-every", help="Minutes between manager-advisory LLM calls while managing (0 disables)."
@@ -945,9 +951,11 @@ def copilot(
     """One loop for the whole day: radar while flat, ladder while managing.
 
     Flat: the radar proximity panel (identical to `mes radar --watch`), with
-    optional --auto-check gatekeeper verdicts on READY. Once `mes trade enter`
-    has been run in any terminal, the panel switches to the trade-management
-    ladder view; when the trade is closed (`mes trade close`), it reverts.
+    optional automatic gatekeeper checks — each flat tick on a READY signal
+    fires a gatekeeper LLM verdict, throttled by --auto-check-cooldown. Once
+    `mes trade enter` has been run in any terminal, the panel switches to the
+    trade-management ladder view; when the trade is closed (`mes trade close`),
+    it reverts.
     Execution stays in TOS: this command never places orders and never closes
     a trade in the journal — it tells you when and at what price to run
     `mes trade close`.
@@ -1016,7 +1024,7 @@ def copilot(
                     last_manager=last_manager, seen=seen, live=live,
                 )
             except Exception as exc:
-                live.update(Panel(f"[red]Snapshot error:[/red] {exc}", border_style="red"))
+                live.update(Panel(f"[red]Tick error:[/red] {exc}", border_style="red"))
             try:
                 time.sleep(interval)
             except KeyboardInterrupt:

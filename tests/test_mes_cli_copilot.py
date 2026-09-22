@@ -8,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cli.mes import mes_app
-from tests.mes_factories import make_mes_series, make_snapshot
+from tests.mes_factories import make_mes_series, make_snapshot, make_spy_series
 
 runner = CliRunner()
 
@@ -73,9 +73,12 @@ def _tick(journal, stamp, **overrides):
     return mes_cli._copilot_tick(**kwargs)
 
 
-def _enter(tmp_path, side="long", entry="100.00", stop="98.00"):
-    runner.invoke(mes_app, ["trade", "enter", "--side", side, "--entry", entry,
-                            "--stop", stop, "--journal-dir", str(tmp_path)])
+def _enter(tmp_path, side="long", entry="100.00", stop="98.00", target=None):
+    args = ["trade", "enter", "--side", side, "--entry", entry,
+            "--stop", stop, "--journal-dir", str(tmp_path)]
+    if target is not None:
+        args += ["--target", target]
+    runner.invoke(mes_app, args)
 
 
 @pytest.mark.unit
@@ -102,6 +105,48 @@ def test_terminal_event_prints_close_hint_once(tmp_path, patched_snapshot, monke
     assert "--reason stop" in out1
     _tick(journal, datetime(2026, 3, 30, 11, 2), seen=seen, alert=True)
     assert capsys.readouterr().out.count("mes trade close") == 0  # fire-once via seen
+
+
+@pytest.mark.unit
+def test_multi_event_close_hint_prints_once_per_terminal_tick(
+    tmp_path, patched_snapshot, monkeypatch, capsys,
+):
+    """F1: a terminal tick that fires breakeven + partial prints the close hint
+    once, not once per ladder event (cli/mes.py per-event loop)."""
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    _enter(tmp_path, target="110.00")  # far target so the fill check can't preempt
+    # +2.75R bar (entry 100 / stop 98 / close 103.5) fires breakeven AND partial on
+    # one tick; weak SPY internals (add=0.0, tick=0.0) flip confluence, so with
+    # exit_on_confluence_loss=True the tick ends CLOSED carrying both ladder events
+    # (management.py confluence-exit returns the ladder events it already fired).
+    snap = make_snapshot(
+        mes=make_mes_series(
+            close=103.5, bar_kwargs={"open_": 100.5, "high": 103.75, "low": 100.25},
+        ),
+        spy=make_spy_series(internals=[(0.0, 0.0, 1000.0)] * 6),
+        as_of=datetime(2026, 3, 30, 11, 1),
+    )
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+    seen: set[str] = set()
+    cfg = mes_cli.load_mes_config({"exit_on_confluence_loss": True})
+    _tick(journal, datetime(2026, 3, 30, 11, 1), cfg=cfg, seen=seen, alert=True)
+    out1 = capsys.readouterr().out
+    assert "mes trade close" in out1
+    assert out1.count("mes trade close") == 1  # RED: hint prints once per event today
+    assert "--reason manual" in out1  # reason comes from the LAST event (partial)
+    assert "--reason stop" not in out1
+    # Next tick: journal replay restores the degradation-locked stop (fired resets),
+    # and BE/partial re-fire to the same rounded stop -> zero new events, no hint.
+    quiet = make_snapshot(
+        mes=make_mes_series(
+            close=103.5, atr=1.0,
+            bar_kwargs={"open_": 103.5, "high": 103.75, "low": 103.25, "close": 103.5},
+        ),
+        as_of=datetime(2026, 3, 30, 11, 2),
+    )
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: quiet)
+    _tick(journal, datetime(2026, 3, 30, 11, 2), cfg=cfg, seen=seen, alert=True)
+    assert capsys.readouterr().out.count("mes trade close") == 0
 
 
 @pytest.mark.unit
