@@ -127,3 +127,28 @@ def test_flat_auto_check_fires_once_per_cooldown(tmp_path, patched_snapshot, cap
     _tick(journal, t0 + timedelta(minutes=5), prev_state="flat", last_fired=t0,
           auto_check=True)
     assert capsys.readouterr().out.count("Deterministic Verdict") == 1  # cooldown elapsed
+
+@pytest.mark.unit
+def test_manager_advice_throttled_by_interval(tmp_path, patched_snapshot, capsys):
+    """Manager agent consults at most once per --manager-every minutes."""
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    _enter(tmp_path)  # long 100.00, stop 98.00
+    calls: list[dict] = []
+
+    def stub_manager(**kwargs):
+        calls.append(kwargs)
+        return "Hold the runner; nothing has changed."
+
+    t0 = datetime(2026, 3, 30, 11, 0)
+    # Tick 1: last_manager is None -> consult fires.
+    _tick(journal, t0, manager=stub_manager, manager_every=5.0)
+    assert len(calls) == 1 and calls[0]["current_price"] is not None
+    # Tick 2 one minute later: 60s < 300s -> throttled.
+    _, _, _, _, _, last_manager = _tick(
+        journal, t0 + timedelta(minutes=1),
+        manager=stub_manager, manager_every=5.0, last_manager=t0,
+    )
+    assert len(calls) == 1
+    assert "Hold the runner" in capsys.readouterr().out  # tick 1's panel
+    assert last_manager == t0  # throttle timestamp carries through unchanged
+

@@ -883,6 +883,31 @@ def _copilot_tick(
                 f"--price {snapshot.mes.close:.2f} "
                 f"--reason {_CLOSE_REASONS.get(event.name, 'manual')}"
             )
+    # Advisory LLM text never mutates state (same rule as trade watch, cli/mes.py:1184-1185).
+    if manager is not None and manager_every > 0 and (
+        last_manager is None
+        or (stamp - last_manager).total_seconds() >= manager_every * 60
+    ):
+        try:
+            advisory = manager(
+                mgmt_summary=(
+                    f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
+                    f"{mgmt.r_now:+.2f}R | stop {mgmt.stop:.2f} | "
+                    f"next: {mgmt.next_event or 'closed'}"
+                ),
+                market_context=render_market_context(snapshot),
+                current_price=snapshot.mes.close,
+            )
+        except Exception as exc:
+            console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
+        else:
+            panel = Panel(Markdown(advisory), title="Manager Advisory", border_style="dim")
+            if live is not None:
+                live.update(Panel(Markdown(advisory), title="Manager Advisory",
+                                  border_style="dim"))
+            else:
+                console.print(panel)
+        last_manager = stamp
     if live is not None:
         live.update(Panel(_render_mgmt_panel(updated, mgmt, snapshot.mes.close),
                           title=f"MES Copilot — managing   {stamp:%H:%M:%S}",
@@ -939,6 +964,13 @@ def copilot(
             past_context = _past_context(app_config)
         except Exception as exc:
             console.print(f"[yellow]Gatekeeper unavailable, running deterministic only:[/yellow] {exc}")
+    # Manager construction mirrors trade status verbatim (cli/mes.py:1138-1144).
+    manager = None
+    if not no_llm and manager_every > 0:
+        try:
+            manager = create_mes_manager_agent(_make_llm(DEFAULT_CONFIG.copy()))
+        except Exception as exc:
+            console.print(f"[yellow]Manager unavailable, mechanical only:[/yellow] {exc}")
     seen: set[str] = set()
     prev_state = None
     last_fired = None
@@ -948,7 +980,7 @@ def copilot(
         mode, snapshot, payload, _, _, _ = _copilot_tick(
             stamp, cfg, journal, side, within, mes_csv, spy_csv,
             gatekeeper=gatekeeper, past_context=past_context,
-            manager=None, manager_every=0.0,  # Task 3 threads the real throttle
+            manager=manager, manager_every=manager_every,
             alert=alert, no_log=no_log,
             auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
             prev_state=prev_state, last_fired=last_fired,
@@ -977,7 +1009,7 @@ def copilot(
                 mode, snapshot, payload, prev_state, last_fired, last_manager = _copilot_tick(
                     stamp, cfg, journal, side, within, mes_csv, spy_csv,
                     gatekeeper=gatekeeper, past_context=past_context,
-                    manager=None, manager_every=0.0,  # Task 3 threads the real throttle
+                    manager=manager, manager_every=manager_every,
                     alert=alert, no_log=no_log,
                     auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
                     prev_state=prev_state, last_fired=last_fired,
