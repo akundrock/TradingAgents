@@ -1103,9 +1103,8 @@ def copilot(
         if mode == "managing":
             updated, mgmt = payload
             console.print(_render_mgmt_panel(updated, mgmt, snapshot.mes.close))
-        else:
-            console.print(Panel(_render_radar(payload, stamp),
-                                title="MES Radar", border_style="blue"))
+        # Flat: the tick already printed the radar panel (with the standing-rule
+        # banner); printing here again would duplicate it.
         return
     # ---- Watch loop with Rich Live ----
     with Live(console=console, refresh_per_second=1, screen=False) as live:

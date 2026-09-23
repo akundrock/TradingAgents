@@ -32,7 +32,7 @@ def _invoke(*args):
 def test_one_shot_flat_renders_radar(tmp_path, patched_snapshot):
     result = _invoke("--no-watch", "--no-llm", "--journal-dir", str(tmp_path))
     assert result.exit_code == 0, result.output
-    assert "MES Radar" in result.output  # radar panel title, same as `mes radar`
+    assert result.output.count("MES Radar") == 1  # radar panel printed exactly once
 
 
 @pytest.mark.unit
