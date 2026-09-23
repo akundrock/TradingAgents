@@ -52,6 +52,7 @@ def invoke_structured_or_freetext(
     prompt: Any,
     render: Callable[[T], str],
     agent_name: str,
+    on_model: Callable[[T], None] | None = None,
 ) -> str:
     """Run the structured call and render to markdown; fall back to free-text on any failure.
 
@@ -59,6 +60,10 @@ def invoke_structured_or_freetext(
     invocations, a list of message dicts for chat models that take that
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
+
+    ``on_model``, when given, is invoked with the parsed model instance right
+    after a successful structured call — and never on the free-text fallback —
+    so callers can capture typed output while still receiving markdown.
     """
     if structured_llm is not None:
         try:
@@ -68,6 +73,8 @@ def invoke_structured_or_freetext(
                 # the tool, leaving the parser with nothing to return. Treat it
                 # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
+            if on_model is not None:
+                on_model(result)
             return render(result)
         except Exception as exc:
             logger.warning(

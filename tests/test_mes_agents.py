@@ -22,6 +22,8 @@ from tradingagents.agents.schemas import (
     TradeVerdict,
     render_session_review,
 )
+from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
 
 
 class _StructuredStub:
@@ -438,6 +440,53 @@ def test_render_session_review_lists_standing_rules():
 @pytest.mark.unit
 def test_render_session_review_omits_rules_when_empty():
     assert "Standing Rules" not in render_session_review(_review())
+
+
+@pytest.mark.unit
+def test_render_session_review_omits_rules_when_empty():
+    assert "Standing Rules" not in render_session_review(_review())
+
+
+# ---------------------------------------------------------------------------
+# Review agent standing-rules feedback (structured-output hook)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_invoke_structured_calls_on_model_with_parsed_result():
+    review = _review()
+    llm = FakeLLM({SessionReview: review})
+    captured = []
+    output = invoke_structured_or_freetext(
+        llm.with_structured_output(SessionReview), llm, "prompt",
+        render_session_review, "test", on_model=captured.append,
+    )
+    assert captured == [review]
+    assert "**Hypothesis Grade**: Partial" in output
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_includes_current_standing_rules():
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(
+        hypothesis="h", checks_summary="c", outcome_summary="o",
+        standing_rules_summary=(
+            "1 triggered / 0 checked / 0 skipped / 1 MISSED"
+        ),
+    )
+    prompt = llm.prompts[0]
+    assert "Standing Rules" in prompt
+    assert "MISSED" in prompt
+
+
+@pytest.mark.unit
+def test_review_agent_forwards_on_review_capture():
+    llm = FakeLLM({SessionReview: _review()})
+    captured = []
+    create_mes_review_agent(llm)(
+        hypothesis="h", checks_summary="c", outcome_summary="o", on_review=captured.append,
+    )
+    assert len(captured) == 1 and captured[0].discipline_grade == "B"
 
 
 # ---------------------------------------------------------------------------

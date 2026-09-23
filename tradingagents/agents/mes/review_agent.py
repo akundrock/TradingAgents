@@ -19,6 +19,8 @@ def create_mes_review_agent(llm):
         checks_summary: str,
         outcome_summary: str,
         trades_summary: str = "",
+        standing_rules_summary: str = "",
+        on_review=None,
     ) -> str:
         prompt = f"""You are an end-of-day trading coach debriefing a /MES (Micro E-mini S&P 500) discretionary trader. The session is closed and nothing can be changed — your only value is making tomorrow better.
 
@@ -58,6 +60,19 @@ checklist tier at the time, stop management, whether the exit respected the
 plan (time stop / target / manual), and what the realized R says about the
 tier the entry was taken at."""
 
+        if standing_rules_summary.strip():
+            prompt += f"""
+
+---
+
+**Standing Rules Previously Prescribed (and their compliance):**
+{standing_rules_summary}
+
+These are the machine-checked rules the copilot watched during the session and
+whether each trigger was honored (a check logged), consciously skipped, or
+MISSED. Treat every MISSED trigger as a discipline failure: name it in
+what_failed and let it pull the discipline grade down."""
+
         prompt += get_language_instruction()
 
         return invoke_structured_or_freetext(
@@ -66,6 +81,7 @@ tier the entry was taken at."""
             prompt,
             render_session_review,
             "MES Review Agent",
+            on_model=on_review,
         )
 
     return run
