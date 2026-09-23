@@ -844,7 +844,14 @@ def radar(
             stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
             try:
                 snapshot, result, report = _one_shot(stamp)
-                panel = Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue")
+                rule_hits: list[RuleHit] = []
+                if journal is not None:
+                    rule_hits = evaluate_standing_rules(
+                        snapshot, result,
+                        journal.active_standing_rules(stamp.strftime("%Y-%m-%d")),
+                    )
+                panel = Panel(_render_radar(report, stamp, rule_hits=rule_hits),
+                              title="MES Radar", border_style="blue")
                 live.update(panel)
                 if alert and report.state in _ALERT_STATES and report.state != prev_state:
                     console.print("\a", end="")
