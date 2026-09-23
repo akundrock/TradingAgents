@@ -59,6 +59,9 @@ def test_one_shot_json_emits_mode(tmp_path, patched_snapshot):
 
 from cli import mes as mes_cli  # after the existing imports
 from tests.test_mes_management import snap_at  # controllable-OHLC snapshot helper
+from tradingagents.mes.checklist import evaluate
+from tradingagents.mes.radar import build_proximity
+from tradingagents.mes.rules import RuleHit
 
 
 def _tick(journal, stamp, **overrides):
@@ -196,4 +199,64 @@ def test_manager_advice_throttled_by_interval(tmp_path, patched_snapshot, capsys
     assert len(calls) == 1
     assert "Hold the runner" in capsys.readouterr().out  # tick 1's panel
     assert last_manager == t0  # throttle timestamp carries through unchanged
+
+
+# ---- Standing rules ----
+
+RULE = {
+    "trigger": {"kind": "level_retest", "level": "orb_top",
+                "confirmation": "none", "tolerance_points": 2.0},
+    "requirement": "log_check_or_skip",
+    "note": "Fade the first ORB-top retest.",
+    "expires_on": None,
+}
+
+
+@pytest.mark.unit
+def test_flat_tick_fires_standing_rule_once(tmp_path, patched_snapshot, capsys):
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    journal.save_standing_rules([RULE], reviewed_on="2026-03-30")
+    t0 = datetime(2026, 3, 30, 11, 0)
+    _tick(journal, t0)  # patched snapshot closes 100.0; ORB high 101.0 -> hit
+    out1 = capsys.readouterr().out
+    assert out1.count("STANDING RULE triggered") == 1
+    assert len(journal.load_rule_fires("2026-03-30")) == 1
+    _tick(journal, t0 + timedelta(minutes=1), prev_state="flat", last_fired=t0)
+    # Tick 2: same hit, but the per-session dedup prevents a second trigger
+    # (only the open reminder prints, never a second trigger line).
+    out2 = capsys.readouterr().out
+    assert "STANDING RULE triggered" not in out2
+    assert "LOG A CHECK NOW" in out2  # open banner still reminds
+    assert len(journal.load_rule_fires("2026-03-30")) == 1
+
+
+@pytest.mark.unit
+def test_skip_resolves_the_banner(tmp_path, patched_snapshot, capsys):
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    journal.save_standing_rules([RULE], reviewed_on="2026-03-30")
+    t0 = datetime(2026, 3, 30, 11, 0)
+    _tick(journal, t0)
+    capsys.readouterr()  # drain tick 1
+    journal.append_rule_skip("2026-03-30", rule_id="orb_top", level="ORB high",
+                             reason="chop", as_of=t0)
+    _tick(journal, t0 + timedelta(minutes=1))
+    out2 = capsys.readouterr().out
+    assert "LOG A CHECK NOW" not in out2  # skip resolved the fire
+    assert "STANDING RULE triggered" not in out2  # and no re-fire
+
+
+@pytest.mark.unit
+def test_radar_panel_renders_open_rule_banner():
+    from tests.test_mes_radar import _render_table_to_text
+
+    hit = RuleHit(rule_id="orb_top", level="ORB high", level_price=101.0,
+                  distance=-1.0, tolerance=2.0, confirmation="none",
+                  note="Fade the first ORB-top retest.")
+    snap = make_snapshot(as_of=datetime(2026, 3, 30, 11, 0))
+    report = build_proximity(snap, evaluate(snap, "auto"))
+    text = _render_table_to_text(
+        mes_cli._render_radar(report, datetime(2026, 3, 30, 11, 0), rule_hits=[hit])
+    )
+    assert "LOG A CHECK NOW" in text
+    assert "mes skip" in text
 

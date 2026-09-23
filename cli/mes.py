@@ -85,6 +85,8 @@ from tradingagents.mes.management import (
     evaluate_management,
 )
 from tradingagents.mes.radar import should_auto_check
+from tradingagents.agents.schemas import describe_level
+from tradingagents.mes.rules import RuleHit, evaluate_standing_rules
 
 console = Console()
 
@@ -583,8 +585,15 @@ def _level_row(ld: LevelDistance) -> Text:
     )
 
 
-def _render_radar(report: ProximityReport, as_of: datetime) -> Table:
-    """Build a compact Rich Table displaying the proximity report."""
+def _render_radar(
+    report: ProximityReport, as_of: datetime, rule_hits: list[RuleHit] | None = None
+) -> Table:
+    """Build a compact Rich Table displaying the proximity report.
+
+    ``rule_hits`` are the currently-open standing-rule triggers; each renders
+    as a persistent two-row banner directly under the state line until the
+    trader runs `mes check` (any journal check) or `mes skip`.
+    """
     state_style = _STATE_STYLE[report.state]
     state_label = _STATE_LABEL[report.state]
     tier_style = _TIER_STYLE.get(report.tier, "white")
@@ -606,6 +615,17 @@ def _render_radar(report: ProximityReport, as_of: datetime) -> Table:
 
     # ---- State banner ----
     outer.add_row(Text.from_markup(f"[{state_style}]{state_label}[/{state_style}]"))
+
+    # ---- Standing-rule banner (directly under the state, before internals) ----
+    for hit in rule_hits or []:
+        outer.add_row(Text.from_markup(
+            f"[bold yellow]STANDING RULE — {hit.level} retest (±{hit.tolerance:g} pts)[/bold yellow]"
+        ))
+        outer.add_row(Text.from_markup(
+            "[bold yellow]LOG A CHECK NOW[/bold yellow] — run [bold]`mes check`[/bold] "
+            f"or [bold]`mes skip --rule {hit.rule_id} --reason …`[/bold]"
+            + (f"  [dim]({hit.note})[/dim]" if hit.note else "")
+        ))
 
     # ---- Internals status ----
     if report.internals_status is not None:
@@ -836,10 +856,46 @@ def _copilot_tick(
     result = evaluate(snapshot, trade.side if trade is not None else side)
     if trade is None:
         report = build_proximity(snapshot, result, proximity_band=within)
+        # Standing rules: evaluate, fire once per rule per session (the journal's
+        # rule_fired records are the dedup keys, so a restart cannot re-fire).
+        rules = journal.active_standing_rules(stamp_date)
+        rule_hits = evaluate_standing_rules(snapshot, result, rules)
+        fired_ids = {str(fire.get("rule_id")) for fire in journal.load_rule_fires(stamp_date)}
+        new_hits = [hit for hit in rule_hits if hit.rule_id not in fired_ids]
+        for hit in new_hits:
+            if not no_log:
+                journal.append_rule_fired(
+                    stamp_date, rule_id=hit.rule_id, level=hit.level,
+                    confirmation=hit.confirmation, tolerance=hit.tolerance,
+                    last_price=snapshot.mes.close, distance=hit.distance, as_of=stamp,
+                )
+            if alert:
+                console.print("\a", end="")
+            console.print(
+                f"[bold yellow]STANDING RULE triggered — {hit.level} retest "
+                f"({hit.distance:+.2f} pts):[/bold yellow] run [bold]`mes check`[/bold] "
+                f"or [bold]`mes skip --rule {hit.rule_id} --reason \"<why>\"[/bold]"
+            )
+        # Fires past the 10-min grace already count as MISSED and drop off the
+        # banner; the review tally records the failure.
+        tally = journal.rule_compliance(stamp_date, resolve_as_of=stamp)
+        open_ids = {str(fire.get("rule_id")) for fire in tally["open"]}
+        panel_hits = [hit for hit in rule_hits if hit.rule_id in open_ids or hit in new_hits]
         if live is not None:
-            live.update(Panel(_render_radar(report, stamp),
+            live.update(Panel(_render_radar(report, stamp, rule_hits=panel_hits),
                               title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
                               border_style="blue"))
+        else:
+            console.print(Panel(_render_radar(report, stamp, rule_hits=panel_hits),
+                                title="MES Radar", border_style="blue"))
+        for rule_id in sorted(open_ids | {hit.rule_id for hit in new_hits}):
+            console.print(
+                f"[bold yellow]LOG A CHECK NOW[/bold yellow] — {describe_level(rule_id)} "
+                f"retest still open: [bold]`mes check`[/bold] or "
+                f"[bold]`mes skip --rule {rule_id} --reason \"<why>\"`[/bold]"
+            )
+        if tally["missed"]:
+            console.print(f"[bold red]MISSED CHECKS TODAY: {tally['missed']}[/bold red]")
         # Radar's three rules (should_auto_check, radar.py:289-308) with the
         # eligibility state swapped: flat instead of SetupState.READY.
         if auto_check:
@@ -1030,6 +1086,50 @@ def copilot(
             except KeyboardInterrupt:
                 break
     console.print("[dim]Copilot stopped.[/dim]")
+
+
+@mes_app.command("skip")
+def skip(
+    reason: str = typer.Option(..., "--reason", help="Why this trigger is consciously skipped."),
+    rule: str | None = typer.Option(None, "--rule", help="rule_id to skip when several are open."),
+    as_of: str | None = typer.Option(None, "--as-of", help="Simulated timestamp, e.g. 12:35."),
+    date: str | None = typer.Option(None, "--date", help="Trade date (defaults to today)."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+):
+    """Acknowledge a standing-rule trigger without logging a check.
+
+    An honest skip is a scored pass: it resolves the open fire so `mes review`
+    does not tally it as MISSED. Without --rule the most recent open fire is
+    skipped.
+    """
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    session_date = date or _market_now(cfg).strftime("%Y-%m-%d")
+    open_fires = journal.rule_compliance(session_date)["open"]
+    if not open_fires:
+        console.print(f"[red]No pending rule trigger for {session_date} — nothing to skip.[/red]")
+        raise typer.Exit(code=1)
+    fire = next(
+        (f for f in reversed(open_fires) if rule is None or f.get("rule_id") == rule), None
+    )
+    if fire is None:
+        console.print(
+            f"[red]No open fire for rule '{rule}'. Open fires: "
+            f"{', '.join(str(f.get('rule_id')) for f in open_fires)}[/red]"
+        )
+        raise typer.Exit(code=1)
+    journal.append_rule_skip(
+        session_date,
+        rule_id=str(fire.get("rule_id", "")),
+        level=str(fire.get("level", "")),
+        reason=reason,
+        last_price=fire.get("last_price"),
+        as_of=_parse_as_of(as_of, cfg, date=session_date) if as_of else _market_now(cfg),
+    )
+    console.print(
+        f"[green]Skipped {fire.get('rule_id')} ({fire.get('level')}) — "
+        f"reason recorded for the next review.[/green]"
+    )
 
 
 # ---------------------------------------------------------------------------
