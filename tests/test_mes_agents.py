@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from tradingagents.agents.mes import (
     create_mes_gatekeeper_agent,
@@ -9,13 +10,17 @@ from tradingagents.agents.mes import (
     create_mes_review_agent,
 )
 from tradingagents.agents.schemas import (
+    Confirmation,
     DayType,
     HypothesisGrade,
     MarketBias,
     MorningHypothesis,
+    RuleLevel,
     SessionReview,
+    StandingRule,
     TradeGoNoGo,
     TradeVerdict,
+    render_session_review,
 )
 
 
@@ -383,6 +388,56 @@ def test_review_agent_falls_back_to_free_text():
         hypothesis="h", checks_summary="s", outcome_summary="o"
     )
     assert output == "plain review"
+
+
+# ---------------------------------------------------------------------------
+# Standing rules (review -> session loop)
+# ---------------------------------------------------------------------------
+
+
+def _rule(**overrides) -> StandingRule:
+    trigger = {"kind": "level_retest", "level": "orb_top",
+               "confirmation": "none", "tolerance_points": 2.0}
+    payload = {"trigger": trigger, "requirement": "log_check_or_skip",
+               "note": "Fade the first ORB-top retest.", "expires_on": "2026-03-31"}
+    payload.update(overrides)
+    return StandingRule(**payload)
+
+
+@pytest.mark.unit
+def test_standing_rule_defaults():
+    rule = StandingRule(trigger={"kind": "level_retest", "level": "vwap"})
+    assert rule.trigger.level is RuleLevel.VWAP
+    assert rule.trigger.confirmation is Confirmation.NONE
+    assert rule.trigger.tolerance_points == 2.0
+    assert rule.requirement == "log_check_or_skip"
+    assert rule.expires_on is None
+
+
+@pytest.mark.unit
+def test_standing_rule_rejects_unknown_level():
+    with pytest.raises(ValidationError):
+        StandingRule(trigger={"kind": "level_retest", "level": "round_100"})
+
+
+@pytest.mark.unit
+def test_session_review_standing_rules_default_empty():
+    assert _review().standing_rules == []
+
+
+@pytest.mark.unit
+def test_render_session_review_lists_standing_rules():
+    review = _review()
+    review.standing_rules = [_rule()]
+    output = render_session_review(review)
+    assert "**Standing Rules for the next session**:" in output
+    assert "ORB high retest" in output
+    assert "Fade the first ORB-top retest." in output
+
+
+@pytest.mark.unit
+def test_render_session_review_omits_rules_when_empty():
+    assert "Standing Rules" not in render_session_review(_review())
 
 
 # ---------------------------------------------------------------------------

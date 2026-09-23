@@ -654,6 +654,104 @@ class HypothesisGrade(str, Enum):
     WRONG = "Wrong"
 
 
+class RuleLevel(str, Enum):
+    """Structural levels a standing rule can watch (resolved by mes/rules.py)."""
+
+    VWAP = "vwap"
+    ORB_TOP = "orb_top"
+    ORB_BOTTOM = "orb_bottom"
+    PDH = "pdh"
+    PDL = "pdl"
+    PRIOR_CLOSE = "prior_close"
+    PRIOR_VAH = "prior_vah"
+    PRIOR_VAL = "prior_val"
+    POC = "poc"
+    ONH = "onh"
+    ONL = "onl"
+
+
+class Confirmation(str, Enum):
+    """Optional condition required at the touch before a rule fires."""
+
+    NONE = "none"
+    ADD_VOLD_ALIGNED = "add_vold_aligned"
+
+
+class LevelRetestTrigger(BaseModel):
+    """Day-one rule trigger: a retest of one structural level.
+
+    ``kind`` is a Literal so later trigger kinds (time-of-day, internals flips)
+    can be added without a schema migration; the trigger engine simply skips
+    kinds it does not implement.
+    """
+
+    kind: Literal["level_retest"] = "level_retest"
+    level: RuleLevel = Field(description="Which structural level to watch for a retest.")
+    confirmation: Confirmation = Field(
+        default=Confirmation.NONE,
+        description=(
+            "Optional condition required at the touch: 'add_vold_aligned' fires "
+            "only when $ADD and $VOLD agree on direction; 'none' fires on the "
+            "retest itself."
+        ),
+    )
+    tolerance_points: float = Field(
+        default=2.0,
+        ge=0.25,
+        le=10.0,
+        description="Points within which price counts as retesting the level.",
+    )
+
+
+class StandingRule(BaseModel):
+    """A machine-checkable discipline prescription for the next session.
+
+    ``requirement`` fixes the observable: when the trigger fires, the trader
+    must either log a gatekeeper check or acknowledge with ``mes skip --reason``.
+    """
+
+    trigger: LevelRetestTrigger
+    requirement: Literal["log_check_or_skip"] = "log_check_or_skip"
+    note: str = Field(default="", description="One-line 'why' shown in the radar banner.")
+    expires_on: str | None = Field(
+        default=None,
+        description="ISO date the rule lapses; None keeps it active until superseded.",
+    )
+
+
+_LEVEL_LABELS: dict[RuleLevel, str] = {
+    RuleLevel.VWAP: "VWAP",
+    RuleLevel.ORB_TOP: "ORB high",
+    RuleLevel.ORB_BOTTOM: "ORB low",
+    RuleLevel.PDH: "prior-day high",
+    RuleLevel.PDL: "prior-day low",
+    RuleLevel.PRIOR_CLOSE: "prior-day close",
+    RuleLevel.PRIOR_VAH: "prior VAH",
+    RuleLevel.PRIOR_VAL: "prior VAL",
+    RuleLevel.POC: "prior POC",
+    RuleLevel.ONH: "overnight high",
+    RuleLevel.ONL: "overnight low",
+}
+
+
+def describe_level(level: RuleLevel | str) -> str:
+    """Human label for a rule level, shared with the radar banner."""
+    return _LEVEL_LABELS.get(RuleLevel(level), str(level))
+
+
+def describe_standing_rule(rule: StandingRule) -> str:
+    """One-line human description used by panels and prompts."""
+    confirmation = ""
+    if rule.trigger.confirmation is Confirmation.ADD_VOLD_ALIGNED:
+        confirmation = " with $ADD/$VOLD aligned"
+    note = f" — {rule.note}" if rule.note else ""
+    return (
+        f"{describe_level(rule.trigger.level)} retest "
+        f"(±{rule.trigger.tolerance_points:g} pts{confirmation}) "
+        f"→ run `mes check` or `mes skip`{note}"
+    )
+
+
 class SessionReview(BaseModel):
     """Structured end-of-day review produced by the MES Review Agent.
 
@@ -697,6 +795,16 @@ class SessionReview(BaseModel):
             "checked tomorrow."
         ),
     )
+    standing_rules: list[StandingRule] = Field(
+        default_factory=list,
+        description=(
+            "Zero to three machine-checkable rules for the NEXT session, "
+            "prescribed from this review's discipline findings. Only chart-"
+            "watchable level retests qualify (kind=level_retest); each note is "
+            "one concrete sentence. Omit when the improvement is not "
+            "chart-watchable."
+        ),
+    )
     narrative: str = Field(
         description=(
             "Full review covering, in order: "
@@ -711,7 +819,7 @@ class SessionReview(BaseModel):
 
 def render_session_review(review: SessionReview) -> str:
     """Render a SessionReview to the markdown the CLI displays and logs."""
-    return "\n".join([
+    parts = [
         f"**Hypothesis Grade**: {review.hypothesis_grade.value}",
         f"**Discipline Grade**: {review.discipline_grade}",
         "",
@@ -721,5 +829,14 @@ def render_session_review(review: SessionReview) -> str:
         "",
         f"**One Improvement**: {review.one_improvement}",
         "",
-        review.narrative,
-    ])
+    ]
+    if review.standing_rules:
+        parts.append("**Standing Rules for the next session**:")
+        parts.append("")
+        parts.extend(
+            f"{index}. {describe_standing_rule(rule)}"
+            for index, rule in enumerate(review.standing_rules, start=1)
+        )
+        parts.append("")
+    parts.append(review.narrative)
+    return "\n".join(parts)
