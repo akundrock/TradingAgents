@@ -21,7 +21,7 @@ def test_defaults_match_documented_thresholds():
     assert cfg.tick_extreme_threshold == 1000.0
     assert cfg.tick_sustain_bars == 3
     assert cfg.vold_slope_bars == 6
-    assert (cfg.atr_multiplier, cfg.atr_length, cfg.sma_length, cfg.nfe) == (2.0, 14, 5, 13)
+    assert (cfg.atr_multiplier, cfg.atr_length, cfg.sma_length, cfg.nfe) == (3.0, 14, 5, 13)
     assert (cfg.volume_lookback, cfg.volume_multiplier) == (20, 1.2)
     assert cfg.min_confirmations == 4
     assert cfg.enable_tier_min_confirmations is True

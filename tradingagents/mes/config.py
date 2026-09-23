@@ -105,7 +105,7 @@ class MesChecklistConfig:
     sma_length: int = 5
     nfe: int = 13
     atr_length: int = 14
-    atr_multiplier: float = 2.0
+    atr_multiplier: float = 3.0
     volume_lookback: int = 20
     volume_multiplier: float = 1.2
 
