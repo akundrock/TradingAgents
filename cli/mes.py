@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
+import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -100,6 +102,58 @@ MES_TICKER = "/MES"
 
 _VERDICT_STYLE = {"Take": "bold green", "Wait": "bold yellow", "Stand Down": "bold red"}
 _TIER_STYLE = {"premium": "bold green", "standard": "green", "marginal": "yellow", "low": "red"}
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
+
+def _fire_alert(message: str) -> None:
+    """Ring the terminal bell, then escalate when the bell would be silent.
+
+    A BEL character (0x07) is the only audible in-band signal a terminal
+    supports, and some terminals mute it by default (VS Code's integrated
+    terminal does, until ``accessibility.signals.terminalBell.sound`` is set
+    to ``on``). On macOS we also post a Notification Center alert with its
+    own sound so the alert is heard regardless of terminal settings.
+
+    Env overrides (all optional):
+      MES_ALERT_COMMAND  shell command run instead of the macOS notification
+                         (e.g. MES_ALERT_COMMAND='say "check the MES"')
+      MES_ALERT_SOUND    macOS system sound name (default: Glass)
+      MES_NO_ALERT=1     bell only -- never shell out
+    """
+    # Rich strips control codes from printed text, so the BEL must bypass the
+    # console and go straight to stdout to reach the terminal at all.
+    try:
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+    except Exception:  # alerts are best-effort; never break a tick
+        pass
+    if os.environ.get("MES_NO_ALERT"):
+        return
+    try:
+        command = os.environ.get("MES_ALERT_COMMAND")
+        if command:
+            subprocess.run(
+                command, shell=True, capture_output=True, timeout=5, check=False
+            )
+        elif sys.platform == "darwin" and sys.stdout.isatty():
+            text = message.replace("\\", "").replace('"', "")
+            sound = os.environ.get("MES_ALERT_SOUND") or "Glass"
+            subprocess.run(
+                [
+                    "osascript", "-e",
+                    f'display notification "{text}" with title "MES copilot" '
+                    f'sound name "{sound}"',
+                ],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+    except Exception:  # best-effort: a failed alert must never break a tick
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -721,7 +775,9 @@ def radar(
         None, "--within", help="Proximity band in points (default: min(4.0, 0.5×ATR))."
     ),
     alert: bool = typer.Option(
-        False, "--alert", help="Print a bell character when state is READY or AT_LEVEL."
+        False,
+        "--alert",
+        help="Bell + macOS notification when state is READY or AT_LEVEL (MES_ALERT_* envs customize).",
     ),
     auto_check: bool = typer.Option(
         False,
@@ -831,7 +887,7 @@ def radar(
             raise typer.Exit(code=1)
         console.print(Panel(_render_radar(report, stamp), title="MES Radar", border_style="blue"))
         if alert and report.state in _ALERT_STATES:
-            console.print("\a", end="")
+            _fire_alert(f"MES setup: {report.state.name.lower().replace('_', ' ')}")
         if auto_check and report.state == SetupState.READY:
             _fire_auto_check(snapshot, result, stamp)
         return
@@ -854,7 +910,7 @@ def radar(
                               title="MES Radar", border_style="blue")
                 live.update(panel)
                 if alert and report.state in _ALERT_STATES and report.state != prev_state:
-                    console.print("\a", end="")
+                    _fire_alert(f"MES setup: {report.state.name.lower().replace('_', ' ')}")
                 if should_auto_check(report.state, prev_state, last_fired, stamp, cooldown_seconds):
                     live.stop()
                     try:
@@ -912,7 +968,7 @@ def _copilot_tick(
                     last_price=snapshot.mes.close, distance=hit.distance, as_of=stamp,
                 )
             if alert:
-                console.print("\a", end="")
+                _fire_alert(f"Standing rule triggered: {describe_level(hit.rule_id)}")
             console.print(
                 f"[bold yellow]STANDING RULE triggered — {hit.level} retest "
                 f"({hit.distance:+.2f} pts):[/bold yellow] run [bold]`mes check`[/bold] "
@@ -976,9 +1032,9 @@ def _copilot_tick(
                 as_of=event.as_of.isoformat(timespec="minutes"),
             )
     if last_new_event is not None and mgmt.recommendation == "CLOSED":
-        # Terminal tick: bell + close hint once per tick, not once per ladder event.
+        # Terminal tick: alert + close hint once per tick, not once per ladder event.
         if alert:
-            console.print("\a", end="")
+            _fire_alert("Trade over — run `mes trade close`")
         console.print(
             f"[bold yellow]Trade over — run:[/bold yellow] mes trade close "
             f"--price {snapshot.mes.close:.2f} "
@@ -1024,7 +1080,9 @@ def copilot(
         None, "--within", help="Proximity band in points (default: min(4.0, 0.5 x ATR))."
     ),
     alert: bool = typer.Option(
-        False, "--alert", help="Bell on READY/AT_LEVEL entries and ladder terminal events."
+        False,
+        "--alert",
+        help="Bell + macOS notification on READY/AT_LEVEL entries and ladder terminal events.",
     ),
     auto_check: bool = typer.Option(
         False, "--auto-check",
@@ -1306,7 +1364,9 @@ def trade_status(
     no_watch: bool = typer.Option(False, "--no-watch"),
     no_llm: bool = typer.Option(False, "--no-llm"),
     as_json: bool = typer.Option(False, "--json"),
-    alert: bool = typer.Option(False, "--alert"),
+    alert: bool = typer.Option(
+        False, "--alert", help="Bell + macOS notification on stop/target/time-stop events."
+    ),
     date: str | None = typer.Option(None, "--date"),
     as_of: str | None = typer.Option(None, "--as-of"),
     journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
@@ -1376,7 +1436,7 @@ def trade_status(
                             as_of=event.as_of.isoformat(timespec="minutes"),
                         )
                         if alert and event.name in {"stopped_out", "target", "time_stop"}:
-                            console.print("\a")
+                            _fire_alert(f"Trade ladder: {event.name.replace('_', ' ')}")
                     if manager is not None:
                         try:
                             advisory = manager(
