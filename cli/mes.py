@@ -463,11 +463,15 @@ def review(
     no_memory: bool = typer.Option(False, "--no-memory", help="Skip appending the review to the memory log."),
     mes_csv: Path | None = typer.Option(None, "--mes-csv", help="Replay from a recorded /MES bar CSV."),
     spy_csv: Path | None = typer.Option(None, "--spy-csv", help="Replay from a recorded SPY bar CSV."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
 ):
     """Grade the morning hypothesis against how the session actually traded."""
     cfg = load_mes_config()
     config = DEFAULT_CONFIG.copy()
-    journal = MesJournal(config)
+    journal = (
+        MesJournal({"mes_journal_dir": str(journal_dir)})
+        if journal_dir is not None else MesJournal(config)
+    )
     session_date = date or _market_now(cfg).strftime("%Y-%m-%d")
 
     checks = journal.load_checks(session_date)
@@ -503,6 +507,12 @@ def review(
 
     hour, minute = divmod(int(cfg.exit_time.replace(":", "")), 100)
     close_stamp = datetime.strptime(session_date, "%Y-%m-%d").replace(hour=hour, minute=minute)
+    # Resolve fires as of the session close: anything still open counts as MISSED —
+    # the review grades the whole session.
+    rule_compliance = journal.summarize_rule_compliance(session_date, resolve_as_of=close_stamp)
+    if not rule_compliance.startswith("No standing-rule triggers"):
+        console.print(Panel(Markdown(rule_compliance),
+                            title="Rule Compliance", border_style="yellow"))
     outcome_summary = "Session bars unavailable."
     session_change = 0.0
     try:
@@ -518,6 +528,11 @@ def review(
         return
 
     hypothesis = (hypothesis_record or {}).get("hypothesis", "No hypothesis was recorded this morning.")
+    emitted_rules: list = []
+
+    def _capture_review(review) -> None:
+        emitted_rules.append(review)
+
     try:
         agent = create_mes_review_agent(_make_llm(config))
         review_markdown = agent(
@@ -525,12 +540,32 @@ def review(
             checks_summary=checks_summary,
             outcome_summary=outcome_summary,
             trades_summary=trades_summary,
+            standing_rules_summary=rule_compliance,
+            on_review=_capture_review,
         )
     except Exception as exc:
         console.print(f"[red]Review generation failed:[/red] {exc}")
         raise typer.Exit(code=1)
 
     console.print(Panel(Markdown(review_markdown), title="Session Review", border_style="green"))
+
+    if emitted_rules and emitted_rules[0].standing_rules:
+        next_session = (
+            datetime.strptime(session_date, "%Y-%m-%d").date() + timedelta(days=1)
+        )
+        while next_session.weekday() >= 5:  # Sat/Sun — holidays accepted (extra day of nagging is harmless)
+            next_session += timedelta(days=1)
+        saved_rules = []
+        for rule in emitted_rules[0].standing_rules:
+            rule_dict = rule.model_dump()
+            if not rule_dict.get("expires_on"):
+                rule_dict["expires_on"] = next_session.isoformat()
+            saved_rules.append(rule_dict)
+        journal.save_standing_rules(saved_rules, reviewed_on=session_date)
+        console.print(
+            f"[green]{len(saved_rules)} standing rule(s) saved for the next session "
+            f"(expire {next_session.isoformat()}).[/green]"
+        )
 
     if no_memory:
         return

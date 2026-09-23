@@ -8,6 +8,9 @@ import pytest
 from typer.testing import CliRunner
 
 from cli.mes import mes_app
+from tests.mes_factories import make_mes_series, make_snapshot
+from tradingagents.agents.schemas import SessionReview, StandingRule
+from tradingagents.mes.checklist import evaluate
 from tradingagents.mes.journal import MesJournal
 
 runner = CliRunner()
@@ -64,3 +67,43 @@ def test_skip_without_pending_trigger_fails(tmp_path):
     ])
     assert result.exit_code == 1
     assert "No pending" in result.output
+
+
+@pytest.mark.unit
+def test_review_saves_emitted_standing_rules(tmp_path, monkeypatch):
+    from cli import mes as mes_cli
+    from tests.mes_factories import make_snapshot
+
+    snap = make_snapshot(as_of=datetime(2026, 3, 30, 16, 0))
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    journal.append_check(snapshot=snap, result=evaluate(snap, "auto"))
+    captured = {}
+
+    class FakeReviewAgent:
+        def __call__(self, **kwargs):
+            captured.update(kwargs)
+            kwargs["on_review"](SessionReview(
+                hypothesis_grade="Correct", discipline_grade="B",
+                what_worked="w", what_failed="f",
+                one_improvement="Log a check at the ORB-top retest.",
+                narrative="n",
+                standing_rules=[StandingRule(
+                    trigger={"kind": "level_retest", "level": "orb_top"},
+                    note="Fade the first ORB-top retest.",
+                )],
+            ))
+            return "**Hypothesis Grade**: Correct\n\nReview text."
+
+    monkeypatch.setattr(mes_cli, "_make_llm", lambda cfg: object())
+    monkeypatch.setattr(mes_cli, "create_mes_review_agent", lambda llm: FakeReviewAgent())
+    monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+    monkeypatch.setattr(mes_cli, "_market_now", lambda cfg: datetime(2026, 3, 30, 17, 0))
+
+    result = runner.invoke(mes_app, [
+        "review", "--date", "2026-03-30", "--journal-dir", str(tmp_path), "--no-memory",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "standing rule(s) saved" in result.output
+    saved = MesJournal({"mes_journal_dir": str(tmp_path)}).active_standing_rules("2026-03-31")
+    assert [r["trigger"]["level"] for r in saved] == ["orb_top"]
+    assert "standing_rules_summary" in captured  # compliance tally reaches the prompt

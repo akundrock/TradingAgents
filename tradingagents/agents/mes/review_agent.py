@@ -73,6 +73,19 @@ whether each trigger was honored (a check logged), consciously skipped, or
 MISSED. Treat every MISSED trigger as a discipline failure: name it in
 what_failed and let it pull the discipline grade down."""
 
+        prompt += """
+
+---
+
+**Prescribing standing rules (machine-checked tomorrow):**
+If your discipline findings include a chart-watchable miss — hesitation at a
+level, an un-watched retest — prescribe it in `standing_rules` so the copilot
+will prompt a check at that level tomorrow. Rules must be retests of one of:
+vwap, orb_top, orb_bottom, pdh, pdl, prior_close, prior_vah, prior_val,
+prior_poc, onh, onl. Zero to three rules; only ones you still believe in.
+Omit `standing_rules` (leave it empty) when the improvement is not a
+chart watch — do not force it."""
+
         prompt += get_language_instruction()
 
         return invoke_structured_or_freetext(
