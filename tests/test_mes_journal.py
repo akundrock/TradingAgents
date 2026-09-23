@@ -223,3 +223,152 @@ def test_summarize_trades_lists_closed_results(journal):
 @pytest.mark.unit
 def test_summarize_trades_empty(journal):
     assert journal.summarize_trades("2020-01-01") == "No trades logged for 2020-01-01."
+
+
+# ---------------------------------------------------------------------------
+# Standing rules (review -> session loop)
+# ---------------------------------------------------------------------------
+
+
+def _rule_dict(level="orb_top", tolerance=2.0, expires_on=None, note=""):
+    return {
+        "trigger": {"kind": "level_retest", "level": level,
+                    "confirmation": "none", "tolerance_points": tolerance},
+        "requirement": "log_check_or_skip",
+        "note": note,
+        "expires_on": expires_on,
+    }
+
+
+@pytest.mark.unit
+def test_save_then_load_standing_rules_round_trip(journal):
+    journal.save_standing_rules([_rule_dict()], reviewed_on="2026-03-30")
+    active = journal.active_standing_rules("2026-03-31")
+    assert [r["trigger"]["level"] for r in active] == ["orb_top"]
+    assert active[0]["requirement"] == "log_check_or_skip"
+
+
+@pytest.mark.unit
+def test_expired_rules_are_filtered(journal):
+    journal.save_standing_rules([
+        _rule_dict(level="vwap", expires_on="2026-03-30"),   # expired by 03-31
+        _rule_dict(level="orb_top", expires_on="2026-03-31"),
+        _rule_dict(level="pdh", expires_on=None),
+    ])
+    active = journal.active_standing_rules("2026-03-31")
+    assert [r["trigger"]["level"] for r in active] == ["orb_top", "pdh"]
+
+
+@pytest.mark.unit
+def test_new_review_supersedes_previous_rules(journal):
+    journal.save_standing_rules([_rule_dict(level="vwap")], reviewed_on="2026-03-30")
+    journal.save_standing_rules([_rule_dict(level="orb_top")], reviewed_on="2026-03-31")
+    active = journal.active_standing_rules("2026-03-31")
+    assert [r["trigger"]["level"] for r in active] == ["orb_top"]
+
+
+@pytest.mark.unit
+def test_malformed_rules_file_reads_as_empty(journal):
+    journal.directory.mkdir(parents=True, exist_ok=True)
+    (journal.directory / "standing_rules.json").write_text("{not json", encoding="utf-8")
+    assert journal.active_standing_rules("2026-03-31") == []
+
+
+@pytest.mark.unit
+def test_no_rules_file_reads_as_empty(journal):
+    assert journal.active_standing_rules("2026-03-31") == []
+
+
+@pytest.mark.unit
+def test_rule_fired_round_trip(journal):
+    stamp = _dt(2026, 3, 30, 10, 35)
+    journal.append_rule_fired(
+        "2026-03-30", rule_id="orb_top", level="ORB high", confirmation="none",
+        tolerance=2.0, last_price=101.25, distance=0.25, as_of=stamp,
+    )
+    fires = journal.load_rule_fires("2026-03-30")
+    assert len(fires) == 1
+    assert fires[0]["kind"] == "rule_fired"
+    assert fires[0]["rule_id"] == "orb_top"
+    assert fires[0]["distance"] == 0.25
+
+
+@pytest.mark.unit
+def test_rule_skip_round_trip(journal):
+    journal.append_rule_skip(
+        "2026-03-30", rule_id="orb_top", level="ORB high",
+        reason="internals diverging", last_price=101.5,
+        as_of=_dt(2026, 3, 30, 10, 38),
+    )
+    skips = journal.load_rule_skips("2026-03-30")
+    assert len(skips) == 1
+    assert skips[0]["reason"] == "internals diverging"
+
+
+def _fire(journal, date, rule_id, hour, minute):
+    stamp = _dt(2026, 3, 30, hour, minute)
+    journal.append_rule_fired(
+        date, rule_id=rule_id, level=rule_id, confirmation="none",
+        tolerance=2.0, last_price=100.0, distance=0.0, as_of=stamp,
+    )
+    return stamp
+
+
+@pytest.mark.unit
+def test_compliance_counts_check_and_skip(journal):
+    _fire(journal, "2026-03-30", "orb_top", 10, 0)
+    journal.append_rule_skip(
+        "2026-03-30", rule_id="orb_top", level="ORB high", reason="chop",
+        as_of=_dt(2026, 3, 30, 10, 40),
+    )
+    _fire(journal, "2026-03-30", "vwap", 13, 0)
+    snapshot = make_snapshot(as_of=_dt(2026, 3, 30, 13, 5))
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "auto"))
+    tally = journal.rule_compliance("2026-03-30")
+    assert tally["triggered"] == 2
+    assert tally["skipped"] == 1
+    assert tally["checked"] == 1
+    assert tally["missed"] == 0
+
+
+@pytest.mark.unit
+def test_unresolved_fire_is_open_then_missed_after_grace(journal):
+    _fire(journal, "2026-03-30", "orb_top", 10, 35)
+    tally = journal.rule_compliance("2026-03-30")   # no resolve time yet
+    assert tally["triggered"] == 1 and tally["open"] and not tally["missed"]
+    late = journal.rule_compliance(
+        "2026-03-30", resolve_as_of=_dt(2026, 3, 30, 10, 46)  # > 10 min later
+    )
+    assert late["missed"] == 1 and late["open"] == []
+
+
+@pytest.mark.unit
+def test_check_before_fire_does_not_resolve_it(journal):
+    earlier = _dt(2026, 3, 30, 10, 30)
+    snapshot = make_snapshot(as_of=earlier)
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "auto"))
+    _fire(journal, "2026-03-30", "orb_top", 10, 35)
+    late = journal.rule_compliance("2026-03-30", resolve_as_of=_dt(2026, 3, 30, 11, 0))
+    # The 10:30 check predates the 10:35 fire; it cannot honor it.
+    assert late["triggered"] == 1 and late["missed"] == 1
+
+
+@pytest.mark.unit
+def test_skip_by_other_rule_does_not_resolve(journal):
+    _fire(journal, "2026-03-30", "orb_top", 10, 35)
+    journal.append_rule_skip(
+        "2026-03-30", rule_id="vwap", level="VWAP", reason="different level",
+        as_of=_dt(2026, 3, 30, 10, 40),
+    )
+    late = journal.rule_compliance("2026-03-30", resolve_as_of=_dt(2026, 3, 30, 11, 0))
+    assert late["missed"] == 1  # a skip for another rule does not cover this fire
+
+
+@pytest.mark.unit
+def test_summarize_rule_compliance_lines(journal):
+    _fire(journal, "2026-03-30", "orb_top", 10, 35)
+    journal.append_rule_skip("2026-03-30", rule_id="orb_top", level="ORB high",
+                             reason="chop", as_of=_dt(2026, 3, 30, 10, 38))
+    summary = journal.summarize_rule_compliance("2026-03-30")
+    assert "orb_top" in summary
+    assert "skipped" in summary

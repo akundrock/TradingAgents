@@ -20,6 +20,69 @@ from .snapshot import MesSnapshot
 logger = logging.getLogger(__name__)
 
 
+def _first_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+_MISSED_GRACE_SECONDS = 600.0
+"""A fire stays 'open' for its trigger bar (5m) plus one bar of grace."""
+
+
+def _iso(value: Any) -> datetime | None:
+    """Parse an ISO timestamp from a journal record; None when absent/mangled."""
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_fires(
+    fires: list[dict],
+    checks: list[dict],
+    skips: list[dict],
+    *,
+    resolve_as_of: datetime | None = None,
+) -> list[dict]:
+    """Return each fire annotated with an outcome: checked / skipped / missed / open.
+
+    A fire is resolved by the earliest record at or after its ``as_of``: any
+    ``check`` record, or a same-``rule_id`` ``rule_skip`` record. Fires still
+    unresolved past ``resolve_as_of`` by more than the grace window count as
+    ``missed``; without ``resolve_as_of`` everything unresolved stays ``open``.
+    """
+    check_times = [t for t in (_iso(record.get("as_of")) for record in checks) if t]
+    skips_by_rule: dict[str, list[datetime]] = {}
+    for skip in skips:
+        skip_time = _iso(skip.get("as_of"))
+        if skip_time is not None:
+            skips_by_rule.setdefault(str(skip.get("rule_id")), []).append(skip_time)
+
+    resolved: list[dict] = []
+    for fire in fires:
+        fired_at = _iso(fire.get("as_of"))
+        outcome = "open"
+        if fired_at is not None:
+            next_check = min((t for t in check_times if t >= fired_at), default=None)
+            next_skip = min(
+                (t for t in skips_by_rule.get(str(fire.get("rule_id")), []) if t >= fired_at),
+                default=None,
+            )
+            if next_check is not None and (next_skip is None or next_check <= next_skip):
+                outcome = "checked"
+            elif next_skip is not None:
+                outcome = "skipped"
+            elif resolve_as_of is not None and (
+                (resolve_as_of - fired_at).total_seconds() > _MISSED_GRACE_SECONDS
+            ):
+                outcome = "missed"
+        resolved.append({**fire, "outcome": outcome})
+    return resolved
+
+
 def _num(value: Any) -> float | None:
     """Coerce numpy/pandas scalars to plain floats; None stays None."""
     if value is None:
@@ -30,12 +93,7 @@ def _num(value: Any) -> float | None:
         return None
 
 
-def _first_line(text: str) -> str:
-    for line in (text or "").splitlines():
-        stripped = line.strip().lstrip("#").strip()
-        if stripped:
-            return stripped
-    return ""
+        return None
 
 
 class MesJournal:
@@ -134,6 +192,78 @@ class MesJournal:
             },
         )
 
+    # --- Standing rules (review -> session loop) ---
+
+    _RULES_FILE = "standing_rules.json"
+
+    def save_standing_rules(self, rules: list[dict], *, reviewed_on: str = "") -> None:
+        """Persist the latest review's standing rules, superseding earlier sets.
+
+        Atomic write (tmp file + rename) so a mid-write crash cannot leave a
+        truncated rule set behind.
+        """
+        payload = {"version": 1, "reviewed_on": reviewed_on, "rules": list(rules)}
+        path = self._dir / self._RULES_FILE
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            logger.warning("MES standing rules write failed for %s: %s", path, exc)
+
+    def active_standing_rules(self, session_date: str) -> list[dict]:
+        """Rules still live for ``session_date`` (expired ones are filtered out)."""
+        path = self._dir / self._RULES_FILE
+        if not path.exists():
+            return []
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("MES standing rules read failed for %s: %s", path, exc)
+            return []
+        if not isinstance(payload, dict):
+            return []
+        return [
+            rule
+            for rule in (payload.get("rules") or [])
+            if isinstance(rule, dict)
+            and (rule.get("expires_on") is None or str(rule.get("expires_on")) >= session_date)
+        ]
+
+    def append_rule_fired(
+        self, date: str, *, rule_id: str, level: str, confirmation: str,
+        tolerance: float, last_price: float, distance: float, as_of: datetime,
+    ) -> None:
+        self._append(date, {
+            "kind": "rule_fired",
+            "logged_at": datetime.now().isoformat(),
+            "as_of": as_of.isoformat(timespec="minutes"),
+            "session_date": date,
+            "rule_id": rule_id,
+            "level": level,
+            "confirmation": confirmation,
+            "tolerance": _num(tolerance),
+            "last_price": _num(last_price),
+            "distance": _num(distance),
+        })
+
+    def append_rule_skip(
+        self, date: str, *, rule_id: str, level: str, reason: str,
+        last_price: float | None = None, as_of: datetime | None = None,
+    ) -> None:
+        stamp = as_of or datetime.now()
+        self._append(date, {
+            "kind": "rule_skip",
+            "logged_at": datetime.now().isoformat(),
+            "as_of": stamp.isoformat(timespec="minutes"),
+            "session_date": date,
+            "rule_id": rule_id,
+            "level": level,
+            "reason": reason,
+            "last_price": _num(last_price),
+        })
+
     # --- Read path ---
 
     def load_day(self, date: str) -> list[dict]:
@@ -165,6 +295,58 @@ class MesJournal:
     def load_hypothesis(self, date: str) -> dict | None:
         found = [e for e in self.load_day(date) if e.get("kind") == "hypothesis"]
         return found[-1] if found else None
+
+    def load_rule_fires(self, date: str) -> list[dict]:
+        return [e for e in self.load_day(date) if e.get("kind") == "rule_fired"]
+
+    def load_rule_skips(self, date: str) -> list[dict]:
+        return [e for e in self.load_day(date) if e.get("kind") == "rule_skip"]
+
+    def rule_compliance(self, date: str, *, resolve_as_of: datetime | None = None) -> dict:
+        """Fire accounting for one session.
+
+        Returns ``{"triggered": int, "checked": int, "skipped": int,
+        "missed": int, "open": list[dict], "detail": list[dict]}`` — every
+        unresolved fire sits in ``open`` until ``resolve_as_of`` pushes it past
+        the missed grace (trigger bar + one bar).
+        """
+        fires = self.load_rule_fires(date)
+        checks = self.load_checks(date)
+        skips = self.load_rule_skips(date)
+        resolved = _resolve_fires(fires, checks, skips, resolve_as_of=resolve_as_of)
+        by_outcome: dict[str, int] = {"checked": 0, "skipped": 0, "missed": 0, "open": 0}
+        for fire in resolved:
+            by_outcome[fire["outcome"]] = by_outcome.get(fire["outcome"], 0) + 1
+        return {
+            "triggered": len(fires),
+            "checked": by_outcome.get("checked", 0),
+            "skipped": by_outcome.get("skipped", 0),
+            "missed": by_outcome.get("missed", 0),
+            "open": [f for f in resolved if f["outcome"] == "open"],
+            "detail": resolved,
+        }
+
+    def summarize_rule_compliance(self, date: str, *, resolve_as_of: datetime | None = None) -> str:
+        """Markdown fire tally: the compliance scoreboard for `mes review`."""
+        tally = self.rule_compliance(date, resolve_as_of=resolve_as_of)
+        if not tally["detail"]:
+            return f"No standing-rule triggers recorded for {date}."
+        lines = [
+            f"{tally['triggered']} triggered / {tally['checked']} checked / "
+            f"{tally['skipped']} skipped / {tally['missed']} MISSED",
+            "",
+            "| Rule | Fired | Outcome |",
+            "| --- | --- | --- |",
+        ]
+        for fire in tally["detail"]:
+            as_of = str(fire.get("as_of", ""))
+            fired = as_of[11:16] if len(as_of) >= 16 else as_of
+            lines.append(
+                "| {rule} | {fired} | {outcome} |".format(
+                    rule=fire.get("rule_id", "?"), fired=fired, outcome=fire["outcome"],
+                )
+            )
+        return "\n".join(lines)
 
     def available_dates(self) -> list[str]:
         if not self._dir.exists():
