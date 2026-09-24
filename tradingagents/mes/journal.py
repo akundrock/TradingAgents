@@ -96,6 +96,54 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def _location_label(check: dict) -> str:
+    """One compact cell: signed distance to VWAP, then position vs the opening range.
+
+    Records written before OR capture carry no ``orb_high``/``orb_low`` keys and
+    render without the OR clause; records with no usable numbers render ``-``.
+    """
+    price = check.get("last_price")
+    vwap = check.get("vwap")
+    parts: list[str] = []
+    if price is not None and vwap is not None:
+        delta = round(float(price) - float(vwap), 2)
+        parts.append(f"{delta:+.2f} vs VWAP")
+    orb_high = check.get("orb_high")
+    orb_low = check.get("orb_low")
+    if price is not None and orb_high is not None and orb_low is not None:
+        if float(price) > float(orb_high):
+            parts.append("above OR-H")
+        elif float(price) < float(orb_low):
+            parts.append("below OR-L")
+        else:
+            parts.append("in OR")
+    return " · ".join(parts) if parts else "-"
+
+
+def _frame_timeline(day: list[dict]) -> list[str]:
+    """Frame label in force at each check, aligned with the day's check order.
+
+    Mirrors :meth:`active_frame`: ``hypothesis`` and ``flip`` records define
+    frames in append order (chronological), a later hypothesis re-commit
+    supersedes a flip, and all other record kinds are transparent. Flips get
+    numbered labels so repeated flips stay distinguishable. Checks logged
+    before any frame record get ``-``.
+    """
+    labels: list[str] = []
+    current = "-"
+    flips_seen = 0
+    for record in day:
+        kind = record.get("kind")
+        if kind == "hypothesis":
+            current = "morning"
+        elif kind == "flip":
+            flips_seen += 1
+            current = f"flip {flips_seen}"
+        elif kind == "check":
+            labels.append(current)
+    return labels
+
+
 class MesJournal:
     """Append-only JSONL log of MES checklist runs and daily hypotheses."""
 
@@ -408,26 +456,29 @@ class MesJournal:
     # --- Review helpers ---
 
     def summarize_checks(self, date: str) -> str:
-        checks = self.load_checks(date)
-        if not checks:
+        day = self.load_day(date)
+        if not any(r.get("kind") == "check" for r in day):
             return f"No checks logged for {date}."
+        frames = iter(_frame_timeline(day))
         rows = [
-            "| Time | Side | Score | Tier | Gates | Tradeable | Verdict |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | Verdict |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
-        for check in checks:
+        for check in (r for r in day if r.get("kind") == "check"):
             as_of = str(check.get("as_of", ""))
             time_label = as_of[11:16] if len(as_of) >= 16 else as_of
             rows.append(
-                "| {time} | {side} | {score}/{max_score} | {tier} | {gates} | {tradeable} | {verdict} |".format(
+                "| {time} | {side} | {frame} | {score}/{max_score} | {tier} | {gates} | {tradeable} | {location} | {verdict} |".format(
                     time=time_label,
                     side=check.get("side", "?"),
+                    frame=next(frames),
                     score=check.get("score", 0),
                     max_score=check.get("max_score", 0),
                     tier=check.get("tier", "?"),
                     gates="pass" if check.get("gates_ok") else "fail",
                     tradeable="yes" if check.get("tradeable") else "no",
-                        verdict=_first_line(check.get("verdict", "")) or "-",
+                    location=_location_label(check),
+                    verdict=_first_line(check.get("verdict", "")) or "-",
                 )
             )
         return "\n".join(rows)

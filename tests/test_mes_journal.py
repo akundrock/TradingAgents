@@ -161,7 +161,7 @@ def test_summarize_checks_contains_score_and_tier(journal):
     )
 
     summary = journal.summarize_checks("2026-03-30")
-    assert "| Time | Side | Score | Tier |" in summary
+    assert "| Time | Side | Frame | Score | Tier |" in summary
     assert f"{result.score}/{result.max_score}" in summary
     assert result.tier in summary
     assert "11:00" in summary
@@ -171,6 +171,55 @@ def test_summarize_checks_contains_score_and_tier(journal):
 @pytest.mark.unit
 def test_summarize_checks_with_no_checks(journal):
     assert journal.summarize_checks("2020-01-01") == "No checks logged for 2020-01-01."
+
+
+@pytest.mark.unit
+def test_summarize_checks_shows_location_and_frame(journal):
+    journal.save_hypothesis(date="2026-03-30", hypothesis_markdown="Trend up")
+    pre = make_snapshot(mes=make_mes_series(close=101.5))
+    journal.append_check(snapshot=pre, result=evaluate(pre, "long"), verdict_markdown="**Verdict**: Wait")
+    journal.append_flip(
+        "2026-03-30",
+        reason="VWAP lost on rolling internals",
+        new_frame="",
+        price=101.5,
+        vwap=99.0,
+    )
+    post = make_snapshot(as_of=DEFAULT_AS_OF.replace(hour=13, minute=30), mes=make_mes_series(close=97.5))
+    journal.append_check(snapshot=post, result=evaluate(post, "long"), verdict_markdown="**Verdict**: Wait")
+
+    summary = journal.summarize_checks("2026-03-30")
+    assert "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | Verdict |" in summary
+    assert "+2.50 vs VWAP · above OR-H" in summary
+    assert "-1.50 vs VWAP · below OR-L" in summary
+    assert "morning" in summary
+    assert "flip 1" in summary
+
+
+@pytest.mark.unit
+def test_summarize_checks_location_handles_legacy_records(journal):
+    # A record from before OR capture: no orb_high/orb_low keys at all.
+    journal.directory.mkdir(parents=True, exist_ok=True)
+    legacy = (
+        '{"kind": "check", "logged_at": "2026-03-30T11:00:00", "as_of": "2026-03-30T11:00:00",'
+        ' "session_date": "2026-03-30", "side": "long", "score": 6, "max_score": 10,'
+        ' "tier": "standard", "gates_ok": true, "tradeable": true,'
+        ' "last_price": 100.0, "vwap": 99.0, "verdict": "**Verdict**: Wait"}\n'
+    )
+    (journal.directory / "2026-03-30.jsonl").open("a", encoding="utf-8").write(legacy)
+
+    summary = journal.summarize_checks("2026-03-30")
+    assert "+1.00 vs VWAP" in summary  # VWAP context still renders
+    assert "OR" not in summary  # OR context absent, not guessed
+
+
+@pytest.mark.unit
+def test_summarize_checks_frame_is_dash_before_any_frame_record(journal):
+    snapshot = make_snapshot()
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "long"))
+
+    summary = journal.summarize_checks("2026-03-30")
+    assert "| - |" in summary  # no hypothesis/flip journaled yet
 
 
 def _trade(**overrides) -> OpenTrade:
