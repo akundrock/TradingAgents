@@ -43,6 +43,13 @@ Be direct. Vague encouragement is worthless here; name the specific decisions an
 ---
 
 **Logged Checks Across The Session:**
+
+Each row shows the thesis Frame in force at that moment (``morning`` or ``flip N``,
+where ``flip N`` is the Nth journaled re-read) and the check's Location — the
+signed distance from last price to VWAP plus the position versus the opening
+range (above OR-H, below OR-L, or in OR). Use these columns to date when the
+invalidation first became visible in the checks, and to catch checks that kept
+arguing the morning frame after it had already flipped.
 {checks_summary}"""
 
         if flips_summary.strip():

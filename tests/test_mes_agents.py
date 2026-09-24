@@ -392,6 +392,20 @@ def test_review_agent_falls_back_to_free_text():
     assert output == "plain review"
 
 
+@pytest.mark.unit
+def test_review_prompt_explains_check_location_columns():
+    llm = FakeLLM({SessionReview: _review()})
+    create_mes_review_agent(llm)(
+        hypothesis="Trend up",
+        checks_summary="| Time | Side | Frame |",
+        outcome_summary="-1 handle",
+    )
+    prompt = llm.prompts[0]
+    assert "Location" in prompt
+    assert "Frame" in prompt
+    assert "invalidation first became visible" in prompt
+
+
 # ---------------------------------------------------------------------------
 # Standing rules (review -> session loop)
 # ---------------------------------------------------------------------------
