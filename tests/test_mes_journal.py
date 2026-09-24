@@ -7,7 +7,7 @@ from tradingagents.mes.checklist import evaluate
 from tradingagents.mes.journal import MesJournal
 from tradingagents.mes.management import OpenTrade
 
-from tests.mes_factories import DEFAULT_AS_OF, make_snapshot
+from tests.mes_factories import DEFAULT_AS_OF, make_mes_series, make_snapshot
 
 # The brief's test bodies call ``_dt(...)``; alias it to the datetime import.
 _dt = dt
@@ -99,6 +99,26 @@ def test_check_record_captures_the_result_and_internals(journal):
     }
     assert record["sizing"] == {"contracts": 2}
     assert len(record["items"]) == len(result.all_items)
+
+
+@pytest.mark.unit
+def test_check_record_captures_opening_range_bounds(journal):
+    snapshot = make_snapshot()
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "long"))
+
+    record = journal.load_checks("2026-03-30")[0]
+    assert record["orb_high"] == 101.0
+    assert record["orb_low"] == 98.0
+
+
+@pytest.mark.unit
+def test_check_record_tolerates_missing_opening_range(journal):
+    snapshot = make_snapshot(mes=make_mes_series(opening_range_high=None, opening_range_low=None))
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "long"))
+
+    record = journal.load_checks("2026-03-30")[0]
+    assert record["orb_high"] is None
+    assert record["orb_low"] is None
 
 
 @pytest.mark.unit

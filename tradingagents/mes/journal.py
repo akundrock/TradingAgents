@@ -150,6 +150,8 @@ class MesJournal:
             "divergence": result.divergence,
             "last_price": _num(result.last_price),
             "vwap": _num(result.vwap),
+            "orb_high": _num(snapshot.mes.opening_range_high),
+            "orb_low": _num(snapshot.mes.opening_range_low),
             "atr": _num(result.atr),
             "internals": {
                 "add": _num(snapshot.add),
