@@ -468,8 +468,10 @@ def check(
     journal = MesJournal(config)
     risk_dollars = risk if risk is not None else cfg.default_risk_dollars
 
-    hypothesis_record = journal.load_hypothesis(_parse_as_of(as_of, cfg, date=date).strftime("%Y-%m-%d"))
-    hypothesis = (hypothesis_record or {}).get("hypothesis", "")
+    frame_record = journal.active_frame(
+        _parse_as_of(as_of, cfg, date=date).strftime("%Y-%m-%d")
+    ) or {}
+    hypothesis = str(frame_record.get("new_frame") or frame_record.get("hypothesis", ""))
     past_context = "" if no_llm else _past_context(config)
 
     gatekeeper = None
@@ -538,6 +540,7 @@ def review(
         raise typer.Exit(code=1)
 
     checks_summary = journal.summarize_checks(session_date)
+    flips_summary = journal.summarize_flips(session_date)
     trades_summary = journal.summarize_trades(session_date)
     open_trade = journal.find_open_trade(session_date)
     if open_trade is not None:
@@ -547,6 +550,8 @@ def review(
             "grading assumes an EOD flatten.[/yellow]"
         )
     console.print(Panel(Markdown(checks_summary), title=f"Checks — {session_date}", border_style="cyan"))
+    if flips_summary:
+        console.print(Panel(Markdown(flips_summary), title="Thesis Flips", border_style="yellow"))
     if trades_summary and not trades_summary.startswith("No trades"):
         console.print(Panel(Markdown(trades_summary), title="Trades", border_style="green"))
 
@@ -595,6 +600,7 @@ def review(
             outcome_summary=outcome_summary,
             trades_summary=trades_summary,
             standing_rules_summary=rule_compliance,
+            flips_summary=flips_summary,
             on_review=_capture_review,
         )
     except Exception as exc:
@@ -852,8 +858,8 @@ def radar(
         """Full check path on the radar's in-hand snapshot (same bar, zero skew)."""
         if journal is None:
             return
-        hypothesis_record = journal.load_hypothesis(stamp.strftime("%Y-%m-%d"))
-        hypothesis = (hypothesis_record or {}).get("hypothesis", "")
+        frame = journal.active_frame(stamp.strftime("%Y-%m-%d")) or {}
+        hypothesis = str(frame.get("new_frame") or frame.get("hypothesis", ""))
         _run_check_once(
             snapshot=snapshot,
             result=result,
@@ -1002,7 +1008,8 @@ def _copilot_tick(
                 (stamp - last_fired).total_seconds() >= auto_check_cooldown * 60
             )
             if entered or cooled:
-                hypothesis = (journal.load_hypothesis(stamp_date) or {}).get("hypothesis", "")
+                frame = journal.active_frame(stamp_date) or {}
+                hypothesis = str(frame.get("new_frame") or frame.get("hypothesis", ""))
                 if live is not None:
                     live.stop()
                 try:
@@ -1228,6 +1235,42 @@ def skip(
     console.print(
         f"[green]Skipped {fire.get('rule_id')} ({fire.get('level')}) — "
         f"reason recorded for the next review.[/green]"
+    )
+
+
+@mes_app.command("flip")
+def flip(
+    reason: str = typer.Option(..., "--reason", help="What invalidated the morning frame — the evidence, not the conclusion."),
+    frame: str = typer.Option("", "--frame", help="The re-read: the new day-type/bias thesis. Empty when flipping to no-frame (stand down)."),
+    price: float | None = typer.Option(None, "--price", help="/MES price at the flip."),
+    vwap: float | None = typer.Option(None, "--vwap", help="Session VWAP at the flip."),
+    as_of: str | None = typer.Option(None, "--as-of", help="Simulated timestamp, e.g. 14:09."),
+    date: str | None = typer.Option(None, "--date", help="Trade date (defaults to today)."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+):
+    """Journal a thesis flip: the morning frame died, commit the re-read.
+
+    The morning hypothesis is a one-shot record; without a `flip` entry the
+    session keeps running — and `mes review` grades the afternoon — against a
+    dead frame. The latest flip supersedes the morning hypothesis for every
+    later check, and the review grades both the flip's timeliness and any
+    checks that kept arguing the old frame.
+    """
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    session_date = date or _market_now(cfg).strftime("%Y-%m-%d")
+    journal.append_flip(
+        session_date,
+        reason=reason,
+        new_frame=frame,
+        price=price,
+        vwap=vwap,
+        as_of=_parse_as_of(as_of, cfg, date=session_date) if as_of else _market_now(cfg),
+    )
+    frame_label = frame.strip().splitlines()[0] if frame.strip() else "no frame — stand down"
+    console.print(
+        f"[green]Thesis flip journaled ({frame_label}).[/green] "
+        "[dim]Subsequent checks run against the new frame; the review grades the flip.[/dim]"
     )
 
 

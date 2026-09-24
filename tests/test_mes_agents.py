@@ -717,3 +717,37 @@ def test_review_agent_accepts_trades_summary():
     agent(hypothesis="h", checks_summary="c", outcome_summary="o",
           trades_summary="| long | 6500.00 | 6503.50 | manual | +1.75 |")
     assert "Trades Taken" in llm.prompts[0]
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_includes_journaled_flips():
+    """A journaled flip must reach the coach: the morning frame was superseded."""
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(
+        hypothesis="h", checks_summary="c", outcome_summary="o",
+        flips_summary="| 14:09 | Range | VWAP lost and held |",
+    )
+    prompt = llm.prompts[0]
+    assert "Intraday Thesis Flips" in prompt
+    assert "14:09" in prompt
+    assert "supersedes" in prompt.lower()
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_grades_an_unjournaled_flip_as_discipline_failure():
+    """An invalidation visible in the checks but never journaled is a discipline
+    failure the coach must name — the afternoon of 2/9–4/9 checked against a
+    dead Trend Down frame because the flip was never journaled."""
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(hypothesis="h", checks_summary="c", outcome_summary="o")
+    prompt = llm.prompts[0]
+    assert "flip" in prompt.lower()
+    assert "discipline failure" in prompt.lower()
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_omits_flip_section_without_flips():
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(hypothesis="h", checks_summary="c", outcome_summary="o")
+    prompt = llm.prompts[0]
+    assert "Intraday Thesis Flips" not in prompt

@@ -192,6 +192,36 @@ class MesJournal:
             },
         )
 
+    def append_flip(
+        self,
+        date: str,
+        *,
+        reason: str,
+        new_frame: str = "",
+        price: float | None = None,
+        vwap: float | None = None,
+        as_of: datetime | None = None,
+    ) -> None:
+        """Journal a thesis flip: the morning frame died; record the re-read.
+
+        ``reason`` is the invalidation evidence (what killed the old frame);
+        ``new_frame`` is the replacement day-type/bias thesis (markdown, may be
+        empty when flipping to "no frame — stand down"). Subsequent checks read
+        this frame via :meth:`active_frame`, and ``mes review`` grades both the
+        flip's timeliness and any checks that kept arguing the dead frame.
+        """
+        stamp = as_of or datetime.now()
+        self._append(date, {
+            "kind": "flip",
+            "logged_at": datetime.now().isoformat(),
+            "as_of": stamp.isoformat(timespec="minutes"),
+            "session_date": date,
+            "reason": reason,
+            "new_frame": new_frame,
+            "price": _num(price),
+            "vwap": _num(vwap),
+        })
+
     # --- Standing rules (review -> session loop) ---
 
     _RULES_FILE = "standing_rules.json"
@@ -296,6 +326,22 @@ class MesJournal:
         found = [e for e in self.load_day(date) if e.get("kind") == "hypothesis"]
         return found[-1] if found else None
 
+    def load_flips(self, date: str) -> list[dict]:
+        return [e for e in self.load_day(date) if e.get("kind") == "flip"]
+
+    def active_frame(self, date: str) -> dict | None:
+        """The thesis currently in force for a session.
+
+        The last frame-defining record wins: a journaled ``flip`` supersedes the
+        morning ``hypothesis``, and a hypothesis re-saved later (a mid-session
+        re-commit) supersedes the flip. Records are read in append order, which
+        is chronological, so the last frame on the day wins.
+        """
+        frames = [
+            e for e in self.load_day(date) if e.get("kind") in ("hypothesis", "flip")
+        ]
+        return frames[-1] if frames else None
+
     def load_rule_fires(self, date: str) -> list[dict]:
         return [e for e in self.load_day(date) if e.get("kind") == "rule_fired"]
 
@@ -383,6 +429,31 @@ class MesJournal:
                 )
             )
         return "\n".join(rows)
+
+    def summarize_flips(self, date: str) -> str:
+        """Markdown flip timeline: what superseded the morning frame, and why.
+
+        Empty string on a flip-free day so callers can omit the section
+        instead of printing a placeholder table.
+        """
+        flips = self.load_flips(date)
+        if not flips:
+            return ""
+        lines = [
+            "| Time | New Frame | What Killed The Old Frame |",
+            "| --- | --- | --- |",
+        ]
+        for flip in flips:
+            as_of = str(flip.get("as_of", ""))
+            time_label = as_of[11:16] if len(as_of) >= 16 else as_of
+            lines.append(
+                "| {time} | {frame} | {reason} |".format(
+                    time=time_label,
+                    frame=_first_line(str(flip.get("new_frame", ""))) or "-",
+                    reason=flip.get("reason", "") or "-",
+                )
+            )
+        return "\n".join(lines)
 
     # --- Trade lifecycle ---
 

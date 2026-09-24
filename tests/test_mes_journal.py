@@ -372,3 +372,90 @@ def test_summarize_rule_compliance_lines(journal):
     summary = journal.summarize_rule_compliance("2026-03-30")
     assert "orb_top" in summary
     assert "skipped" in summary
+
+
+# ---------------------------------------------------------------------------
+# Thesis flips (intraday re-reads)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_flip_round_trip_records_evidence_and_new_frame(journal):
+    journal.append_flip(
+        "2026-03-30",
+        reason="15m under VWAP with $ADD rolling negative — trend frame is dead.",
+        new_frame="**Day Type**: Range. Bias: neutral; fade extremes.",
+        as_of=_dt(2026, 3, 30, 14, 9),
+        price=6487.25,
+        vwap=6491.5,
+    )
+
+    flips = journal.load_flips("2026-03-30")
+    assert len(flips) == 1
+    record = flips[0]
+    assert record["kind"] == "flip"
+    assert record["session_date"] == "2026-03-30"
+    assert record["as_of"][11:16] == "14:09"
+    assert "trend frame is dead" in record["reason"]
+    assert record["new_frame"] == "**Day Type**: Range. Bias: neutral; fade extremes."
+    assert record["price"] == pytest.approx(6487.25)
+    assert record["vwap"] == pytest.approx(6491.5)
+
+
+@pytest.mark.unit
+def test_flip_defaults_work_without_optional_evidence(journal):
+    journal.append_flip("2026-03-30", reason="SPY broke the opening range low.")
+    record = journal.load_flips("2026-03-30")[0]
+    assert record["new_frame"] == ""
+    assert record["price"] is None
+    assert record["vwap"] is None
+    assert record["as_of"]  # stamps now when as_of omitted
+
+
+@pytest.mark.unit
+def test_active_frame_prefers_the_latest_flip(journal):
+    journal.save_hypothesis(date="2026-03-30", hypothesis_markdown="**Day Type**: Trend Up")
+    journal.append_flip(
+        "2026-03-30", reason="VWAP lost and held.", new_frame="Range day; fade extremes.",
+        as_of=_dt(2026, 3, 30, 14, 9),
+    )
+    frame = journal.active_frame("2026-03-30")
+    assert frame["kind"] == "flip"
+    assert frame["new_frame"].startswith("Range day")
+
+
+@pytest.mark.unit
+def test_active_frame_without_flips_is_the_morning_hypothesis(journal):
+    journal.save_hypothesis(date="2026-03-30", hypothesis_markdown="**Day Type**: Trend Up")
+    assert journal.active_frame("2026-03-30")["kind"] == "hypothesis"
+
+
+@pytest.mark.unit
+def test_active_frame_on_an_empty_day_is_none(journal):
+    assert journal.active_frame("2020-01-01") is None
+
+
+@pytest.mark.unit
+def test_load_flips_on_an_empty_day_is_empty(journal):
+    assert journal.load_flips("2020-01-01") == []
+
+
+@pytest.mark.unit
+def test_summarize_flips_lists_the_timeline(journal):
+    journal.save_hypothesis(date="2026-03-30", hypothesis_markdown="**Day Type**: Trend Up")
+    journal.append_flip(
+        "2026-03-30",
+        reason="15m under VWAP; $ADD rolled negative.",
+        new_frame="## Range\nFade extremes.",
+        as_of=_dt(2026, 3, 30, 14, 9),
+    )
+    summary = journal.summarize_flips("2026-03-30")
+    assert "| Time | New Frame | What Killed The Old Frame |" in summary
+    assert "14:09" in summary
+    assert "VWAP lost" in summary or "under VWAP" in summary
+    assert "Range" in summary
+
+
+@pytest.mark.unit
+def test_summarize_flips_is_empty_without_flips(journal):
+    assert journal.summarize_flips("2020-01-01") == ""

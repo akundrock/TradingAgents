@@ -20,6 +20,7 @@ def create_mes_review_agent(llm):
         outcome_summary: str,
         trades_summary: str = "",
         standing_rules_summary: str = "",
+        flips_summary: str = "",
         on_review=None,
     ) -> str:
         prompt = f"""You are an end-of-day trading coach debriefing a /MES (Micro E-mini S&P 500) discretionary trader. The session is closed and nothing can be changed — your only value is making tomorrow better.
@@ -29,6 +30,8 @@ Grade two things, and keep them strictly separate:
 1. **The hypothesis.** Did this morning's read of the day type and bias describe the session that actually happened? Grade it against the realised market, not against the P&L. A correct read that made no money is still a correct read.
 
 2. **The discipline.** Did the trader respect the gates, stay within sizing, and take entries that matched the plan? Grade the process independently of the outcome. A rule-break that made money is a failing grade, because it will not make money next time.
+
+3. **The thesis flip.** The morning hypothesis states what would invalidate it. If the logged checks show that invalidation arriving — price sustained through the frame's anchor, internals rolling over, SPY breaking the level the read depends on — and no flip was journaled, the trader spent the rest of the session grading against a dead frame: name that missed flip as a discipline failure in what_failed and let it pull the discipline grade down. When a flip IS journaled, grade the flip itself: was it declared promptly once the invalidation was visible, and did the later checks follow the flipped frame?
 
 Be direct. Vague encouragement is worthless here; name the specific decisions and cite the checks that show them.
 
@@ -40,7 +43,21 @@ Be direct. Vague encouragement is worthless here; name the specific decisions an
 ---
 
 **Logged Checks Across The Session:**
-{checks_summary}
+{checks_summary}"""
+
+        if flips_summary.strip():
+            prompt += f"""
+
+---
+
+**Intraday Thesis Flips (journaled re-reads):**
+{flips_summary}
+
+The latest flip supersedes the morning hypothesis for the rest of the session:
+grade checks logged after the flip against the flipped frame, and grade
+whether the flip was declared promptly once the invalidation was visible."""
+
+        prompt += f"""
 
 ---
 
