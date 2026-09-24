@@ -66,21 +66,35 @@ def invoke_structured_or_freetext(
     so callers can capture typed output while still receiving markdown.
     """
     if structured_llm is not None:
-        try:
-            result = structured_llm.invoke(prompt)
-            if result is None:
-                # A thinking model can answer in plain text instead of calling
-                # the tool, leaving the parser with nothing to return. Treat it
-                # as a structured miss and fall back, with a clear reason.
-                raise ValueError("structured output returned no parsed result")
-            if on_model is not None:
-                on_model(result)
-            return render(result)
-        except Exception as exc:
-            logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
-                agent_name, exc,
-            )
+        for attempt in (1, 2):
+            try:
+                result = structured_llm.invoke(prompt)
+                if result is None:
+                    # A thinking model can answer in plain text instead of calling
+                    # the tool, leaving the parser with nothing to return. Treat it
+                    # as a structured miss and fall back, with a clear reason.
+                    raise ValueError("structured output returned no parsed result")
+                if on_model is not None:
+                    on_model(result)
+                return render(result)
+            except Exception as exc:
+                if attempt == 1:
+                    # Weak providers that bind the schema without grammar
+                    # enforcement sometimes answer in prose (parser returns
+                    # None) or emit one malformed payload — a plain retry
+                    # usually parses, and a fallback loses typed output
+                    # (e.g. standing rules captured via ``on_model``).
+                    logger.warning(
+                        "%s: structured-output invocation failed (%s); "
+                        "retrying the structured call once",
+                        agent_name, exc,
+                    )
+                else:
+                    logger.warning(
+                        "%s: structured-output invocation failed (%s); "
+                        "retrying once as free text",
+                        agent_name, exc,
+                    )
 
     response = plain_llm.invoke(prompt)
     return response.content

@@ -19,9 +19,9 @@ so that:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # LLMs sometimes write a placeholder string ("None", "N/A", ...) into an optional
 # numeric field instead of omitting it. Coerce those to None so the structured
@@ -703,6 +703,11 @@ class LevelRetestTrigger(BaseModel):
     )
 
 
+# Leaf fields of LevelRetestTrigger, used to lift a flattened trigger back
+# into a nested object when a weak provider emits them at the rule level.
+_TRIGGER_FIELDS = ("kind", "level", "confirmation", "tolerance_points")
+
+
 class StandingRule(BaseModel):
     """A machine-checkable discipline prescription for the next session.
 
@@ -717,6 +722,36 @@ class StandingRule(BaseModel):
         default=None,
         description="ISO date the rule lapses; None keeps it active until superseded.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_flattened_trigger(cls, data: Any) -> Any:
+        """Recover rules whose trigger fields arrived flattened at the rule level.
+
+        Providers that bind the schema as a tool without grammar enforcement
+        (``tool_choice`` suppressed — e.g. DeepSeek and OpenAI-compatible local
+        servers) let the model emit free-form argument JSON, so the nested
+        ``trigger`` object sometimes collapses to its leaf fields on the rule
+        itself. Lift them into a ``trigger`` object instead of failing the
+        whole review; a lost review means zero standing rules for the next
+        session.
+        """
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)  # never mutate the caller's dict
+        trigger = data.get("trigger")
+        if isinstance(trigger, str):
+            # Model named the level directly: {"trigger": "vwap"}.
+            data["trigger"] = {"kind": "level_retest", "level": trigger}
+            trigger = data["trigger"]
+        lifted = {key: data.pop(key) for key in _TRIGGER_FIELDS if key in data}
+        if lifted:
+            if isinstance(trigger, dict):
+                # Nested values win so a real trigger is never clobbered.
+                data["trigger"] = {**lifted, **trigger}
+            elif trigger is None or "trigger" not in data:
+                data["trigger"] = lifted
+        return data
 
 
 _LEVEL_LABELS: dict[RuleLevel, str] = {

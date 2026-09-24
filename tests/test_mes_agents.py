@@ -163,9 +163,9 @@ def test_morning_agent_falls_back_to_free_text_when_structured_call_fails():
     output = create_mes_morning_agent(llm)(market_context="ctx")
 
     assert output == "plain morning plan"
-    # Structured attempt, then the free-text retry with the same prompt.
-    assert len(llm.prompts) == 2
-    assert llm.prompts[0] == llm.prompts[1]
+    # Structured attempt, one structured retry, then free text — same prompt each time.
+    assert len(llm.prompts) == 3
+    assert llm.prompts[0] == llm.prompts[1] == llm.prompts[2]
 
 
 @pytest.mark.unit
@@ -422,6 +422,84 @@ def test_standing_rule_rejects_unknown_level():
         StandingRule(trigger={"kind": "level_retest", "level": "round_100"})
 
 
+_FLATTENED_RULE = {
+    "kind": "level_retest",
+    "level": "vwap",
+    "confirmation": "add_vold_aligned",
+    "tolerance_points": 2.0,
+    "note": "Fade the VWAP retest.",
+    "expires_on": "2026-09-25",
+}
+
+
+@pytest.mark.unit
+def test_standing_rule_lifts_flattened_trigger_fields():
+    """Regression: providers without grammar enforcement emit tool args flat.
+
+    DeepSeek-style tool calling emitted ``confirmation``/``tolerance_points``
+    (and the trigger's ``level``/``kind``) at the rule level instead of nested
+    under ``trigger``, which failed the whole review. The schema must lift the
+    flattened fields into a ``trigger`` object.
+    """
+    rule = StandingRule(**_FLATTENED_RULE)
+    assert rule.trigger.kind == "level_retest"
+    assert rule.trigger.level is RuleLevel.VWAP
+    assert rule.trigger.confirmation is Confirmation.ADD_VOLD_ALIGNED
+    assert rule.trigger.tolerance_points == 2.0
+    assert rule.note == "Fade the VWAP retest."
+    assert rule.expires_on == "2026-09-25"
+
+
+@pytest.mark.unit
+def test_session_review_parses_flattened_standing_rules():
+    """The exact 2026-09-24 failure: flat rule dicts inside a SessionReview tool call."""
+    review = SessionReview.model_validate(
+        {
+            "hypothesis_grade": "Partial",
+            "discipline_grade": "B",
+            "what_worked": "waited",
+            "what_failed": "hesitated at onl",
+            "one_improvement": "watch the onl retest",
+            "standing_rules": [
+                {
+                    "level": "onl",
+                    "confirmation": "add_vold_aligned",
+                    "tolerance_points": 2.0,
+                    "note": "Fade the ONL retest.",
+                }
+            ],
+            "narrative": "Solid read.",
+        }
+    )
+    (rule,) = review.standing_rules
+    assert rule.trigger.level is RuleLevel.ONL
+    assert rule.trigger.confirmation is Confirmation.ADD_VOLD_ALIGNED
+    assert rule.trigger.tolerance_points == 2.0
+
+
+@pytest.mark.unit
+def test_standing_rule_accepts_trigger_as_bare_level_string():
+    rule = StandingRule(trigger="vwap")
+    assert rule.trigger.level is RuleLevel.VWAP
+    assert rule.trigger.confirmation is Confirmation.NONE
+
+
+@pytest.mark.unit
+def test_standing_rule_lifted_fields_do_not_clobber_nested_trigger():
+    rule = StandingRule(
+        trigger={"kind": "level_retest", "level": "orb_top", "tolerance_points": 3.0},
+        tolerance_points=1.0,
+    )
+    assert rule.trigger.level is RuleLevel.ORB_TOP
+    assert rule.trigger.tolerance_points == 3.0  # nested value wins over lifted
+
+
+@pytest.mark.unit
+def test_standing_rule_still_rejects_unknown_level_when_flattened():
+    with pytest.raises(ValidationError):
+        StandingRule(**{**_FLATTENED_RULE, "level": "round_100"})
+
+
 @pytest.mark.unit
 def test_session_review_standing_rules_default_empty():
     assert _review().standing_rules == []
@@ -465,6 +543,88 @@ def test_invoke_structured_calls_on_model_with_parsed_result():
     assert "**Hypothesis Grade**: Partial" in output
 
 
+class _SequenceStructured:
+    """Structured stub whose invoke returns a scripted sequence of outcomes.
+
+    Each entry is either a result to return or an exception to raise; the
+    last entry repeats for any further calls. Records every prompt.
+    """
+
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.calls: list[str] = []
+
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        outcome = self._outcomes.pop(0) if len(self._outcomes) > 1 else self._outcomes[0]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+@pytest.mark.unit
+def test_invoke_structured_retries_once_when_first_call_returns_none():
+    """Regression: weak OpenAI-compatible providers without forced tool_choice
+    sometimes answer in prose, so the parser returns None and the review lost
+    its standing rules to the free-text fallback. One retry parses on the
+    second attempt; the fallback must not fire.
+    """
+    review = _review()
+    structured = _SequenceStructured([None, review])
+    llm = FakeLLM()
+    captured = []
+    output = invoke_structured_or_freetext(
+        structured, llm, "prompt", render_session_review, "test",
+        on_model=captured.append,
+    )
+    assert len(structured.calls) == 2
+    assert captured == [review]
+    assert "**Hypothesis Grade**: Partial" in output
+    assert llm.prompts == []  # never degraded to free text
+
+
+@pytest.mark.unit
+def test_invoke_structured_retries_once_when_first_call_raises():
+    """A transient parse/validation failure gets exactly one more structured
+    attempt before the free-text fallback is considered."""
+    review = _review()
+    structured = _SequenceStructured([ValueError("structured output returned no parsed result"), review])
+    llm = FakeLLM()
+    output = invoke_structured_or_freetext(
+        structured, llm, "prompt", render_session_review, "test",
+    )
+    assert len(structured.calls) == 2
+    assert "**Hypothesis Grade**: Partial" in output
+    assert llm.prompts == []
+
+
+@pytest.mark.unit
+def test_invoke_structured_falls_back_after_exhausting_structured_retry():
+    """When both structured attempts fail, the free-text fallback still fires."""
+    structured = _SequenceStructured([RuntimeError("boom")])
+    llm = FakeLLM(text="plain review")
+    output = invoke_structured_or_freetext(
+        structured, llm, "prompt", render_session_review, "test",
+    )
+    assert len(structured.calls) == 2
+    assert output == "plain review"
+
+
+@pytest.mark.unit
+def test_invoke_structured_single_attempt_on_success():
+    """The happy path must not burn a second invocation."""
+    review = _review()
+    structured = _SequenceStructured([review])
+    llm = FakeLLM()
+    output = invoke_structured_or_freetext(
+        structured, llm, "prompt", render_session_review, "test",
+    )
+    assert len(structured.calls) == 1
+    assert llm.prompts == []
+    assert "**Discipline Grade**: B" in output
+
+
+
 @pytest.mark.unit
 def test_review_agent_prompt_includes_current_standing_rules():
     llm = FakeLLM()
@@ -477,6 +637,39 @@ def test_review_agent_prompt_includes_current_standing_rules():
     prompt = llm.prompts[0]
     assert "Standing Rules" in prompt
     assert "MISSED" in prompt
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_shows_nested_rule_shape():
+    """Weak providers bind the schema without grammar enforcement, so the
+    prompt itself must show the exact nested standing-rule shape."""
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(hypothesis="h", checks_summary="c", outcome_summary="o")
+    prompt = llm.prompts[0]
+    assert '"standing_rules"' in prompt
+    assert '"trigger"' in prompt
+    assert '"level_retest"' in prompt
+    assert '"confirmation"' in prompt
+    assert '"tolerance_points"' in prompt
+
+
+@pytest.mark.unit
+def test_review_agent_prompt_lists_only_schema_valid_levels():
+    """Every level the prompt advertises must be a valid RuleLevel.
+
+    The prompt advertised 'prior_poc' while the schema only knows 'poc', so
+    the model faithfully echoed an invalid level and the whole review's parse
+    failed (observed 2026-09-24). The prompt may not advertise a level the
+    schema rejects.
+    """
+    llm = FakeLLM()
+    create_mes_review_agent(llm)(hypothesis="h", checks_summary="c", outcome_summary="o")
+    prompt = llm.prompts[0]
+    advertised = prompt.split("Rules must be retests of one of:")[1].split(".")[0]
+    levels = {token.strip() for token in advertised.replace("\n", " ").split(",")}
+    assert levels
+    for level in levels:
+        RuleLevel(level)  # raises ValidationError for a level the schema rejects
 
 
 @pytest.mark.unit
