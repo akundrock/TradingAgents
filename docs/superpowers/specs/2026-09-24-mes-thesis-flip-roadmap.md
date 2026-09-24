@@ -58,7 +58,7 @@ The real prerequisite for C being *machine-checked* rather than human-prescribed
 ## Agreed sequencing
 
 1. ~~Option B: manual flip journal~~ — **shipped** (`ab29d07`).
-2. **A-as-add-on:** enrich `summarize_checks` rows with each check's price-vs-VWAP/OR context so the review's missed-flip grading is systematic, not luck-of-the-narrative. Cheap; `journal.summarize_checks` + review prompt only.
+2. **A-as-add-on:** enrich `summarize_checks` rows with each check's price-vs-VWAP/OR context so the review's missed-flip grading is systematic, not luck-of-the-narrative. Cheap; `journal.summarize_checks` + review prompt only. **Shipped:** `append_check` stores `orb_high`/`orb_low` at write time (legacy records render `-`), rows carry a compact `Location` cell (`+2.50 vs VWAP · above OR-H`) and a `Frame` column (`morning` / `flip N` from the append-order frame walk), and the review prompt explains both columns — this is the evidence trail C's trust period grades against.
 3. **C:** `invalidation` trigger kind + "RE-READ REQUIRED" banner (enforcement mode 1). Run review-prescribed for a few sessions before any auto-check gating (mode 2).
 4. **D:** structured morning schema once the clause vocabulary has stabilized from C sessions.
 
