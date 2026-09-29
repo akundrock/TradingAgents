@@ -15,6 +15,7 @@ from typing import Any
 # Maps mes-tuner / ThinkScript PascalCase input names onto our snake_case fields.
 _TUNER_FIELD_ALIASES: dict[str, str] = {
     "EnableMomentum": "enable_momentum",
+    "MomentumMode": "momentum_mode",
     "EnableVWAP": "enable_vwap",
     "EnableATRRange": "enable_atr_range",
     "EnablePattern": "enable_pattern",
@@ -166,6 +167,15 @@ class MesChecklistConfig:
     # unchanged because both default to the gate being active.
     enable_spy_context: bool = True
     divergence_veto: bool = True
+    # B-port: momentum evaluation mode. "cross" (default) is the historic
+    # mes-tuner-parity behavior: the momentum item requires a same-bar SMA/VWAP
+    # cross plus the Laguerre trend gate. "alignment" relaxes ONLY the same-bar
+    # cross into SMA/VWAP agreement; the Laguerre trend gate is unchanged, so
+    # alignment is a strict superset — it can pass where cross fails and never
+    # the reverse. Default keeps every default-path verdict byte-identical
+    # (mes-tuner parity); validate via the "momentum-alignment" backtest
+    # ablation before opting in live.
+    momentum_mode: str = "cross"
     # --------------------------------------------------------------------------
 
     # A-port: AZP mean-reversion path (azp-code-fidelity-matrix.md §3 Option A).

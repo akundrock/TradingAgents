@@ -169,3 +169,30 @@ def test_stop_atr_multiple_env_override(monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_MES_STOP_ATR_MULTIPLE", "1.5")
     cfg = load_mes_config()
     assert cfg.stop_atr_multiple == 1.5
+
+
+@pytest.mark.unit
+def test_momentum_mode_defaults_to_cross():
+    """'cross' is the mes-tuner-parity default: byte-identical to today."""
+    assert MesChecklistConfig().momentum_mode == "cross"
+
+
+@pytest.mark.unit
+def test_momentum_mode_alias_round_trips_through_from_dict():
+    cfg = MesChecklistConfig.from_dict({"MomentumMode": "alignment"})
+    assert cfg.momentum_mode == "alignment"
+    assert MesChecklistConfig.from_dict(cfg.to_dict()) == cfg
+
+
+@pytest.mark.unit
+def test_momentum_mode_env_override(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_MES_MOMENTUM_MODE", "alignment")
+    assert load_mes_config().momentum_mode == "alignment"
+
+
+@pytest.mark.unit
+def test_unknown_momentum_mode_string_round_trips_untouched():
+    # No enum validation: unknown strings degrade to historic cross behavior
+    # in checklist._momentum (pinned by test_mes_checklist.py), so a typo can
+    # never silently change scoring into an unreviewed third mode.
+    assert MesChecklistConfig.from_dict({"MomentumMode": "alginment"}).momentum_mode == "alginment"
