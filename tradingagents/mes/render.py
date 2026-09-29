@@ -61,6 +61,31 @@ def render_checklist(result: ChecklistResult, *, live: bool = True) -> str:
         parts.append(
             f"- Opening range: {result.opening_range_low:.2f} – {result.opening_range_high:.2f}"
         )
+    if result.mr_side is not None:
+        mr_state = "ENTRY" if result.mr_entry else "watch"
+        parts.extend(
+            [
+                "",
+                "### Mean-reversion candidate (informational)",
+                "",
+                f"- Fade side: {result.mr_side} ({mr_state})",
+                f"- MR confirmations: {result.mr_confirmations}/{result.mr_required}",
+            ]
+        )
+        if result.mr_stop is not None:
+            parts.append(
+                f"- Plan: stop {result.mr_stop:.2f}, target {result.mr_target:.2f} (VWAP)"
+            )
+        parts.extend(
+            [
+                "",
+                "**MR notice:** this fade candidate is additive evidence computed in parallel "
+                "to the trend checklist. It never widens the deterministic verdict above: a "
+                "NOT TRADEABLE ruling still forces Stand Down, and the trend ruling governs "
+                "any Take. Treat the MR plan (fade stop, VWAP target) as context, not as the "
+                "trade's level set.",
+            ]
+        )
     if result.gate_reasons:
         parts.extend(["", "### Gate blocks", ""] + [f"- {r}" for r in result.gate_reasons])
     if result.no_trade_reasons:
