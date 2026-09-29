@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from tradingagents.mes.checklist import evaluate
+from tradingagents.mes.config import load_mes_config
 from tradingagents.mes.journal import MesJournal
 from tradingagents.mes.management import OpenTrade
 
@@ -189,7 +190,7 @@ def test_summarize_checks_shows_location_and_frame(journal):
     journal.append_check(snapshot=post, result=evaluate(post, "long"), verdict_markdown="**Verdict**: Wait")
 
     summary = journal.summarize_checks("2026-03-30")
-    assert "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | Verdict |" in summary
+    assert "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | MR | Verdict |" in summary
     assert "+2.50 vs VWAP · above OR-H" in summary
     assert "-1.50 vs VWAP · below OR-L" in summary
     assert "morning" in summary
@@ -595,3 +596,58 @@ def test_terminal_fill_does_not_refire_on_replay(journal):
     assert second.remaining == 0
     assert second.realized_r == pytest.approx(1.0)
     assert first.fired == second.fired
+
+
+@pytest.mark.unit
+def test_check_record_captures_mr_fields_when_mr_fires(journal):
+    mes = make_mes_series(
+        bar_kwargs={"open_": 97.55, "high": 97.6, "low": 94.5, "close": 97.5, "volume": 1500.0}
+    )
+    snapshot = make_snapshot(
+        cfg=load_mes_config({"enable_mean_reversion": True, "mr_min_confirmations": 1}),
+        mes=mes,
+    )
+    result = evaluate(snapshot, "long")
+    assert result.mr_entry is True  # non-vacuous: the record must carry a fired MR
+    journal.append_check(snapshot=snapshot, result=result)
+
+    record = journal.load_checks("2026-03-30")[0]
+    assert record["mr_side"] == "long"
+    assert record["mr_entry"] is True
+    assert record["mr_zone"] is True
+    assert record["mr_trigger"] is True
+    assert record["mr_confirmations"] == 1
+    assert record["mr_required"] == 1
+    assert record["mr_score"] == result.mr_score
+    assert record["mr_stop"] == result.mr_stop
+    assert record["mr_target"] == result.mr_target
+
+
+@pytest.mark.unit
+def test_check_record_mr_fields_default_when_mr_is_off(journal):
+    snapshot = make_snapshot()
+    journal.append_check(snapshot=snapshot, result=evaluate(snapshot, "long"))
+
+    record = journal.load_checks("2026-03-30")[0]
+    assert record["mr_side"] is None
+    assert record["mr_entry"] is False
+    assert record["mr_stop"] is None
+    assert record["mr_target"] is None
+
+
+@pytest.mark.unit
+def test_summarize_checks_mr_column(journal):
+    fired = make_snapshot(
+        cfg=load_mes_config({"enable_mean_reversion": True, "mr_min_confirmations": 1}),
+        mes=make_mes_series(
+            bar_kwargs={"open_": 97.55, "high": 97.6, "low": 94.5, "close": 97.5, "volume": 1500.0}
+        ),
+    )
+    journal.append_check(snapshot=fired, result=evaluate(fired, "long"), verdict_markdown="**Verdict**: Wait")
+    plain = make_snapshot()
+    journal.append_check(snapshot=plain, result=evaluate(plain, "long"), verdict_markdown="**Verdict**: Wait")
+
+    summary = journal.summarize_checks("2026-03-30")
+    assert "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | MR | Verdict |" in summary
+    assert "long ENTRY" in summary
+    assert "— |" in summary

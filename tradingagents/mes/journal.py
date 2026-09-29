@@ -120,6 +120,16 @@ def _location_label(check: dict) -> str:
     return " · ".join(parts) if parts else "-"
 
 
+def _mr_label(check: dict) -> str:
+    """One compact MR cell: 'long ENTRY' when the fade plan fired, 'long watch'
+    for an in-zone candidate, '—' otherwise. Records written before MR capture
+    carry no ``mr_side`` key and read as '—', never a guess."""
+    side = check.get("mr_side")
+    if not side:
+        return "—"
+    return f"{side} ENTRY" if check.get("mr_entry") else f"{side} watch"
+
+
 def _frame_timeline(day: list[dict]) -> list[str]:
     """Frame label in force at each check, aligned with the day's check order.
 
@@ -200,6 +210,15 @@ class MesJournal:
             "vwap": _num(result.vwap),
             "orb_high": _num(snapshot.mes.opening_range_high),
             "orb_low": _num(snapshot.mes.opening_range_low),
+            "mr_side": result.mr_side,
+            "mr_entry": bool(result.mr_entry),
+            "mr_zone": bool(result.mr_zone),
+            "mr_trigger": bool(result.mr_trigger),
+            "mr_confirmations": result.mr_confirmations,
+            "mr_required": result.mr_required,
+            "mr_score": result.mr_score,
+            "mr_stop": _num(result.mr_stop),
+            "mr_target": _num(result.mr_target),
             "atr": _num(result.atr),
             "internals": {
                 "add": _num(snapshot.add),
@@ -461,14 +480,14 @@ class MesJournal:
             return f"No checks logged for {date}."
         frames = iter(_frame_timeline(day))
         rows = [
-            "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | Verdict |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | MR | Verdict |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for check in (r for r in day if r.get("kind") == "check"):
             as_of = str(check.get("as_of", ""))
             time_label = as_of[11:16] if len(as_of) >= 16 else as_of
             rows.append(
-                "| {time} | {side} | {frame} | {score}/{max_score} | {tier} | {gates} | {tradeable} | {location} | {verdict} |".format(
+                "| {time} | {side} | {frame} | {score}/{max_score} | {tier} | {gates} | {tradeable} | {location} | {mr} | {verdict} |".format(
                     time=time_label,
                     side=check.get("side", "?"),
                     frame=next(frames),
@@ -478,6 +497,7 @@ class MesJournal:
                     gates="pass" if check.get("gates_ok") else "fail",
                     tradeable="yes" if check.get("tradeable") else "no",
                     location=_location_label(check),
+                    mr=_mr_label(check),
                     verdict=_first_line(check.get("verdict", "")) or "-",
                 )
             )
