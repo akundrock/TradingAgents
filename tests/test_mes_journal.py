@@ -528,3 +528,70 @@ def test_summarize_flips_lists_the_timeline(journal):
 @pytest.mark.unit
 def test_summarize_flips_is_empty_without_flips(journal):
     assert journal.summarize_flips("2020-01-01") == ""
+
+
+# ---------------------------------------------------------------------------
+# Ladder-state replay (find_open_trade)
+# ---------------------------------------------------------------------------
+
+
+def _opened_trade() -> OpenTrade:
+    return OpenTrade(
+        side="long", contracts=1, remaining=1,
+        entry=100.0, stop=98.0, initial_stop=98.0, target=102.0,
+        entry_time=_dt(2026, 3, 30, 10, 0), initial_risk_points=2.0,
+    )
+
+
+@pytest.mark.unit
+def test_find_open_trade_replays_ladder_state(journal):
+    """Ladder markers, remaining, and banked R persist through trade_adjusted records."""
+    journal.append_trade_opened(_opened_trade(), entry_context={"score": 7, "tier": "standard"})
+    # The ladder fires breakeven, then the target fill on a later tick.
+    journal.append_trade_adjusted(
+        "2026-03-30",
+        stop=100.25,
+        note="breakeven: stop 98.00 -> 100.25 (BE at +1.00R)",
+        as_of="2026-03-30T10:30",
+        ladder_fired={"breakeven": "2026-03-30T10:30"},
+        remaining=1,
+        realized_r=0.0,
+    )
+    journal.append_trade_adjusted(
+        "2026-03-30",
+        note="target: target filled at 102.00",
+        as_of="2026-03-30T10:45",
+        ladder_fired={"target": "2026-03-30T10:45"},
+        remaining=0,
+        realized_r=1.0,
+    )
+
+    reopened = journal.find_open_trade("2026-03-30")
+    assert reopened is not None
+    assert reopened.remaining == 0                     # ladder state survives rebuild
+    assert reopened.fired.get("target") == "2026-03-30T10:45"
+    assert reopened.fired.get("breakeven") == "2026-03-30T10:30"
+    assert reopened.realized_r == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_terminal_fill_does_not_refire_on_replay(journal):
+    """A journaled target fill must not re-fire when the trade is rebuilt."""
+    journal.append_trade_opened(_opened_trade(), entry_context={"score": 7, "tier": "standard"})
+    journal.append_trade_adjusted(
+        "2026-03-30",
+        note="target: target filled at 102.00",
+        as_of="2026-03-30T10:45",
+        ladder_fired={"target": "2026-03-30T10:45"},
+        remaining=0,
+        realized_r=1.0,
+    )
+
+    first = journal.find_open_trade("2026-03-30")
+    assert first is not None and first.remaining == 0
+    # Replaying again (the next tick's rebuild) yields the same persisted state.
+    second = journal.find_open_trade("2026-03-30")
+    assert second is not None
+    assert second.remaining == 0
+    assert second.realized_r == pytest.approx(1.0)
+    assert first.fired == second.fired

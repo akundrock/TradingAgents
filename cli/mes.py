@@ -1304,8 +1304,12 @@ def _render_mgmt_panel(trade: OpenTrade, report: MgmtReport, price: float) -> Pa
     ))
     grid.add_row(Text.from_markup(
         f"Now [bold]{price:.2f}[/bold]  "
-        f"[{'green' if report.r_now >= 0 else 'red'}]{report.r_now:+.2f}R[/{'green' if report.r_now >= 0 else 'red'}]  "
-        f"MFE {report.mfe_r:+.2f}R  MAE {report.mae_r:+.2f}R"
+        + (
+            f"[{'green' if report.r_now >= 0 else 'red'}]{report.r_now:+.2f}R[/{'green' if report.r_now >= 0 else 'red'}]"
+            if trade.remaining > 0
+            else f"[bold]closed {report.realized_r:+.2f}R[/bold]"
+        )
+        + f"  MFE {report.mfe_r:+.2f}R  MAE {report.mae_r:+.2f}R"
     ))
     grid.add_row(Text.from_markup(
         f"PLAN  stop {report.stop:.2f}  target {report.target if report.target is not None else '-'}"
@@ -1366,6 +1370,28 @@ def trade_enter(
         stop_px = entry_px - stop_distance if side == "long" else entry_px + stop_distance
         stop_anchor = "vwap_atr_distance"
     target_px = target if target is not None else (levels.first_target if levels else None)
+    if target is not None:
+        target_anchor = "manual"
+    elif levels is not None:
+        target_anchor = levels.level_labels.get(levels.first_target) or "1R fallback"
+    else:
+        target_anchor = "none resolved"
+
+    # Re-floor the auto-resolved target against the trade's ACTUAL risk. The
+    # suggestion's 1R floor is built from the suggested stop; a manual stop
+    # (or a wider ATR/vwap-distance stop) can still leave a structural target
+    # degenerate for this trade. An explicitly-passed --target is respected.
+    trade_risk = round(abs(entry_px - stop_px), 4)
+    if target is None and target_px is not None and trade_risk > 0:
+        min_target_distance = trade_risk * cfg.target_min_r_multiple
+        floor_px = round(
+            entry_px + min_target_distance if side == "long" else entry_px - min_target_distance,
+            2,
+        )
+        degenerate = target_px <= floor_px if side == "long" else target_px >= floor_px
+        if degenerate:
+            target_px = floor_px
+            target_anchor = "1R floor (actual stop)"
 
     trade = OpenTrade(
         side=side,
@@ -1392,12 +1418,24 @@ def trade_enter(
         "stop_distance_points": round(abs(entry_px - stop_px), 4),
         "stop_atr_multiple": round(abs(entry_px - stop_px) / result.atr, 4) if result.atr > 0 else None,
         "stop_anchor": stop_anchor,
+        "target_px": target_px,
+        "target_anchor": target_anchor,
+        "risk_reward_multiple": (
+            round(abs(target_px - entry_px) / trade.initial_risk_points, 4)
+            if target_px is not None and trade.initial_risk_points > 0
+            else None
+        ),
     })
     stop_suffix = f" ({stop_anchor})" if stop_anchor != "manual" else ""
     console.print(
         f"[bold green]Trade opened[/bold green]: {side} {contracts} @ {entry_px:.2f}, "
-        f"stop {stop_px:.2f}{stop_suffix}, target {target if target is not None else '-'} "
-        f"(1R = {trade.initial_risk_points:.2f} pts)"
+        f"stop {stop_px:.2f}{stop_suffix}, target "
+        + (
+            f"{target_px:.2f} ({target_anchor})"
+            if target_px is not None
+            else "-"
+        )
+        + f" (1R = {trade.initial_risk_points:.2f} pts)"
     )
 
 
@@ -1466,7 +1504,10 @@ def trade_status(
                     snapshot, updated, report = shot
                     live.update(_render_mgmt_panel(updated, report, snapshot.mes.close))
                     # Persist each ladder event exactly once; advisory LLM text
-                    # below never mutates state.
+                    # below never mutates state. The event timestamp is the
+                    # bar that triggered (stable across ticks), and each record
+                    # carries the ladder state so find_open_trade replays it —
+                    # a fired target/stop can never re-fire on a later tick.
                     for event in report.events:
                         key = f"{event.name}@{event.as_of.isoformat(timespec='minutes')}"
                         if key in seen:
@@ -1477,6 +1518,9 @@ def trade_status(
                             stop=updated.stop,
                             note=f"{event.name}: {event.detail}",
                             as_of=event.as_of.isoformat(timespec="minutes"),
+                            ladder_fired=dict(updated.fired),
+                            remaining=updated.remaining,
+                            realized_r=updated.realized_r,
                         )
                         if alert and event.name in {"stopped_out", "target", "time_stop"}:
                             _fire_alert(f"Trade ladder: {event.name.replace('_', ' ')}")
@@ -1531,6 +1575,20 @@ def trade_close(
             updated.realized_r + updated.remaining * _r_of(price, updated), 4
         )
         updated.remaining = 0
+    else:
+        # The ladder already inferred a full exit (target/stop/time-stop fill
+        # detected from bar history). The user's --price is the broker-side
+        # truth for the final leg: re-realize the whole position at the stated
+        # exit instead of the ladder's bar-open estimate. When both agree the
+        # numbers are identical; when they differ, the manual fill wins.
+        ladder_r = updated.realized_r
+        updated.realized_r = round(updated.contracts * _r_of(price, updated), 4)
+        if abs(updated.realized_r - ladder_r) > 1e-9:
+            console.print(
+                f"[yellow]Manual exit overrides the ladder-inferred fill: "
+                f"{updated.realized_r:+.2f}R at {price:.2f} "
+                f"(ladder had banked {ladder_r:+.2f}R).[/yellow]"
+            )
 
     journal.append_trade_closed(updated, exit_price=price, reason=reason, as_of=stamp)
     console.print(

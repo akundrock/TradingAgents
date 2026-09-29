@@ -10,6 +10,35 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Target 1R floor in the trade-level hint** (`target_min_r_multiple`,
+  default 1.0): `suggest_trade_levels` skips structural levels closer than
+  1R beyond entry and falls back to entry ± 1R (mirroring the stop's ATR
+  floor); `trade enter` re-floors an auto-resolved target against the
+  trade's actual stop and journals `target_px` / `target_anchor` /
+  `risk_reward_multiple` provenance.
+- **Ladder-fill persistence**: `trade_adjusted` records carry the ladder's
+  `fired` markers, `remaining`, and `realized_r`; `find_open_trade` replays
+  them so a terminal fill can never re-fire across ticks or restarts, and
+  fill events are timestamped by the touching bar (stable dedup keys).
+
+### Fixed
+
+- **Degenerate first targets on MES entries**: the nearest structural level
+  below/above price was adopted verbatim even when it sat a few ticks from
+  entry (e.g. short 7727.00 targeting the 7726.00 prior-day low for a ~0.09R
+  reward). Targets now clear a 1R floor (`target_min_r_multiple`); fallback
+  is entry ± 1R when no structural level qualifies.
+- **Phantom target fills no longer repeat or freeze the R panel**: ladder
+  fills persist via `trade_adjusted` (dedup keyed on the touching bar's
+  timestamp, not the tick's), the manager reports the fill's R instead of a
+  hardcoded 0.00R, and `mes trade close --price` is the broker-side truth —
+  when the ladder had already inferred a fill, the manual exit re-realizes
+  the whole position at the user's price and the override is printed.
+- **`mes trade enter` printed the raw `--target` option** (a literal `-`)
+  instead of the resolved plan target; it now prints the resolved target
+  with its anchor (structural label, "1R fallback", or "1R floor (actual
+  stop)") and journals `target_px`/`target_anchor`/`risk_reward_multiple`.
+
 - **MES copilot** (`tradingagents mes`): deterministic /MES 5-minute checklist,
   sizing, session journal, and morning / gatekeeper / review agents.
 - **TOS-parity market internals** in `tradingagents/mes/internals.py`, ported

@@ -368,6 +368,11 @@ def test_normalize_preserves_valid_short_take():
     assert "auto-corrected" not in v.reasoning
 
 
+# ---------------------------------------------------------------------------
+# Target 1R floor (Option C)
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.unit
 def test_normalize_clears_inverted_target_on_short_take():
     v = TradeGoNoGo(
@@ -382,3 +387,112 @@ def test_normalize_clears_inverted_target_on_short_take():
     )
     normalize_trade_gonogo(v)
     assert v.first_target is None
+
+
+@pytest.mark.unit
+def test_target_floors_at_1r_when_nearest_level_is_too_close():
+    """Regression 2026-09-29: the nearest level below entry became a 0.02R target.
+
+    Short 7727.00 with the 7726.00 prior-day low just below it — the nearest
+    structural level must be skipped when it is closer than 1R; the next level
+    clearing the floor (round-100 at 7700) is the target instead.
+    """
+    result = suggest_trade_levels(
+        "short",
+        last_price=7727.00,
+        vwap=7739.50,
+        atr=7.50,
+        orb_low=7738.75,        # stop side (above price) → stop 7738.75
+        orb_high=7758.75,
+        prior_low=7726.00,      # 0.25 pts below entry — degenerate, skipped
+        overnight_low=7716.00,  # still < 1R from entry — skipped
+        tick_size=0.25,
+        stop_atr_multiple=1.0,
+        target_min_r_multiple=1.0,
+    )
+    assert result is not None
+    risk = abs(7727.0 - result.stop_level)
+    assert risk > 0
+    assert abs(7727.0 - result.first_target) >= risk - 1e-9
+    assert result.first_target < 7727.00
+    assert result.first_target != pytest.approx(7726.0)
+
+
+@pytest.mark.unit
+def test_target_falls_back_to_entry_minus_1r_when_no_level_qualifies():
+    """No structural level offers 1R of reward → fall back to entry − 1R."""
+    result = suggest_trade_levels(
+        "short",
+        last_price=5000.0,
+        vwap=4999.0,
+        atr=2.0,
+        orb_high=5001.0,        # stop side → stop 5001.0, 1R = 1.0 pt
+        prior_low=4999.25,      # 0.75 pts below — under 1R, rejected
+        overnight_low=4999.50,
+        tick_size=0.25,
+        stop_atr_multiple=1.0,
+        target_min_r_multiple=1.0,
+    )
+    assert result is not None
+    risk = abs(5000.0 - result.stop_level)
+    assert risk > 0
+    assert result.first_target == pytest.approx(5000.0 - risk)
+
+
+@pytest.mark.unit
+def test_long_target_floors_at_1r_mirror():
+    """Long mirror: nearest level under 1R away is skipped; a ≥1R level or fallback is used."""
+    result = suggest_trade_levels(
+        "long",
+        last_price=100.00,
+        vwap=99.00,
+        atr=2.0,
+        orb_high=100.50,        # 0.5R above entry — rejected
+        overnight_high=100.90,  # still under 1R — skipped
+        orb_low=98.00,          # stop side
+        tick_size=0.25,
+        stop_atr_multiple=1.0,
+        target_min_r_multiple=1.0,
+    )
+    assert result is not None
+    risk = abs(100.0 - result.stop_level)
+    # Whatever target is picked (structural or fallback), it must clear 1R.
+    assert result.first_target >= 100.0 + risk
+
+
+@pytest.mark.unit
+def test_target_floor_keeps_qualifying_nearest_level():
+    """A structural level at/beyond the 1R floor is preferred over the fallback."""
+    result = suggest_trade_levels(
+        "short",
+        last_price=5000.0,
+        vwap=5010.0,
+        atr=8.0,
+        prior_low=4990.0,      # nearest level clearing the 1R floor
+        prior_val=4998.0,      # 0.5R away — rejected
+        tick_size=0.25,
+        stop_atr_multiple=1.0,
+        target_min_r_multiple=1.0,
+    )
+    assert result is not None
+    assert result.first_target == pytest.approx(4990.0)
+
+
+@pytest.mark.unit
+def test_hint_labels_1r_fallback_target():
+    """A fallback target (no structural label) is rendered as a 1R fallback."""
+    result = suggest_trade_levels(
+        "short",
+        last_price=5000.0,
+        vwap=4999.0,
+        atr=2.0,
+        orb_high=5001.0,
+        prior_low=4999.25,
+        overnight_low=4999.50,
+        tick_size=0.25,
+        stop_atr_multiple=1.0,
+        target_min_r_multiple=1.0,
+    )
+    hint = render_trade_levels_hint(result)
+    assert "1R fallback" in hint
+    assert "5000.00-5000.25" in result.entry_zone or "4999.75-5000.00" in result.entry_zone

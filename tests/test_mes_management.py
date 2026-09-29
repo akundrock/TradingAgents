@@ -282,3 +282,44 @@ def test_management_types_are_public():
 
     for name in ("OpenTrade", "MgmtEvent", "MgmtReport", "evaluate_management"):
         assert hasattr(pkg, name), f"tradingagents.mes.{name} must be re-exported"
+
+
+# ---------------------------------------------------------------------------
+# Terminal-fill reporting (R freeze + dedup-key regressions, 2026-09-29)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_target_fill_reports_fill_r_not_zero():
+    """A filled target reports the fill's R, not a hardcoded 0.00R panel."""
+    _, report = evaluate_management(
+        snap_at(102.0, high=102.4), result_at(102.0), make_trade()
+    )
+    assert report.recommendation == "CLOSED"
+    assert report.r_now == pytest.approx(1.0)  # the fill's R, not the frozen close
+
+
+@pytest.mark.unit
+def test_fill_event_timestamped_by_touching_bar():
+    """Fill events key on the bar that touched the level, not the tick's as_of.
+
+    The journal dedup key is built from the event timestamp, so the same
+    historical bar must always produce the same key across ticks/restarts.
+    """
+    tick_as_of = DEFAULT_AS_OF.replace(minute=7)  # tick at 11:07, bar stamped 11:00
+    _, report = evaluate_management(
+        snap_at(102.0, high=102.4, as_of=tick_as_of),
+        result_at(102.0),
+        make_trade(),
+    )
+    assert report.events[0].as_of == DEFAULT_AS_OF  # the bar, not the tick
+    assert report.events[0].as_of != tick_as_of
+
+
+@pytest.mark.unit
+def test_stop_fill_reports_fill_r():
+    """Gap-through stop fill: the report's r_now reflects the fill, not zero."""
+    updated, report = evaluate_management(
+        snap_at(97.0, open_=97.0, low=96.8), result_at(97.0), make_trade()
+    )
+    assert report.r_now == pytest.approx(-1.5)  # fill at 97.0 over 2.0-pt risk

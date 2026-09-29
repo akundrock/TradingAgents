@@ -56,6 +56,8 @@ class MgmtReport:
     mae_r: float
     stop: float
     target: float | None
+    realized_r: float = 0.0
+    """R banked so far (partials / fills) — shown by the panel when flat."""
     events: list[MgmtEvent] = field(default_factory=list)
     next_event: str = ""
     recommendation: str = "HOLD"
@@ -144,7 +146,8 @@ def evaluate_management(
     if updated.remaining <= 0:
         return updated, MgmtReport(
             r_now=0.0, mfe_r=0.0, mae_r=0.0, stop=updated.stop,
-            target=updated.target, events=[], next_event="",
+            target=updated.target, realized_r=updated.realized_r,
+            events=[], next_event="",
             recommendation="CLOSED", reasons=["position already closed"],
         )
 
@@ -154,30 +157,40 @@ def evaluate_management(
     target_fill = _target_fill(updated, bar)
 
     if stop_fill is not None:
+        fill_r = _r_of(stop_fill, updated)
         updated.realized_r = round(
-            updated.realized_r + updated.remaining * _r_of(stop_fill, updated), 4
+            updated.realized_r + updated.remaining * fill_r, 4
         )
         updated.remaining = 0
-        updated.fired.setdefault("stopped_out", snapshot.as_of.isoformat(timespec="minutes"))
+        # Key the terminal event on the bar that touched the level, not the
+        # tick's as_of: the fill is re-detected from history on every tick, so
+        # a tick-timestamped key re-alerts every tick (and after a restart).
+        # The bar timestamp is stable, making the journal dedup key idempotent.
+        fill_ts = bar.timestamp
+        updated.fired.setdefault("stopped_out", fill_ts.isoformat(timespec="minutes"))
         return updated, MgmtReport(
-            r_now=0.0, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
-            target=updated.target,
-            events=[MgmtEvent("stopped_out", snapshot.as_of, f"stop filled at {stop_fill:.2f}")],
+            r_now=fill_r, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
+            target=updated.target, realized_r=updated.realized_r,
+            events=[MgmtEvent("stopped_out", fill_ts, f"stop filled at {stop_fill:.2f}")],
             next_event="",
             recommendation="CLOSED",
             reasons=[f"stop touched; filled at {stop_fill:.2f}"],
         )
 
     if target_fill is not None:
+        fill_r = _r_of(target_fill, updated)
         updated.realized_r = round(
-            updated.realized_r + updated.remaining * _r_of(target_fill, updated), 4
+            updated.realized_r + updated.remaining * fill_r, 4
         )
         updated.remaining = 0
-        updated.fired.setdefault("target", snapshot.as_of.isoformat(timespec="minutes"))
+        # Same bar-timestamp key as the stop fill: a replayed trade must not
+        # re-fire this event on later ticks (see stopped_out branch above).
+        fill_ts = bar.timestamp
+        updated.fired.setdefault("target", fill_ts.isoformat(timespec="minutes"))
         return updated, MgmtReport(
-            r_now=0.0, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
-            target=updated.target,
-            events=[MgmtEvent("target", snapshot.as_of, f"target filled at {target_fill:.2f}")],
+            r_now=fill_r, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
+            target=updated.target, realized_r=updated.realized_r,
+            events=[MgmtEvent("target", fill_ts, f"target filled at {target_fill:.2f}")],
             next_event="",
             recommendation="CLOSED",
             reasons=[f"target hit at {target_fill:.2f}"],
@@ -258,7 +271,8 @@ def evaluate_management(
         updated.fired.setdefault("time_stop", snapshot.as_of.isoformat(timespec="minutes"))
         return updated, MgmtReport(
             r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
-            target=updated.target, events=events + [
+            target=updated.target, realized_r=updated.realized_r,
+            events=events + [
                 MgmtEvent("time_stop", snapshot.as_of, f"flatten by {cfg.exit_time} ET")
             ],
             next_event="", recommendation="FLATTEN",
@@ -283,7 +297,8 @@ def evaluate_management(
             )
             return updated, MgmtReport(
                 r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
-                target=updated.target, events=events,
+                target=updated.target, realized_r=updated.realized_r,
+                events=events,
                 next_event="", recommendation="CLOSED",
                 reasons=reasons + ["exit_on_confluence_loss=True"],
             )
@@ -293,7 +308,8 @@ def evaluate_management(
 
     return updated, MgmtReport(
         r_now=r_now, mfe_r=mfe_r, mae_r=mae_r, stop=updated.stop,
-        target=updated.target, events=events,
+        target=updated.target, realized_r=updated.realized_r,
+        events=events,
         next_event=_next_event(cfg, updated),
         recommendation=recommendation,
         reasons=reasons,

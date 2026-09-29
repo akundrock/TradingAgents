@@ -222,6 +222,10 @@ class MesChecklistConfig:
     exit_on_confluence_loss: bool = False
     time_stop_buffer_minutes: int = 10
     stop_atr_multiple: float = 1.0
+    # Minimum reward for a suggested first target, in multiples of 1R
+    # (1R = |entry − stop|). Structural levels closer than this are ignored;
+    # the suggestion falls back to entry ± target_min_r × risk.
+    target_min_r_multiple: float = 1.0
 
     spy_symbol: str = "SPY"
     mes_symbol: str = "/MES"

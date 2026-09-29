@@ -538,7 +538,17 @@ class MesJournal:
         stop: float | None = None,
         note: str | None = None,
         as_of: str | None = None,
+        ladder_fired: dict[str, str] | None = None,
+        remaining: int | None = None,
+        realized_r: float | None = None,
     ) -> None:
+        """Record a ladder event or manual adjustment.
+
+        ``ladder_fired`` / ``remaining`` / ``realized_r`` carry the manager's
+        state transitions (BE/partial/trail markers, fills, banked R) so that
+        :meth:`find_open_trade` can replay them and the ladder never re-fires
+        an event it already processed — across ticks *and* restarts.
+        """
         self._append(date, {
             "kind": "trade_adjusted",
             "logged_at": datetime.now().isoformat(),
@@ -546,6 +556,9 @@ class MesJournal:
             "as_of": as_of,
             "stop": stop,
             "note": note,
+            "fired": dict(ladder_fired) if ladder_fired else None,
+            "remaining": remaining,
+            "realized_r": realized_r,
         })
 
     def append_trade_closed(
@@ -607,6 +620,15 @@ class MesJournal:
                     trade.stop = float(record["stop"])
                 if record.get("note"):
                     trade.manual_events.append(record["note"])
+                # Ladder state transitions (BE/partial/trail markers, fills,
+                # banked R) persist here so replay matches the ladder: a fill
+                # already journaled this session must not re-fire on rebuild.
+                for name, ts in (record.get("fired") or {}).items():
+                    trade.fired.setdefault(str(name), str(ts))
+                if record.get("remaining") is not None:
+                    trade.remaining = int(record["remaining"])
+                if record.get("realized_r") is not None:
+                    trade.realized_r = float(record["realized_r"])
             elif kind == "trade_closed":
                 return None
         return trade

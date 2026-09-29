@@ -202,3 +202,63 @@ def test_review_flags_still_open_trade(tmp_path, patched_snapshot, monkeypatch):
     result = CliRunner().invoke(mes_app, ["review", "--date", "2026-03-30", "--no-llm"])
     assert result.exit_code == 0
     assert "still marked open" in result.output.lower()
+
+
+# --- Resolved-target provenance (degenerate-target regression, 2026-09-29) ---
+
+
+@pytest.mark.unit
+def test_enter_prints_and_journals_resolved_target(tmp_path, patched_snapshot):
+    """Without --target, the printed line and journal must carry the RESOLVED target."""
+    result = _invoke(
+        "enter", "--side", "long", "--contracts", "1",
+        "--entry", "100.00", "--stop", "98.00",
+        "--journal-dir", str(tmp_path),
+    )
+    assert result.exit_code == 0, result.output
+    # The printed line shows the resolved target with its anchor, never a bare "-".
+    # Suggested target 101.0 is only +0.5R of the actual 98.00 stop → re-floored to 102.0.
+    assert "target 102.00" in result.output, result.output
+    assert "1R floor" in result.output
+    assert "1R = 2.00" in result.output
+    opened = _opened_records(tmp_path)[0]
+    ctx = opened["entry_context"]
+    assert ctx["target_px"] == pytest.approx(102.0)
+    assert ctx["target_anchor"] == "1R floor (actual stop)"
+    assert ctx["risk_reward_multiple"] == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_close_after_ladder_fill_books_manual_exit_price(tmp_path, patched_snapshot):
+    """A persisted ladder fill must not override the user's actual exit price."""
+    from tradingagents.mes.management import OpenTrade
+
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    trade = OpenTrade(
+        side="long", contracts=1, remaining=1,
+        entry=100.0, stop=98.0, initial_stop=98.0, target=102.0,
+        entry_time=datetime(2026, 3, 30, 10, 0), initial_risk_points=2.0,
+    )
+    journal.append_trade_opened(trade, entry_context={"score": 5, "tier": "marginal"})
+    # The ladder inferred a target fill and journaled its terminal state.
+    journal.append_trade_adjusted(
+        "2026-03-30",
+        note="target: target filled at 102.00",
+        as_of="2026-03-30T10:45",
+        ladder_fired={"target": "2026-03-30T10:45"},
+        remaining=0,
+        realized_r=1.0,
+    )
+
+    closed = _invoke(
+        "close", "--price", "101.50", "--reason", "manual",
+        "--journal-dir", str(tmp_path),
+    )
+    assert closed.exit_code == 0, closed.output
+    # The manual exit price is the broker-side truth: +0.75R, not the fill's 1.0R.
+    closed_records = [
+        e for e in journal.load_day("2026-03-30") if e["kind"] == "trade_closed"
+    ]
+    assert len(closed_records) == 1
+    assert closed_records[0]["realized_r"] == pytest.approx(0.75)
+    assert "manual" in closed.output.lower() or "replaces" in closed.output.lower()

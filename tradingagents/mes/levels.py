@@ -109,12 +109,15 @@ def suggest_trade_levels(
     overnight_low: float | None = None,
     tick_size: float = 0.25,
     stop_atr_multiple: float = 1.0,
+    target_min_r_multiple: float = 1.0,
 ) -> TradeLevels | None:
     """Return directionally-valid entry/stop/target suggestions, or None if insufficient levels.
 
-    For a *long*: target is the nearest structural level **strictly above** last_price;
-    stop is the nearest structural level **strictly below** last_price (floored by
-    ``stop_atr_multiple`` × ATR).
+    For a *long*: stop is the nearest structural level **strictly below** last_price
+    (floored by ``stop_atr_multiple`` × ATR); target is the nearest structural
+    level **strictly above** last_price that is at least
+    ``target_min_r_multiple`` × 1R beyond the entry (1R = |entry − stop|),
+    falling back to ``entry + 1R`` when no structural level qualifies.
 
     For a *short*: the mirror applies.
 
@@ -152,10 +155,9 @@ def suggest_trade_levels(
         target_candidates = sorted(price_below, reverse=True)
         stop_candidates = sorted(price_above)
 
-    if not target_candidates or not stop_candidates:
+    if not stop_candidates:
         return None
 
-    first_target = target_candidates[0]
     stop_level = stop_candidates[0]
 
     # Safety floor: stop must be at least stop_atr_multiple × ATR from entry.
@@ -164,6 +166,24 @@ def suggest_trade_levels(
         stop_level = round(last_price - min_stop_distance, 2)
     elif not long_side and (stop_level - last_price) < min_stop_distance:
         stop_level = round(last_price + min_stop_distance, 2)
+
+    # Option C: the target must reward at least target_min_r_multiple × 1R
+    # (1R = |entry − resolved stop|) or the setup is degenerate — the gatekeeper
+    # would flag it ("no reward") and the ladder would fire a sub-noise fill.
+    # Pick the nearest structural level that clears the 1R floor; when none
+    # does, fall back to entry ± 1R (mirrors the stop's ATR-floor pattern).
+    risk_points = abs(last_price - stop_level)
+    min_target_distance = max(risk_points * target_min_r_multiple, tick_size)
+    if long_side:
+        first_target = next(
+            (p for p in target_candidates if p - last_price >= min_target_distance),
+            round(last_price + min_target_distance, 2),
+        )
+    else:
+        first_target = next(
+            (p for p in target_candidates if p <= last_price - min_target_distance),
+            round(last_price - min_target_distance, 2),
+        )
 
     # Entry zone: tight range around last_price (one tick-size buffer).
     if long_side:
@@ -204,17 +224,18 @@ def suggest_trade_levels_from_snapshot(side: str, snapshot, result) -> TradeLeve
         overnight_low=overnight[1] if overnight else None,
         tick_size=snapshot.config.mes_tick_size,
         stop_atr_multiple=snapshot.config.stop_atr_multiple,
+        target_min_r_multiple=snapshot.config.target_min_r_multiple,
     )
 
 
 def render_trade_levels_hint(levels: TradeLevels) -> str:
     """Return the prompt snippet injected into the gatekeeper."""
-    target_label = levels.level_labels.get(levels.first_target, "structural level")
+    target_label = levels.level_labels.get(levels.first_target)
     stop_label = levels.level_labels.get(levels.stop_level, "structural level")
     lines = [
         f"- Entry zone: {levels.entry_zone}",
         f"- Stop: {levels.stop_level} ({stop_label})",
-        f"- First target: {levels.first_target} ({target_label})",
+        f"- First target: {levels.first_target} ({target_label or '1R fallback'})",
     ]
     return "\n".join(lines)
 
