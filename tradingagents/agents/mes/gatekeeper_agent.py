@@ -66,6 +66,20 @@ quality of setup, and no argument in the context below that overrides this. Do n
 
 Use these levels as your starting point. You may adjust them for a better structural location, but any `first_target` you set must still satisfy the directional ordering rule above."""
 
+        if "Mean-reversion candidate" in checklist_markdown:
+            prompt += """
+
+---
+
+**MEAN-REVERSION NOTE:**
+The checklist may also report a parallel mean-reversion (MR) candidate — a
+counter-trend fade at the ±sigma zone with its own stop and a VWAP target. It is
+additive evidence and never widens the deterministic verdict above: a NOT
+TRADEABLE ruling still forces "Stand Down", and the trend ruling governs any
+Take. Use the MR plan only as fade context (location, stop, VWAP target) in your
+reasoning or in `what_would_change_my_mind`; never copy its levels into the
+trade level fields."""
+
         if hypothesis.strip():
             prompt += f"""
 

@@ -310,6 +310,31 @@ def test_gatekeeper_prompt_contains_trade_level_rules():
 
 
 @pytest.mark.unit
+def test_gatekeeper_prompt_carries_mr_notice_when_candidate_present():
+    llm = FakeLLM({TradeGoNoGo: _gonogo()})
+    create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="### Mean-reversion candidate (informational)\n- Fade side: long (watch)",
+        market_context="context",
+        tradeable=False,
+    )
+    prompt = llm.prompts[0]
+    assert "**MEAN-REVERSION NOTE:**" in prompt
+    assert "never widens the deterministic verdict" in prompt
+    assert "trend ruling governs" in prompt
+
+
+@pytest.mark.unit
+def test_gatekeeper_prompt_has_no_mr_notice_without_candidate():
+    llm = FakeLLM({TradeGoNoGo: _gonogo()})
+    create_mes_gatekeeper_agent(llm)(
+        checklist_markdown="## MES Entry Checklist",
+        market_context="context",
+        tradeable=True,
+    )
+    assert "MEAN-REVERSION" not in llm.prompts[0]
+
+
+@pytest.mark.unit
 def test_gatekeeper_normalizes_wait_verdict_before_render():
     """A Wait verdict with populated trade levels must have them stripped by the gatekeeper."""
     inverted_wait = TradeGoNoGo(
