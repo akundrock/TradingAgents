@@ -20,6 +20,18 @@ Breaking changes within the 0.x line are called out explicitly.
   `fired` markers, `remaining`, and `realized_r`; `find_open_trade` replays
   them so a terminal fill can never re-fire across ticks or restarts, and
   fill events are timestamped by the touching bar (stable dedup keys).
+- **MR setups surfaced end-to-end** (`enable_mean_reversion` runtime opt-in via
+  `TRADINGAGENTS_MES_ENABLE_MEAN_REVERSION`, still default-off): `render_checklist`
+  gains an informational "Mean-reversion candidate" section (additive; the trend
+  ruling governs), check journal records capture all `mr_*` fields,
+  `summarize_checks` gains an `MR` column (`long ENTRY` / `long watch` / `—`) so
+  `mes review` grades fades, and the gatekeeper levels hint includes the MR plan
+  only when MR fires.
+- **Flag-gated momentum alignment** (`momentum_mode`, default `"cross"` for
+  mes-tuner parity): `"alignment"` replaces the same-bar SMA/VWAP cross with
+  SMA/VWAP agreement behind the unchanged Laguerre trend gate — a superset,
+  never a downgrade; the momentum item labels the active mode; validated via
+  the named `momentum-alignment` backtest ablation.
 
 ### Fixed
 
