@@ -196,3 +196,14 @@ def test_unknown_momentum_mode_string_round_trips_untouched():
     # in checklist._momentum (pinned by test_mes_checklist.py), so a typo can
     # never silently change scoring into an unreviewed third mode.
     assert MesChecklistConfig.from_dict({"MomentumMode": "alginment"}).momentum_mode == "alginment"
+
+
+@pytest.mark.unit
+def test_mean_reversion_runtime_opt_in_via_env(monkeypatch):
+    """A4: operators opt in at runtime with
+    TRADINGAGENTS_MES_ENABLE_MEAN_REVERSION=true; the module default stays off."""
+    assert MesChecklistConfig().enable_mean_reversion is False  # default stays off
+    monkeypatch.setenv("TRADINGAGENTS_MES_ENABLE_MEAN_REVERSION", "true")
+    assert load_mes_config().enable_mean_reversion is True
+    # The alias map covers the PascalCase name too (tuner/profile parity).
+    assert MesChecklistConfig.from_dict({"EnableMeanReversion": True}).enable_mean_reversion is True
