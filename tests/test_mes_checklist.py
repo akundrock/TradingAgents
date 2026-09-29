@@ -698,3 +698,87 @@ def test_all_items_is_spy_then_mes():
     assert result.all_items == result.spy_items + result.mes_items
     assert {i.chart for i in result.spy_items} == {"SPY"}
     assert {i.chart for i in result.mes_items} == {"MES"}
+
+
+@pytest.mark.unit
+def test_momentum_alignment_passes_a_pullback_without_a_fresh_cross():
+    """Midday pullback: SMA held above VWAP on both bars (no fresh cross) and
+    the Laguerre gate is healthy — cross mode denies, alignment grants."""
+    kwargs = dict(
+        prev_sma=99.6, prev_vwap=99.0, sma=99.6, vwap=99.0,
+        laguerre=0.6, prev_laguerre=0.5, laguerre_ready=True,
+    )
+    cross = find_item(evaluate(make_snapshot(mes=make_mes_series(**kwargs)), "long").mes_items, "Momentum")
+    aligned = find_item(
+        evaluate(
+            make_snapshot(mes=make_mes_series(**kwargs), cfg=load_mes_config({"momentum_mode": "alignment"})),
+            "long",
+        ).mes_items,
+        "Momentum",
+    )
+    assert cross.passed is False   # today's behavior: no fresh cross -> deny
+    assert aligned.passed is True  # SMA/VWAP agreement + Laguerre gate -> grant
+
+
+@pytest.mark.unit
+def test_momentum_alignment_still_requires_the_laguerre_trend_gate():
+    """The Laguerre gate is unchanged in alignment mode: turning-down vetoes."""
+    kwargs = dict(
+        prev_sma=99.6, prev_vwap=99.0, sma=100.0, vwap=99.0,
+        laguerre=0.4, prev_laguerre=0.5, laguerre_ready=True,
+    )
+    aligned = find_item(
+        evaluate(make_snapshot(mes=make_mes_series(**kwargs), cfg=load_mes_config({"momentum_mode": "alignment"})), "long").mes_items,
+        "Momentum",
+    )
+    assert aligned.passed is False
+
+
+@pytest.mark.unit
+def test_momentum_alignment_short_mirror():
+    """Short mirror of the pullback grant: SMA held below VWAP both bars, no
+    fresh cross, Laguerre still falling-under-0.8 and non-increasing."""
+    kwargs = dict(prev_sma=98.6, prev_vwap=99.0, sma=98.6, vwap=99.0,
+                  laguerre=0.4, prev_laguerre=0.5, laguerre_ready=True)
+    item = find_item(
+        evaluate(make_snapshot(mes=make_mes_series(**kwargs), cfg=load_mes_config({"momentum_mode": "alignment"})), "short").mes_items,
+        "Momentum",
+    )
+    assert item.passed is True
+
+
+@pytest.mark.unit
+def test_alignment_is_a_superset_of_cross_never_a_downgrade():
+    """Any bar cross-mode passes must also pass alignment (same Laguerre gate)."""
+    kwargs = dict(prev_sma=98.0, prev_vwap=99.0, sma=100.0, vwap=99.0,
+                  laguerre=0.6, prev_laguerre=0.5, laguerre_ready=True)
+    cross = find_item(evaluate(make_snapshot(mes=make_mes_series(**kwargs)), "long").mes_items, "Momentum")
+    aligned = find_item(
+        evaluate(make_snapshot(mes=make_mes_series(**kwargs), cfg=load_mes_config({"momentum_mode": "alignment"})), "long").mes_items,
+        "Momentum",
+    )
+    assert cross.passed is True
+    assert aligned.passed is True
+
+
+@pytest.mark.unit
+def test_unknown_momentum_mode_degrades_to_cross():
+    """A typo'd mode must behave exactly like the historic cross mode."""
+    kwargs = dict(prev_sma=99.6, prev_vwap=99.0, sma=99.6, vwap=99.0, laguerre_ready=True)
+    item = find_item(
+        evaluate(make_snapshot(cfg=load_mes_config({"momentum_mode": "alginment"}), mes=make_mes_series(**kwargs)), "long").mes_items,
+        "Momentum",
+    )
+    assert item.passed is False  # no cross -> no momentum, identical to today
+
+
+@pytest.mark.unit
+def test_momentum_item_name_labels_the_active_mode():
+    kwargs = dict(prev_sma=98.0, prev_vwap=99.0, sma=100.0, vwap=99.0, laguerre_ready=True)
+    aligned = find_item(
+        evaluate(make_snapshot(mes=make_mes_series(**kwargs), cfg=load_mes_config({"momentum_mode": "alignment"})), "long").mes_items,
+        "Momentum",
+    )
+    cross = find_item(evaluate(make_snapshot(mes=make_mes_series(**kwargs)), "long").mes_items, "Momentum")
+    assert aligned.name == "Momentum (SMA/VWAP alignment + Laguerre)"
+    assert cross.name == "Momentum (SMA/VWAP cross + Laguerre)"  # historic, pinned

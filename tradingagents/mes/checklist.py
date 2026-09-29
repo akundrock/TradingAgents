@@ -139,10 +139,18 @@ def _momentum(state: SeriesState, cfg: MesChecklistConfig, side: Side) -> bool:
         return False
     if not (state.prev_sma_ready and state.prev_vwap_ready and state.sma_ready and state.vwap_ready):
         return False
+    alignment = cfg.momentum_mode == "alignment"
     if side == "long":
         trend = state.laguerre > 0.2 and state.laguerre >= state.prev_laguerre
+        if alignment:
+            # Alignment mode: SMA/VWAP agreement replaces the same-bar cross.
+            # The Laguerre gate is unchanged, so alignment is a strict
+            # superset of cross — it can grant, never downgrade.
+            return state.sma > state.vwap and trend
         return state.prev_sma < state.prev_vwap and state.sma > state.vwap and trend
     trend = state.laguerre < 0.8 and state.laguerre <= state.prev_laguerre
+    if alignment:
+        return state.sma < state.vwap and trend
     return state.prev_sma > state.prev_vwap and state.sma < state.vwap and trend
 
 
@@ -398,14 +406,21 @@ def _evaluate_mes(snapshot: MesSnapshot, side: Side) -> tuple[list[CheckItem], i
         and mes.last.volume > mes.avg_volume * cfg.volume_multiplier
     )
 
+    if cfg.momentum_mode == "alignment":
+        momentum_name = "Momentum (SMA/VWAP alignment + Laguerre)"
+        momentum_threshold = "SMA/VWAP aligned with trend"
+    else:
+        momentum_name = "Momentum (SMA/VWAP cross + Laguerre)"
+        momentum_threshold = "cross with trend" if long_side else "cross down with trend"
+
     signals: list[tuple[str, bool, int, bool, str, str]] = [
         (
-            "Momentum (SMA/VWAP cross + Laguerre)",
+            momentum_name,
             momentum,
             cfg.momentum_score_weight,
             cfg.enable_momentum,
             f"SMA {mes.sma:.2f} vs VWAP {mes.vwap:.2f}, LagRSI {mes.laguerre:.2f}",
-            "cross with trend" if long_side else "cross down with trend",
+            momentum_threshold,
         ),
         (
             "MES on correct side of VWAP",
