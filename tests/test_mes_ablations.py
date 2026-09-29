@@ -29,7 +29,7 @@ from tradingagents.mes.backtest.outcomes import join_outcomes
 from tradingagents.mes.checklist import evaluate
 from tradingagents.mes.config import MesChecklistConfig, _TUNER_FIELD_ALIASES, load_mes_config
 
-from tests.mes_factories import find_item, make_snapshot, make_spy_series
+from tests.mes_factories import find_item, make_mes_series, make_snapshot, make_spy_series
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MES_CSV = FIXTURES / "mes_sample_5m.csv"
@@ -42,6 +42,7 @@ PLAN_ORDER = [
     "divergence-veto-off",
     "engine-thresholds",
     "dynamic-threshold-off",
+    "momentum-alignment",
 ]
 
 CHECKLIST_ABLATIONS = [name for name in PLAN_ORDER if name != "engine-thresholds"]
@@ -187,6 +188,29 @@ def test_internals_off_skips_the_breadth_signal_items():
     result = evaluate(snapshot, "long")
     add_item = find_item(result.mes_items, "$ADD confirms")
     assert add_item.note == "signal disabled"
+
+
+@pytest.mark.unit
+def test_momentum_alignment_overlay_reaches_the_momentum_item():
+    """Named ablation 'momentum-alignment' overlays exactly momentum_mode and
+    flips a same-bar-cross-denied bar into a pass — the cross item never
+    downgrades (superset semantics)."""
+    base = MesChecklistConfig()
+    assert base.momentum_mode == "cross"
+    overlaid = apply_ablation(base, "momentum-alignment")
+    assert overlaid.momentum_mode == "alignment"
+    assert config_delta(base, overlaid) == {
+        "momentum_mode": {"from": "cross", "to": "alignment"}
+    }
+    # Factory bar: SMA 99.5 above VWAP 99.0 on both bars (no fresh cross) —
+    # cross mode fails the item, alignment passes it (Laguerre rising).
+    kwargs = dict(prev_sma=99.6, prev_vwap=99.0, sma=99.6, vwap=99.0,
+                  laguerre=0.6, prev_laguerre=0.5, laguerre_ready=True)
+    base_item = find_item(evaluate(make_snapshot(mes=make_mes_series(**kwargs)), "long").mes_items, "Momentum")
+    aligned_cfg = apply_ablation(load_mes_config(), "momentum-alignment")
+    aligned_item = find_item(evaluate(make_snapshot(mes=make_mes_series(**kwargs), cfg=aligned_cfg), "long").mes_items, "Momentum")
+    assert base_item.passed is False
+    assert aligned_item.passed is True
 
 
 # ---------------------------------------------------------------------------

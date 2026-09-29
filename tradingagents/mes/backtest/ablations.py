@@ -15,6 +15,9 @@ checklist's defaults are never mutated):
   vs the playbook checklist values) differ in outcomes? (base: engine)
 - ``dynamic-threshold-off`` — is the TOS-dashboard dynamic ±$TICK threshold
   adaptive value, or a risk amplifier? (base: checklist)
+- ``momentum-alignment`` — do midday trend pullbacks grade fairly when the
+  momentum item accepts SMA/VWAP agreement instead of a same-bar cross,
+  with the Laguerre trend gate unchanged? (base: checklist)
 
 Guarantees (plan rule 1 + W2.4):
 
@@ -29,6 +32,7 @@ Guarantees (plan rule 1 + W2.4):
   checklist, which the untouched W2.1–W2.3 test suites prove.
 * ``internals-off`` and ``dynamic-threshold-off`` need no new fields: they are
   overlays of toggles the checklist already honors.
+* ``momentum-alignment`` needs no new toggles beyond ``momentum_mode`` itself.
 * ``engine-thresholds`` promotes mes-tuner's ``StrategyConfig`` defaults
   through the shared ``_TUNER_FIELD_ALIASES`` map (the same aliases the W2.5
   parity test guards), so threshold drift between the repos surfaces as a
@@ -185,6 +189,18 @@ ABLATIONS: dict[str, Ablation] = {
             ),
             base="checklist",
             overlay={"use_dynamic_tick_threshold": False},
+        ),
+        Ablation(
+            name="momentum-alignment",
+            question=(
+                "do midday trend pullbacks grade fairly when the momentum item "
+                "accepts SMA/VWAP agreement instead of a same-bar cross, with the "
+                "unchanged Laguerre trend gate as the only guardrail?"
+            ),
+            base="checklist",
+            # Relaxation is a superset: alignment passes wherever cross passes
+            # (same Laguerre gate), so no verdict can improve by keeping cross.
+            overlay={"momentum_mode": "alignment"},
         ),
     )
 }
