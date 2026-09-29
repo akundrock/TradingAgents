@@ -76,7 +76,7 @@ from tradingagents.mes.backtest.report import (
 )
 from tradingagents.mes.config import MesChecklistConfig
 from tradingagents.mes.levels import (
-    render_trade_levels_hint,
+    render_gatekeeper_levels_hint,
     suggest_trade_levels_from_snapshot,
 )
 from tradingagents.mes.management import (
@@ -359,7 +359,7 @@ def _run_check_once(
                 tradeable=result.tradeable,
                 sizing_note=sizing_note,
                 current_price=snapshot.mes.close,
-                trade_levels_hint=render_trade_levels_hint(levels_hint) if levels_hint else "",
+                trade_levels_hint=render_gatekeeper_levels_hint(levels_hint, result),
             )
         except Exception as exc:
             console.print(f"[yellow]Gatekeeper call failed:[/yellow] {exc}")

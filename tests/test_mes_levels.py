@@ -8,6 +8,8 @@ from tradingagents.agents.schemas import TradeGoNoGo, TradeVerdict
 from tradingagents.mes.levels import (
     _parse_entry_zone,
     normalize_trade_gonogo,
+    render_gatekeeper_levels_hint,
+    render_mr_levels_hint,
     render_trade_levels_hint,
     suggest_trade_levels,
 )
@@ -496,3 +498,50 @@ def test_hint_labels_1r_fallback_target():
     hint = render_trade_levels_hint(result)
     assert "1R fallback" in hint
     assert "5000.00-5000.25" in result.entry_zone or "4999.75-5000.00" in result.entry_zone
+
+
+# render_mr_levels_hint — informational MR block (spec A3)
+
+
+class _FakeMR:
+    def __init__(self, mr_entry=True, mr_side="long", mr_stop=94.5, mr_target=99.0):
+        self.mr_entry = mr_entry
+        self.mr_side = mr_side
+        self.mr_stop = mr_stop
+        self.mr_target = mr_target
+
+
+def test_mr_hint_renders_when_mr_fires():
+    hint = render_mr_levels_hint(_FakeMR())
+    assert hint is not None
+    assert "MR fade long: stop 94.50, target 99.00 (VWAP)" in hint
+    assert "Informational only" in hint
+    assert "the trend checklist's verdict governs" in hint
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"mr_entry": False},           # in-zone/watch -> not fired -> stays out
+    {"mr_side": None},
+    {"mr_side": "bogus"},
+    {"mr_stop": None},
+    {"mr_target": None},
+])
+def test_mr_hint_is_none_unless_mr_fires_with_a_priced_plan(kwargs):
+    assert render_mr_levels_hint(_FakeMR(**kwargs)) is None
+
+
+def test_gatekeeper_hint_appends_mr_block_after_structural_hint():
+    levels = suggest_trade_levels("long", 100.0, 99.0, 1.0, orb_high=101.0, orb_low=96.0)
+    text = render_gatekeeper_levels_hint(levels, _FakeMR())
+    assert "Entry zone:" in text  # structural hint still first
+    assert "MR fade long" in text
+    assert text.index("Entry zone:") < text.index("MR fade long")
+
+
+def test_gatekeeper_hint_renders_mr_block_alone_without_structural_levels():
+    text = render_gatekeeper_levels_hint(None, _FakeMR())
+    assert text.startswith("- MR fade long: stop 94.50")
+
+
+def test_gatekeeper_hint_is_empty_without_levels_or_mr():
+    assert render_gatekeeper_levels_hint(None, _FakeMR(mr_entry=False)) == ""

@@ -240,6 +240,42 @@ def render_trade_levels_hint(levels: TradeLevels) -> str:
     return "\n".join(lines)
 
 
+def render_mr_levels_hint(result) -> str | None:
+    """Informational MR block for the gatekeeper prompt; None unless MR fires.
+
+    ``mr_entry`` means zone + reversal trigger + confirmations all held (and the
+    session had started) — a merely in-zone "watch" candidate never reaches the
+    prompt, so the gatekeeper is never handed trade levels the trend verdict
+    cannot bless (spec A3, user sub-decision 2).
+    """
+    if not getattr(result, "mr_entry", False) or result.mr_side not in ("long", "short"):
+        return None
+    if result.mr_stop is None or result.mr_target is None:
+        return None
+    return "\n".join(
+        [
+            f"- MR fade {result.mr_side}: stop {result.mr_stop:.2f}, "
+            f"target {result.mr_target:.2f} (VWAP)",
+            "- Informational only — the trend checklist's verdict governs; this block never "
+            "licenses a counter-trend Take and its levels must not replace the trend trade's.",
+        ]
+    )
+
+
+def render_gatekeeper_levels_hint(levels: TradeLevels | None, result) -> str:
+    """Assemble the gatekeeper's full levels hint.
+
+    The structural suggestion (when one exists) stays first and authoritative;
+    a fired MR candidate is appended as informational context. Empty string
+    when there is nothing to show (the CLI omits the section entirely).
+    """
+    lines = render_trade_levels_hint(levels) if levels else ""
+    mr_block = render_mr_levels_hint(result)
+    if mr_block:
+        lines = f"{lines}\n{mr_block}" if lines else mr_block
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Post-generation normalizer
 # ---------------------------------------------------------------------------
