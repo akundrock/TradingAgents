@@ -608,7 +608,7 @@ Add the key immediately after `"EnableMomentum": true,` (line 2), mirroring the 
 Keep 2-space indent and the rest of the file byte-identical. Sanity check:
 
 Run: `.venv/bin/python -c "import json; d=json.load(open('profiles/baseline.json')); assert d['MomentumMode']=='cross'; print(len(d), 'keys')"`
-Expected: `74 keys` (73 + the new one).
+Expected: `73 keys` (72 pre-port + the new one).
 
 - [ ] **Step 2: Create `profiles/momentum_alignment.json`**
 
