@@ -42,7 +42,7 @@
 - Consumes: `ChecklistResult.mr_side/mr_entry/mr_zone/mr_trigger/mr_confirmations/mr_required/mr_score/mr_stop/mr_target` (already exist), journal helpers `_num()` and `_first_line()`.
 - Produces: check records carry keys `mr_side` (str|None), `mr_entry`/`mr_zone`/`mr_trigger` (bool), `mr_confirmations`/`mr_required`/`mr_score` (int), `mr_stop`/`mr_target` (float|None); module-level `_mr_label(check: dict) -> str` returning `"long ENTRY"`, `"long watch"`, or `"—"`; summary header `| Time | Side | Frame | Score | Tier | Gates | Tradeable | Location | MR | Verdict |`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/test_mes_journal.py` (imports already include `evaluate`, `make_mes_series`, `make_snapshot`), append three tests. First add `load_mes_config` to the `tradingagents.mes.config` import line (new import in this file):
 
@@ -108,12 +108,12 @@ def test_summarize_checks_mr_column(journal):
 
 Also update the existing header assertion in `test_summarize_checks_shows_location_and_frame` (tests/test_mes_journal.py:196) to the same new header string with `| MR |` inserted before `| Verdict |`.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_journal.py -v -k "mr or MR or summarize"`
 Expected: FAIL with `KeyError: 'mr_side'` (append_check does not write `mr_*` keys yet).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/mes/journal.py`:
 
@@ -173,12 +173,12 @@ and replace the `rows.append(...)` `.format(...)` row with:
             )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_journal.py -v`
 Expected: PASS — all new MR tests plus the updated location/frame header test.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/journal.py tests/test_mes_journal.py
@@ -195,7 +195,7 @@ git commit -m "feat(mes-journal): capture mr_* fields and add MR column to summa
 - Consumes: `ChecklistResult.mr_side/mr_entry/mr_required/mr_confirmations/mr_score/mr_stop/mr_target/vwap` (existing fields).
 - Produces: when `result.mr_side` is set, `render_checklist` output contains a `### Mean-reversion candidate (informational)` section plus the fixed prompt paragraph; when `mr_side is None`, output is unchanged (byte-identical default behavior). Later tasks (3, gatekeeper paragraph) rely on the stable header string `### Mean-reversion candidate (informational)`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tests/test_mes_render.py`:
 
@@ -271,12 +271,12 @@ def test_mr_section_tolerates_unpriced_plan():
 
 No extra imports are needed beyond those already in the block.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_render.py -v`
 Expected: FAIL — `AssertionError: 'Mean-reversion' not in ...` for the first three tests; the last test fails on split key (no section).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/mes/render.py`, inside `render_checklist`, between the opening-range `if` block (lines 60-63) and `if result.gate_reasons:` (line 64), insert:
 
@@ -308,12 +308,12 @@ In `tradingagents/mes/render.py`, inside `render_checklist`, between the opening
         )
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_render.py tests/test_mes_prior_session.py tests/test_mes_mean_reversion.py -v`
 Expected: PASS — new tests green, and the existing prior-session render tests stay green (no default-path change).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/render.py tests/test_mes_render.py
@@ -334,7 +334,7 @@ git commit -m "feat(mes-render): informational MR candidate section in render_ch
   - `render_gatekeeper_levels_hint(levels: TradeLevels | None, result) -> str` — structural hint plus the MR block appended after a newline when it exists; `""` when neither exists.
   - The CLI passes `render_gatekeeper_levels_hint(levels_hint, result)` as `trade_levels_hint`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_mes_levels.py` (extend its existing `from tradingagents.mes.levels import (...)` with `render_gatekeeper_levels_hint, render_mr_levels_hint`):
 
@@ -388,12 +388,12 @@ def test_gatekeeper_hint_is_empty_without_levels_or_mr():
 
 The imports must match the module's existing import style (`from tradingagents.mes.levels import ...`).
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_levels.py -v -k mr`
 Expected: FAIL — `ImportError: cannot import name 'render_mr_levels_hint'`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/mes/levels.py`, immediately after `render_trade_levels_hint`, add:
 
@@ -452,12 +452,12 @@ with
                 trade_levels_hint=render_gatekeeper_levels_hint(levels_hint, result),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_levels.py tests/test_mes_cli_trade.py -v`
 Expected: PASS — new hint tests green; existing levels and CLI-trade suites unaffected (the gatekeeper call path is only exercised with `gatekeeper is not None`, so live CLI behavior changes only when an LLM gatekeeper is configured).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/levels.py cli/mes.py tests/test_mes_levels.py
@@ -474,7 +474,7 @@ git commit -m "feat(mes-levels): informational MR block in the gatekeeper levels
 - Consumes: the stable section header `### Mean-reversion candidate (informational)` produced by Task 2's `render_checklist`.
 - Produces: when `checklist_markdown` contains `"Mean-reversion candidate"`, the prompt gains a fixed `**MEAN-REVERSION NOTE**` paragraph; without it, the prompt is unchanged (tests `test_gatekeeper_prompt_*` must stay green).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/test_mes_agents.py` (next to the other gatekeeper prompt tests; reuse `FakeLLM` and `_gonogo()` already defined there):
 
@@ -504,12 +504,12 @@ def test_gatekeeper_prompt_has_no_mr_notice_without_candidate():
     assert "MEAN-REVERSION" not in llm.prompts[0]
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_agents.py -v -k "gatekeeper"`
 Expected: the new MR test FAILS (`'MEAN-REVERSION' not found`); all existing gatekeeper tests stay green.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/agents/mes/gatekeeper_agent.py`, inside `run`, immediately after the block that appends the `trade_levels_hint` section (`if trade_levels_hint.strip():` … ends at line 67) and before `if hypothesis.strip():` (line 69), insert:
 
@@ -529,12 +529,12 @@ reasoning or in `what_would_change_my_mind`; never copy its levels into the
 trade level fields."""
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_agents.py -v`
 Expected: PASS — the new paragraph appears only when the checklist markdown contains the MR section; all existing gatekeeper prompt tests stay green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/agents/mes/gatekeeper_agent.py tests/test_mes_agents.py
@@ -551,7 +551,7 @@ git commit -m "feat(mes-gatekeeper): interpret MR candidates as additive context
 - Consumes: nothing (leaf change).
 - Produces: `MesChecklistConfig.momentum_mode: str = "cross"` (all later tasks read `cfg.momentum_mode`); alias `"MomentumMode" -> "momentum_mode"` in `_TUNER_FIELD_ALIASES` so `from_dict`/`load_mes_config(overrides)`/env (`TRADINGAGENTS_MES_MOMENTUM_MODE`) all resolve it; ablations/`to_dict` round-trip pick it up automatically because it is a dataclass field.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_mes_config.py`:
 
@@ -583,12 +583,12 @@ def test_unknown_momentum_mode_string_round_trips_untouched():
     assert MesChecklistConfig.from_dict({"MomentumMode": "alginment"}).momentum_mode == "alginment"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_config.py -v -k momentum`
 Expected: FAIL with `AttributeError: 'MesChecklistConfig' object has no attribute 'momentum_mode'` (and `TypeError` on `from_dict` round-trip equality before the field exists).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/mes/config.py`:
 
@@ -612,12 +612,12 @@ In `tradingagents/mes/config.py`:
     momentum_mode: str = "cross"
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_config.py tests/test_mes_ablations.py -v`
 Expected: PASS — field exists, alias maps, `from_dict(cfg.to_dict()) == cfg` round-trips (config equality is field-wise, so the new default field round-trips cleanly).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/config.py tests/test_mes_config.py
@@ -634,7 +634,7 @@ git commit -m "feat(mes-config): momentum_mode flag (cross default) with Momentu
 - Consumes: `cfg.momentum_mode: str` (Task 5); `SeriesState` flags `sma/prev_sma/vwap/prev_vwap/laguerre/prev_laguerre` + `*_ready` (existing).
 - Produces: `_momentum(state, cfg, side) -> bool` (unchanged signature) honoring `cfg.momentum_mode`; the momentum item `name`/`threshold` strings label the active mode. Cross mode keeps the exact historic strings `"Momentum (SMA/VWAP cross + Laguerre)"` / `"cross with trend"` (mes-tuner diffing stays stable).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/test_mes_checklist.py` (the file already imports `find_item`, `evaluate`, `make_snapshot`, `make_mes_series`; add `load_mes_config` to its config import if missing):
 
@@ -723,12 +723,12 @@ def test_momentum_item_name_labels_the_active_mode():
     assert cross.name == "Momentum (SMA/VWAP cross + Laguerre)"  # historic, pinned
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_checklist.py -v -k alignment`
 Expected: FAIL — `test_momentum_alignment_passes_a_pullback_without_a_fresh_cross` asserts `passed is True` but gets False (alignment semantics do not exist yet); the item-name test fails on the historic name.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `tradingagents/mes/checklist.py`, replace `_momentum` (lines 137-147) with (note the mode check on **both** side branches — alignment relaxes the cross on either side):
 
@@ -790,12 +790,12 @@ and change the momentum tuple to:
         ),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_checklist.py tests/test_mes_config.py tests/test_mes_ablations.py -v`
 Expected: PASS — new alignment tests green; every existing momentum test (cross behavior, weights, max-score) stays green proving cross-mode byte-parity.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/checklist.py tests/test_mes_checklist.py
@@ -812,7 +812,7 @@ git commit -m "feat(mes-checklist): flag-gated momentum alignment mode (Laguerre
 - Consumes: `Ablation`, `apply_ablation`, `config_delta`, `PLAN_ORDER` (existing registry/tests).
 - Produces: `get_ablation("momentum-alignment")` with `base="checklist"` and `overlay={"momentum_mode": "alignment"}`. The existing registry tests (`test_registry_lists_all_plan_ablations_in_order`, `test_ablation_overlay_changes_exactly_its_declared_fields` parametrized over `PLAN_ORDER`) automatically cover the new entry once `PLAN_ORDER` gains the name — that is why this task updates the test file's `PLAN_ORDER` too.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `tests/test_mes_ablations.py`:
 
@@ -845,12 +845,12 @@ def test_momentum_alignment_overlay_reaches_the_momentum_item():
 
 This file already imports `find_item, make_snapshot, make_spy_series` from `tests.mes_factories`; add `make_mes_series` to that import.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_mes_ablations.py -v`
 Expected: FAIL — `test_registry_lists_all_plan_ablations_in_order` errors with `unknown ablation 'momentum-alignment'` (the registry lacks the entry).
 
-- [ ] **Step 3: Implement the overlay**
+- [x] **Step 3: Implement the overlay**
 
 In `tradingagents/mes/backtest/ablations.py`:
 
@@ -881,12 +881,12 @@ In `tradingagents/mes/backtest/ablations.py`:
 
 3. Add one line to the module docstring's bullet list: ``momentum-alignment`` needs no new toggles beyond ``momentum_mode`` itself.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_ablations.py tests/test_mes_backtest_walker.py tests/test_mes_backtest_tier_table.py -v`
 Expected: PASS — the registry shape test now finds `momentum-alignment` in plan order, `config_delta` equals the single declared field, the no-mutation test passes, and the walker/outcome stamping tests stay green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tradingagents/mes/backtest/ablations.py tests/test_mes_ablations.py
@@ -903,7 +903,7 @@ git commit -m "feat(mes-ablations): named momentum-alignment overlay for walker 
 - Produces: regression proof that the documented opt-in
   `TRADINGAGENTS_MES_ENABLE_MEAN_REVERSION=true` works with **zero code changes**; no new production code in this task.
 
-- [ ] **Step 1: Write the test (expected to pass already)**
+- [x] **Step 1: Write the test (expected to pass already)**
 
 Append to `tests/test_mes_config.py` (pattern matches `test_env_overrides_are_coerced_to_field_type`):
 
@@ -919,12 +919,12 @@ def test_mean_reversion_runtime_opt_in_via_env(monkeypatch):
     assert MesChecklistConfig.from_dict({"EnableMeanReversion": True}).enable_mean_reversion is True
 ```
 
-- [ ] **Step 2: Run tests to verify they pass**
+- [x] **Step 2: Run tests to verify they pass**
 
 Run: `python -m pytest tests/test_mes_config.py -v -k "mean_reversion or MeanReversion or env"`
 Expected: PASS — this task locks the opt-in contract; if it fails, `_coerce`/`load_mes_config` regressed and must be fixed before proceeding.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/test_mes_config.py
@@ -936,17 +936,17 @@ git commit -m "test(mes-config): pin MR runtime opt-in via TRADINGAGENTS_MES_ENA
 **Files:**
 - Modify: `CHANGELOG.md` (Unreleased → Added)
 
-- [ ] **Step 1: Run the full suite**
+- [x] **Step 1: Run the full suite**
 
 Run: `python -m pytest -q`
 Expected: all green, same 2 skips as baseline (1520+ passed; roughly 30 new assertions from Tasks 1-7).
 
-- [ ] **Step 2: Run the targeted MR/momentum surface end-to-end**
+- [x] **Step 2: Run the targeted MR/momentum surface end-to-end**
 
 Run: `python -m pytest tests/test_mes_render.py tests/test_mes_journal.py tests/test_mes_levels.py tests/test_mes_agents.py tests/test_mes_checklist.py tests/test_mes_config.py tests/test_mes_ablations.py tests/test_mes_mean_reversion.py -v`
 Expected: PASS.
 
-- [ ] **Step 3: Update CHANGELOG.md**
+- [x] **Step 3: Update CHANGELOG.md**
 
 Under `## [Unreleased] → ### Added`, add two bullets (Keep-a-Changelog style, matching the existing entries):
 
@@ -965,7 +965,7 @@ Under `## [Unreleased] → ### Added`, add two bullets (Keep-a-Changelog style, 
   the named `momentum-alignment` backtest ablation.
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CHANGELOG.md
