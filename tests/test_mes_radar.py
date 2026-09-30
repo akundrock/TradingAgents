@@ -999,3 +999,130 @@ def test_radar_watch_without_auto_check_writes_no_journal(monkeypatch, tmp_path)
     journal = MesJournal({"mes_journal_dir": str(tmp_path)})
     assert journal.load_day("2026-03-30") == []
 
+
+@pytest.mark.unit
+def test_radar_watch_auto_check_prints_above_live_without_stopping(monkeypatch, tmp_path):
+    """Regression: the auto-check transcript must survive radar repaints.
+
+    The old code stopped the Live, printed the checklist/verdict, then
+    restarted it — the restarted Live's next repaint erased the tail of the
+    just-printed verdict. Now the fire prints through the live console (Rich
+    inserts prints above the live region) and the panel itself carries a
+    persistent ``last check`` summary row.
+    """
+    live_calls: list[str] = []
+    panels: list[str] = []
+
+    class _StubLive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def update(self, renderable, *, refresh=False):
+            live_calls.append("update")
+            panels.append(_render_table_to_text(renderable))
+
+        def stop(self):
+            live_calls.append("stop")
+
+        def start(self):
+            live_calls.append("start")
+
+    monkeypatch.setattr(mes_cli, "Live", lambda *a, **k: _StubLive())
+    result = _invoke_radar_watch(monkeypatch, tmp_path, ticks=2, extra_args=["--auto-check-cooldown", "5"])
+    assert result.exit_code == 0, result.output
+    # The fire printed the full check above the live region, and the Live was
+    # never stopped/restarted around it.
+    assert "Deterministic Verdict" in result.output
+    assert "stop" not in live_calls
+    assert "start" not in live_calls
+    # Tick 1 fired once; tick 2 repainted without erasing the summary.
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    records = [e for e in journal.load_day("2026-03-30") if e["kind"] == "check"]
+    assert len(records) == 1
+    assert "last check:" in panels[-1]  # summary row lives in the panel itself
+
+
+@pytest.mark.unit
+def test_radar_watch_panel_summary_persists_after_repaint(monkeypatch, tmp_path):
+    """The tick-2 repaint (no fire) still shows the tick-1 ``last check`` row."""
+    panels: list[str] = []
+    live_calls: list[str] = []
+
+    class _StubLive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def update(self, renderable, *, refresh=False):
+            live_calls.append("update")
+            panels.append(_render_table_to_text(renderable))
+
+        def stop(self):
+            live_calls.append("stop")
+
+        def start(self):
+            live_calls.append("start")
+
+    monkeypatch.setattr(mes_cli, "Live", lambda *a, **k: _StubLive())
+    result = _invoke_radar_watch(monkeypatch, tmp_path, ticks=3, extra_args=["--auto-check-cooldown", "5"])
+    assert result.exit_code == 0, result.output
+    assert len(panels) >= 3  # tick-1 panel, post-fire panel, tick-2/tick-3 repaints
+    post_fire = panels[1]
+    assert "last check:" in post_fire
+    assert "TRADEABLE" in post_fire  # deterministic verdict for the READY fixture
+    assert "last check:" in panels[-1]  # still present after later repaints
+
+
+# ---------------------------------------------------------------------------
+# _check_summary_line: the radar panel's last-check summary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_check_summary_line_deterministic_tradeable():
+    line = mes_cli._check_summary_line("", _make_result(), DEFAULT_AS_OF)
+    assert "TRADEABLE" in line
+    assert "7678.75" in line
+    assert "11:00" in line
+
+
+@pytest.mark.unit
+def test_check_summary_line_stand_down_when_not_tradeable():
+    # gates_ok=False -> result.tradeable is False (checklist.py:81-91)
+    result = _make_result(gates_ok=False, gate_reasons=["outside RTH"])
+    text = mes_cli._check_summary_line("", result, DEFAULT_AS_OF)
+    assert "STAND DOWN" in text
+    assert "TRADEABLE" not in text
+
+
+@pytest.mark.unit
+def test_check_summary_line_failed_checklist_never_shows_take():
+    """A Take verdict on an untradeable checklist degrades to Stand Down."""
+    verdict = "## Checklist\n**Verdict**: **Take**"
+    result = _make_result(gates_ok=False, gate_reasons=["outside RTH"])
+    line = mes_cli._check_summary_line(verdict, result, DEFAULT_AS_OF)
+    assert "Stand Down" in line
+
+
+@pytest.mark.unit
+def test_radar_panel_renders_last_check_row():
+    snap = _make_snapshot()
+    result = _make_result()
+    report = build_proximity(snap, result)
+    text = _render_table_to_text(
+        mes_cli._render_radar(
+            report, snap.as_of,
+            last_check="[green]TRADEABLE[/green]  long @ 7678.75  [dim]11:00[/dim]",
+        )
+    )
+    assert "last check:" in text
+    assert "TRADEABLE" in text
+    # No row when nothing has fired yet.
+    empty = _render_table_to_text(mes_cli._render_radar(report, snap.as_of))
+    assert "last check:" not in empty
+

@@ -308,6 +308,21 @@ def _verdict_headline(verdict_markdown: str, tradeable: bool) -> str:
     return headline
 
 
+def _check_summary_line(verdict: str | None, result: ChecklistResult, stamp: datetime) -> str:
+    """One-line summary of a fired check for the radar panel's ``last check`` row.
+
+    Keeps the same headline rules as the verdict panel (deterministic fallback
+    when no LLM verdict ran, failed checklist can never show Take).
+    """
+    if verdict:
+        headline = _verdict_headline(verdict, result.tradeable)
+    else:
+        headline = "TRADEABLE" if result.tradeable else "STAND DOWN"
+    style = _VERDICT_STYLE.get(headline, "bold white").split()[-1]
+    price_txt = f"{result.last_price:.2f}" if isinstance(result.last_price, float) else str(result.last_price)
+    return f"[{style}]{headline}[/{style}]  {result.side} @ {price_txt}  [dim]{stamp:%H:%M}[/dim]"
+
+
 def _run_check_once(
     *,
     snapshot: MesSnapshot,
@@ -681,13 +696,16 @@ def _level_row(ld: LevelDistance) -> Text:
 
 
 def _render_radar(
-    report: ProximityReport, as_of: datetime, rule_hits: list[RuleHit] | None = None
+    report: ProximityReport, as_of: datetime, rule_hits: list[RuleHit] | None = None,
+    last_check: str | None = None,
 ) -> Table:
     """Build a compact Rich Table displaying the proximity report.
 
     ``rule_hits`` are the currently-open standing-rule triggers; each renders
     as a persistent two-row banner directly under the state line until the
     trader runs `mes check` (any journal check) or `mes skip`.
+    ``last_check`` is the headline of the most recent auto-fired check; it
+    survives every repaint because it is part of the panel itself.
     """
     state_style = _STATE_STYLE[report.state]
     state_label = _STATE_LABEL[report.state]
@@ -721,6 +739,10 @@ def _render_radar(
             f"or [bold]`mes skip --rule {hit.rule_id} --reason …`[/bold]"
             + (f"  [dim]({hit.note})[/dim]" if hit.note else "")
         ))
+
+    # ---- Last auto-check summary (persists across repaints) ----
+    if last_check:
+        outer.add_row(Text.from_markup(f"  [dim]last check:[/dim] {last_check}"))
 
     # ---- Internals status ----
     if report.internals_status is not None:
@@ -854,13 +876,18 @@ def radar(
         report = build_proximity(snapshot, result, proximity_band=within)
         return snapshot, result, report
 
-    def _fire_auto_check(snapshot: MesSnapshot, result: ChecklistResult, stamp: datetime) -> None:
-        """Full check path on the radar's in-hand snapshot (same bar, zero skew)."""
+    def _fire_auto_check(snapshot: MesSnapshot, result: ChecklistResult, stamp: datetime) -> str | None:
+        """Full check path on the radar's in-hand snapshot (same bar, zero skew).
+
+        Prints the checklist + verdict through the live console (Rich inserts it
+        above the running radar) and returns the one-line summary for the
+        panel's ``last check`` row, or ``None`` when auto-check is disabled.
+        """
         if journal is None:
-            return
+            return None
         frame = journal.active_frame(stamp.strftime("%Y-%m-%d")) or {}
         hypothesis = str(frame.get("new_frame") or frame.get("hypothesis", ""))
-        _run_check_once(
+        _, _, verdict = _run_check_once(
             snapshot=snapshot,
             result=result,
             cfg=cfg,
@@ -873,6 +900,7 @@ def radar(
             as_json=False,
             no_log=no_log,
         )
+        return _check_summary_line(verdict, result, stamp)
 
     if as_json:
         stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
@@ -901,6 +929,7 @@ def radar(
     # ---- Watch loop with Rich Live ----
     prev_state: SetupState | None = None
     last_fired: datetime | None = None
+    last_check: str | None = None
     with Live(console=console, refresh_per_second=1, screen=False) as live:
         while True:
             stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
@@ -912,18 +941,25 @@ def radar(
                         snapshot, result,
                         journal.active_standing_rules(stamp.strftime("%Y-%m-%d")),
                     )
-                panel = Panel(_render_radar(report, stamp, rule_hits=rule_hits),
+                panel = Panel(_render_radar(report, stamp, rule_hits=rule_hits, last_check=last_check),
                               title="MES Radar", border_style="blue")
                 live.update(panel)
                 if alert and report.state in _ALERT_STATES and report.state != prev_state:
                     _fire_alert(f"MES setup: {report.state.name.lower().replace('_', ' ')}")
                 if should_auto_check(report.state, prev_state, last_fired, stamp, cooldown_seconds):
-                    live.stop()
-                    try:
-                        _fire_auto_check(snapshot, result, stamp)
-                    finally:
-                        live.start()
+                    # Print while the Live runs: Rich routes console prints above
+                    # the live region, so the checklist/verdict stay in scrollback
+                    # and later repaints only redraw the radar below them.
+                    # (stop/print/start would make the next repaint erase the tail
+                    # of the just-printed verdict.)
+                    summary = _fire_auto_check(snapshot, result, stamp)
+                    if summary:
+                        last_check = summary
                     last_fired = stamp
+                    live.update(
+                        Panel(_render_radar(report, stamp, rule_hits=rule_hits, last_check=last_check),
+                              title="MES Radar", border_style="blue")
+                    )
                 prev_state = report.state
             except Exception as exc:
                 live.update(Panel(f"[red]Snapshot error:[/red] {exc}", border_style="red"))
@@ -949,9 +985,15 @@ def _copilot_tick(
     alert: bool, no_log: bool,
     auto_check: bool = False, auto_check_cooldown: float = 5.0,
     prev_state=None, last_fired=None, last_manager=None,
+    last_check: str | None = None,
     seen: set[str] | None = None, live=None,
-) -> tuple[str, object, object, object | None, datetime | None, datetime | None]:
-    """One copilot tick. Returns (mode, snapshot, payload, prev_state, last_fired, last_manager)."""
+) -> tuple[str, object, object, object | None, datetime | None, datetime | None, str | None]:
+    """One copilot tick.
+
+    Returns (mode, snapshot, payload, prev_state, last_fired, last_manager,
+    last_check) — ``last_check`` is the one-line summary of the most recent
+    auto-fired check for the radar panel's persistent summary row.
+    """
     if seen is None:
         seen = set()
     stamp_date = stamp.strftime("%Y-%m-%d")
@@ -986,11 +1028,11 @@ def _copilot_tick(
         open_ids = {str(fire.get("rule_id")) for fire in tally["open"]}
         panel_hits = [hit for hit in rule_hits if hit.rule_id in open_ids or hit in new_hits]
         if live is not None:
-            live.update(Panel(_render_radar(report, stamp, rule_hits=panel_hits),
+            live.update(Panel(_render_radar(report, stamp, rule_hits=panel_hits, last_check=last_check),
                               title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
                               border_style="blue"))
         else:
-            console.print(Panel(_render_radar(report, stamp, rule_hits=panel_hits),
+            console.print(Panel(_render_radar(report, stamp, rule_hits=panel_hits, last_check=last_check),
                                 title="MES Radar", border_style="blue"))
         for rule_id in sorted(open_ids | {hit.rule_id for hit in new_hits}):
             console.print(
@@ -1010,20 +1052,26 @@ def _copilot_tick(
             if entered or cooled:
                 frame = journal.active_frame(stamp_date) or {}
                 hypothesis = str(frame.get("new_frame") or frame.get("hypothesis", ""))
-                if live is not None:
-                    live.stop()
-                try:
-                    _run_check_once(          # same call shape as radar's _fire_auto_check (cli/mes.py:746)
-                        snapshot=snapshot, result=result, cfg=cfg, journal=journal,
-                        gatekeeper=gatekeeper, hypothesis=hypothesis,
-                        past_context=past_context, risk_dollars=cfg.default_risk_dollars,
-                        stop_points=None, as_json=False, no_log=no_log,
-                    )
-                finally:
-                    if live is not None:
-                        live.start()
+                # Print while the Live runs: Rich routes console prints above
+                # the live region, so the checklist/verdict stay in scrollback
+                # and later repaints only redraw the radar below them.
+                # (stop/print/start would make the next repaint erase the tail
+                # of the just-printed verdict.)
+                _, _, verdict = _run_check_once(          # same call shape as radar's _fire_auto_check
+                    snapshot=snapshot, result=result, cfg=cfg, journal=journal,
+                    gatekeeper=gatekeeper, hypothesis=hypothesis,
+                    past_context=past_context, risk_dollars=cfg.default_risk_dollars,
+                    stop_points=None, as_json=False, no_log=no_log,
+                )
+                last_check = _check_summary_line(verdict, result, stamp)
                 last_fired = stamp
-        return "flat", snapshot, report, "flat", last_fired, last_manager
+                if live is not None:  # surface the summary in the panel immediately
+                    live.update(Panel(
+                        _render_radar(report, stamp, rule_hits=panel_hits, last_check=last_check),
+                        title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
+                        border_style="blue",
+                    ))
+        return "flat", snapshot, report, "flat", last_fired, last_manager, last_check
     updated, mgmt = evaluate_management(snapshot, result, trade, cfg)
     last_new_event: str | None = None
     for event in mgmt.events:  # persist each ladder event exactly once
@@ -1076,7 +1124,7 @@ def _copilot_tick(
         live.update(Panel(_render_mgmt_panel(updated, mgmt, snapshot.mes.close),
                           title=f"MES Copilot — managing   {stamp:%H:%M:%S}",
                           border_style="green"))
-    return "managing", snapshot, (updated, mgmt), "managing", last_fired, last_manager
+    return "managing", snapshot, (updated, mgmt), "managing", last_fired, last_manager, last_check
 
 
 @mes_app.command("copilot")
@@ -1148,7 +1196,7 @@ def copilot(
     last_manager = None
     if no_watch or json_output:  # one-shot branch (Task 1 behavior)
         stamp = _parse_as_of(as_of, cfg, date=date) if as_of else _market_now(cfg)
-        mode, snapshot, payload, _, _, _ = _copilot_tick(
+        mode, snapshot, payload, _, _, _, _ = _copilot_tick(
             stamp, cfg, journal, side, within, mes_csv, spy_csv,
             gatekeeper=gatekeeper, past_context=past_context,
             manager=manager, manager_every=manager_every,
@@ -1172,18 +1220,20 @@ def copilot(
         # banner); printing here again would duplicate it.
         return
     # ---- Watch loop with Rich Live ----
+    last_check: str | None = None
     with Live(console=console, refresh_per_second=1, screen=False) as live:
         while True:
             stamp = _market_now(cfg)
             try:
-                mode, snapshot, payload, prev_state, last_fired, last_manager = _copilot_tick(
+                mode, snapshot, payload, prev_state, last_fired, last_manager, last_check = _copilot_tick(
                     stamp, cfg, journal, side, within, mes_csv, spy_csv,
                     gatekeeper=gatekeeper, past_context=past_context,
                     manager=manager, manager_every=manager_every,
                     alert=alert, no_log=no_log,
                     auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
                     prev_state=prev_state, last_fired=last_fired,
-                    last_manager=last_manager, seen=seen, live=live,
+                    last_manager=last_manager, last_check=last_check,
+                    seen=seen, live=live,
                 )
             except Exception as exc:
                 live.update(Panel(f"[red]Tick error:[/red] {exc}", border_style="red"))

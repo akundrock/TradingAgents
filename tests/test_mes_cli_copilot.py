@@ -166,7 +166,7 @@ def test_watch_loop_exits_cleanly_on_interrupt(tmp_path, patched_snapshot, monke
 def test_flat_auto_check_fires_once_per_cooldown(tmp_path, patched_snapshot, capsys):
     journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
     t0 = datetime(2026, 3, 30, 11, 0)
-    mode, _, _, _, last_fired, _ = _tick(journal, t0, auto_check=True)
+    mode, _, _, _, last_fired, _, _ = _tick(journal, t0, auto_check=True)
     assert mode == "flat"
     assert capsys.readouterr().out.count("Deterministic Verdict") == 1  # first tick fires
     _tick(journal, t0 + timedelta(minutes=1), prev_state="flat", last_fired=t0,
@@ -192,7 +192,7 @@ def test_manager_advice_throttled_by_interval(tmp_path, patched_snapshot, capsys
     _tick(journal, t0, manager=stub_manager, manager_every=5.0)
     assert len(calls) == 1 and calls[0]["current_price"] is not None
     # Tick 2 one minute later: 60s < 300s -> throttled.
-    _, _, _, _, _, last_manager = _tick(
+    _, _, _, _, _, last_manager, _ = _tick(
         journal, t0 + timedelta(minutes=1),
         manager=stub_manager, manager_every=5.0, last_manager=t0,
     )
@@ -259,4 +259,94 @@ def test_radar_panel_renders_open_rule_banner():
     )
     assert "LOG A CHECK NOW" in text
     assert "mes skip" in text
+
+
+# ---- Auto-check repaint safety (core fix) ----
+
+
+class _StubLive:
+    """Live stand-in recording every call; never touches a real console."""
+
+    def __init__(self, *args, **kwargs):
+        self.calls: list[str] = []
+        self.panels: list = []
+        self.console = kwargs.get("console")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def update(self, renderable, *, refresh=False):
+        self.calls.append("update")
+        self.panels.append(renderable)
+
+    def stop(self):
+        self.calls.append("stop")
+
+    def start(self):
+        self.calls.append("start")
+
+
+@pytest.mark.unit
+def test_copilot_auto_check_prints_without_stopping_live(tmp_path, patched_snapshot, capsys):
+    """The flat-tick auto-check must not stop/restart the Live.
+
+    Printing through the live console inserts the checklist/verdict above the
+    live region (same mechanism as the standing-rule banner), so the next
+    panel repaint can never erase the verdict tail.
+    """
+    from tests.test_mes_radar import _render_table_to_text
+
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    t0 = datetime(2026, 3, 30, 11, 0)
+    live = _StubLive()
+    mode, _, _, _, last_fired, _, last_check = _tick(journal, t0, auto_check=True, live=live)
+    assert mode == "flat"
+    assert capsys.readouterr().out.count("Deterministic Verdict") == 1
+    assert "stop" not in live.calls
+    assert "start" not in live.calls
+    assert last_fired == t0
+    # The tick returns the summary and surfaces it in the panel immediately.
+    assert last_check is not None
+    assert "STAND DOWN" in last_check  # flat factory snapshot is not tradeable
+    assert "last check:" in _render_table_to_text(live.panels[-1])
+
+
+@pytest.mark.unit
+def test_copilot_auto_check_prints_through_live_console(tmp_path, patched_snapshot, monkeypatch):
+    """The fire prints via the same console the Live was constructed on —
+    Rich inserts those prints above the live region (never overwrites it)."""
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    t0 = datetime(2026, 3, 30, 11, 0)
+    captured: dict = {}
+
+    def stub_check_once(**kwargs):
+        captured["console"] = mes_cli.console
+        return {}, "note", ""
+
+    monkeypatch.setattr(mes_cli, "_run_check_once", stub_check_once)
+    live = _StubLive(console=mes_cli.console)  # mirrors Live(console=console, ...)
+    _tick(journal, t0, auto_check=True, live=live)
+    assert captured["console"] is live.console  # check output shares the live console
+
+
+@pytest.mark.unit
+def test_copilot_last_check_summary_persists_across_ticks(tmp_path, patched_snapshot, capsys):
+    """A later flat tick (no fire) still renders the previous check summary."""
+    from tests.test_mes_radar import _render_table_to_text
+
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    t0 = datetime(2026, 3, 30, 11, 0)
+    live = _StubLive()
+    _, _, _, _, _, _, last_check = _tick(journal, t0, auto_check=True, live=live)
+    capsys.readouterr()
+    # Next tick, cooldown active: repaint only — the row must persist.
+    _tick(journal, t0 + timedelta(minutes=1), prev_state="flat", last_fired=t0,
+          auto_check=True, live=live, last_check=last_check)
+    out = capsys.readouterr().out
+    assert "Deterministic Verdict" not in out  # cooldown: no second fire
+    assert live.panels, "live panel was updated"
+    assert "last check:" in _render_table_to_text(live.panels[-1])
 
