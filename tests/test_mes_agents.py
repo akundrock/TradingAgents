@@ -704,11 +704,13 @@ def test_review_agent_prompt_lists_only_schema_valid_levels():
     llm = FakeLLM()
     create_mes_review_agent(llm)(hypothesis="h", checks_summary="c", outcome_summary="o")
     prompt = llm.prompts[0]
-    advertised = prompt.split("Rules must be retests of one of:")[1].split(".")[0]
+    # Prompt lists levels after "retest of " inside the level_retest bullet.
+    advertised = prompt.split("retest of ")[1].split(" (requirement")[0]
     levels = {token.strip() for token in advertised.replace("\n", " ").split(",")}
     assert levels
     for level in levels:
         RuleLevel(level)  # raises ValidationError for a level the schema rejects
+    assert '"invalidation"' in prompt
 
 
 @pytest.mark.unit

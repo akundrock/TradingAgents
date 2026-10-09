@@ -10,6 +10,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **MES process fidelity** (plan `2026-10-09-mes-process-fidelity`):
+  standing-rules hygiene (`RULES EXPIRED / NONE` + `mes rules --blank`),
+  Option C `invalidation` trigger with **RE-READ REQUIRED** / flip-or-skip
+  resolution (blocks quiet auto-check while open), and thin Option D
+  structured morning frame (`day_type` / `bias` / `machine_clauses` seeding
+  session rules). No auto-entry.
 - **Target 1R floor in the trade-level hint** (`target_min_r_multiple`,
   default 1.0): `suggest_trade_levels` skips structural levels closer than
   1R beyond entry and falls back to entry ± 1R (mirroring the stop's ATR

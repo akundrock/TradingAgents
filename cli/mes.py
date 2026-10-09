@@ -436,24 +436,60 @@ def premarket(
     if no_llm:
         return
 
+    structured: list = []
+
+    def _capture_hypothesis(model) -> None:
+        structured.append(model)
+
     try:
         agent = create_mes_morning_agent(_make_llm(config))
-        hypothesis = agent(
-            market_context=market_context,
-            past_context=_past_context(config),
-            rth_started=snapshot.rth_started,
-        )
+        # Prefer on_model capture when the agent supports it (structured path).
+        try:
+            hypothesis = agent(
+                market_context=market_context,
+                past_context=_past_context(config),
+                rth_started=snapshot.rth_started,
+                on_hypothesis=_capture_hypothesis,
+            )
+        except TypeError:
+            hypothesis = agent(
+                market_context=market_context,
+                past_context=_past_context(config),
+                rth_started=snapshot.rth_started,
+            )
     except Exception as exc:
         console.print(f"[red]Hypothesis generation failed:[/red] {exc}")
         raise typer.Exit(code=1)
 
     console.print(Panel(Markdown(hypothesis), title="Morning Hypothesis", border_style="green"))
 
+    day_type = ""
+    bias = ""
+    machine_clauses: list[dict] = []
+    if structured:
+        model = structured[0]
+        day_type = getattr(getattr(model, "day_type", None), "value", "") or ""
+        bias = getattr(getattr(model, "bias", None), "value", "") or ""
+        for index, clause in enumerate(getattr(model, "machine_clauses", []) or [], start=1):
+            dumped = clause.model_dump() if hasattr(clause, "model_dump") else dict(clause)
+            if not dumped.get("id"):
+                dumped["id"] = f"inv_{index}"
+            machine_clauses.append(dumped)
+        if day_type or bias:
+            console.print(
+                f"[dim]Frame:[/dim] day_type=[bold]{day_type or '—'}[/bold]  "
+                f"bias=[bold]{bias or '—'}[/bold]  "
+                f"clauses=[bold]{len(machine_clauses)}[/bold]"
+            )
+
     journal = MesJournal(config)
     journal.save_hypothesis(
         date=snapshot.session_date,
         hypothesis_markdown=hypothesis,
         market_context=market_context,
+        day_type=day_type,
+        bias=bias,
+        machine_clauses=machine_clauses or None,
     )
     console.print(f"[dim]Saved to {journal.directory / (snapshot.session_date + '.jsonl')}[/dim]")
 
@@ -602,6 +638,31 @@ def review(
         return
 
     hypothesis = (hypothesis_record or {}).get("hypothesis", "No hypothesis was recorded this morning.")
+    # Thin Option D: surface structured frame fields for review grading.
+    structured_bits = []
+    if hypothesis_record:
+        if hypothesis_record.get("day_type") or hypothesis_record.get("bias"):
+            structured_bits.append(
+                f"day_type={hypothesis_record.get('day_type') or '—'}; "
+                f"bias={hypothesis_record.get('bias') or '—'}"
+            )
+        clauses = hypothesis_record.get("machine_clauses") or []
+        if clauses:
+            clause_lines = []
+            for clause in clauses:
+                side = clause.get("break_side")
+                clause_lines.append(
+                    f"{clause.get('id') or '?'}:"
+                    f"{clause.get('kind')}/{clause.get('level')}"
+                    + (f" break {side}" if side else "")
+                )
+            structured_bits.append("clauses=" + "; ".join(clause_lines))
+    if structured_bits:
+        hypothesis = (
+            hypothesis
+            + "\n\n**Structured frame (machine):** "
+            + " | ".join(structured_bits)
+        )
     emitted_rules: list = []
 
     def _capture_review(review) -> None:
@@ -624,23 +685,35 @@ def review(
 
     console.print(Panel(Markdown(review_markdown), title="Session Review", border_style="green"))
 
-    if emitted_rules and emitted_rules[0].standing_rules:
+    if emitted_rules:
         next_session = (
             datetime.strptime(session_date, "%Y-%m-%d").date() + timedelta(days=1)
         )
         while next_session.weekday() >= 5:  # Sat/Sun — holidays accepted (extra day of nagging is harmless)
             next_session += timedelta(days=1)
-        saved_rules = []
-        for rule in emitted_rules[0].standing_rules:
-            rule_dict = rule.model_dump()
-            if not rule_dict.get("expires_on"):
-                rule_dict["expires_on"] = next_session.isoformat()
-            saved_rules.append(rule_dict)
-        journal.save_standing_rules(saved_rules, reviewed_on=session_date)
-        console.print(
-            f"[green]{len(saved_rules)} standing rule(s) saved for the next session "
-            f"(expire {next_session.isoformat()}).[/green]"
-        )
+        prescribed = emitted_rules[0].standing_rules
+        if prescribed:
+            saved_rules = []
+            for rule in prescribed:
+                rule_dict = rule.model_dump()
+                if not rule_dict.get("expires_on"):
+                    rule_dict["expires_on"] = next_session.isoformat()
+                saved_rules.append(rule_dict)
+            journal.save_standing_rules(saved_rules, reviewed_on=session_date)
+            console.print(
+                f"[green]{len(saved_rules)} standing rule(s) saved for the next session "
+                f"(expire {next_session.isoformat()}).[/green]"
+            )
+        else:
+            # Empty prescription supersedes prior rules; next session is not ready
+            # until an explicit blank-day ack (or a later review that emits rules).
+            journal.save_standing_rules([], reviewed_on=session_date, blank_day_ack=False)
+            console.print(
+                "[bold yellow]No standing rules prescribed.[/bold yellow] "
+                "Next session is [bold]NOT READY[/bold] until "
+                "[bold]`mes rules blank --reason \"…\"`[/bold] "
+                "(or a review that emits machine-checkable rules)."
+            )
 
     if no_memory:
         return
@@ -731,14 +804,24 @@ def _render_radar(
 
     # ---- Standing-rule banner (directly under the state, before internals) ----
     for hit in rule_hits or []:
-        outer.add_row(Text.from_markup(
-            f"[bold yellow]STANDING RULE — {hit.level} retest (±{hit.tolerance:g} pts)[/bold yellow]"
-        ))
-        outer.add_row(Text.from_markup(
-            "[bold yellow]LOG A CHECK NOW[/bold yellow] — run [bold]`mes check`[/bold] "
-            f"or [bold]`mes skip --rule {hit.rule_id} --reason …`[/bold]"
-            + (f"  [dim]({hit.note})[/dim]" if hit.note else "")
-        ))
+        if hit.kind == "invalidation":
+            outer.add_row(Text.from_markup(
+                f"[bold red]INVALIDATION — {hit.level} (±{hit.tolerance:g} pts)[/bold red]"
+            ))
+            outer.add_row(Text.from_markup(
+                "[bold red]RE-READ REQUIRED[/bold red] — run [bold]`mes flip --reason …`[/bold] "
+                f"or [bold]`mes skip --rule {hit.rule_id} --reason …`[/bold]"
+                + (f"  [dim]({hit.note})[/dim]" if hit.note else "")
+            ))
+        else:
+            outer.add_row(Text.from_markup(
+                f"[bold yellow]STANDING RULE — {hit.level} retest (±{hit.tolerance:g} pts)[/bold yellow]"
+            ))
+            outer.add_row(Text.from_markup(
+                "[bold yellow]LOG A CHECK NOW[/bold yellow] — run [bold]`mes check`[/bold] "
+                f"or [bold]`mes skip --rule {hit.rule_id} --reason …`[/bold]"
+                + (f"  [dim]({hit.note})[/dim]" if hit.note else "")
+            ))
 
     # ---- Last auto-check summary (persists across repaints) ----
     if last_check:
@@ -939,7 +1022,7 @@ def radar(
                 if journal is not None:
                     rule_hits = evaluate_standing_rules(
                         snapshot, result,
-                        journal.active_standing_rules(stamp.strftime("%Y-%m-%d")),
+                        journal.rules_for_session(stamp.strftime("%Y-%m-%d")),
                     )
                 panel = Panel(_render_radar(report, stamp, rule_hits=rule_hits, last_check=last_check),
                               title="MES Radar", border_style="blue")
@@ -1002,9 +1085,21 @@ def _copilot_tick(
     result = evaluate(snapshot, trade.side if trade is not None else side)
     if trade is None:
         report = build_proximity(snapshot, result, proximity_band=within)
-        # Standing rules: evaluate, fire once per rule per session (the journal's
-        # rule_fired records are the dedup keys, so a restart cannot re-fire).
-        rules = journal.active_standing_rules(stamp_date)
+        # Process-fidelity hygiene: never silently start a "no process" day.
+        readiness = journal.standing_rules_readiness(stamp_date)
+        if not readiness["ready"]:
+            console.print(f"[bold red]{readiness['banner']}[/bold red]")
+            if alert:
+                _fire_alert("MES rules expired / none")
+        frame = journal.active_frame(stamp_date) or {}
+        if frame.get("day_type") or frame.get("bias"):
+            console.print(
+                f"[dim]Frame[/dim]  day_type=[bold]{frame.get('day_type') or '—'}[/bold]  "
+                f"bias=[bold]{frame.get('bias') or '—'}[/bold]"
+            )
+        # Standing rules + morning-frame invalidation clauses: evaluate, fire
+        # once per rule per session (journal rule_fired records are dedup keys).
+        rules = journal.rules_for_session(stamp_date)
         rule_hits = evaluate_standing_rules(snapshot, result, rules)
         fired_ids = {str(fire.get("rule_id")) for fire in journal.load_rule_fires(stamp_date)}
         new_hits = [hit for hit in rule_hits if hit.rule_id not in fired_ids]
@@ -1014,19 +1109,37 @@ def _copilot_tick(
                     stamp_date, rule_id=hit.rule_id, level=hit.level,
                     confirmation=hit.confirmation, tolerance=hit.tolerance,
                     last_price=snapshot.mes.close, distance=hit.distance, as_of=stamp,
+                    trigger_kind=hit.kind,
                 )
-            if alert:
-                _fire_alert(f"Standing rule triggered: {describe_level(hit.rule_id)}")
-            console.print(
-                f"[bold yellow]STANDING RULE triggered — {hit.level} retest "
-                f"({hit.distance:+.2f} pts):[/bold yellow] run [bold]`mes check`[/bold] "
-                f"or [bold]`mes skip --rule {hit.rule_id} --reason \"<why>\"[/bold]"
-            )
+            if hit.kind == "invalidation":
+                if alert:
+                    _fire_alert(f"Invalidation: {hit.level} — re-read required")
+                console.print(
+                    f"[bold red]INVALIDATION triggered — {hit.level} "
+                    f"({hit.distance:+.2f} pts):[/bold red] "
+                    f"[bold]RE-READ REQUIRED[/bold] — run [bold]`mes flip --reason \"…\"`[/bold] "
+                    f"or [bold]`mes skip --rule {hit.rule_id} --reason \"<why no flip>\"`[/bold]"
+                )
+            else:
+                if alert:
+                    _fire_alert(f"Standing rule triggered: {hit.level}")
+                console.print(
+                    f"[bold yellow]STANDING RULE triggered — {hit.level} retest "
+                    f"({hit.distance:+.2f} pts):[/bold yellow] run [bold]`mes check`[/bold] "
+                    f"or [bold]`mes skip --rule {hit.rule_id} --reason \"<why>\"[/bold]"
+                )
         # Fires past the 10-min grace already count as MISSED and drop off the
         # banner; the review tally records the failure.
         tally = journal.rule_compliance(stamp_date, resolve_as_of=stamp)
-        open_ids = {str(fire.get("rule_id")) for fire in tally["open"]}
+        open_fires = tally["open"]
+        open_ids = {str(fire.get("rule_id")) for fire in open_fires}
+        open_by_id = {str(fire.get("rule_id")): fire for fire in open_fires}
         panel_hits = [hit for hit in rule_hits if hit.rule_id in open_ids or hit in new_hits]
+        open_invalidation = any(
+            str(fire.get("trigger_kind") or "") == "invalidation"
+            or str(fire.get("rule_id", "")).startswith("inv_")
+            for fire in open_fires
+        ) or any(hit.kind == "invalidation" for hit in new_hits)
         if live is not None:
             live.update(Panel(_render_radar(report, stamp, rule_hits=panel_hits, last_check=last_check),
                               title=f"MES Copilot — radar (flat)   {stamp:%H:%M:%S}",
@@ -1035,22 +1148,41 @@ def _copilot_tick(
             console.print(Panel(_render_radar(report, stamp, rule_hits=panel_hits, last_check=last_check),
                                 title="MES Radar", border_style="blue"))
         for rule_id in sorted(open_ids | {hit.rule_id for hit in new_hits}):
-            console.print(
-                f"[bold yellow]LOG A CHECK NOW[/bold yellow] — {describe_level(rule_id)} "
-                f"retest still open: [bold]`mes check`[/bold] or "
-                f"[bold]`mes skip --rule {rule_id} --reason \"<why>\"`[/bold]"
-            )
+            fire = open_by_id.get(rule_id) or {}
+            kind = str(fire.get("trigger_kind") or "")
+            if not kind:
+                kind = next((h.kind for h in new_hits if h.rule_id == rule_id), "level_retest")
+            label = str(fire.get("level") or next(
+                (h.level for h in new_hits if h.rule_id == rule_id), rule_id,
+            ))
+            if kind == "invalidation":
+                console.print(
+                    f"[bold red]RE-READ REQUIRED[/bold red] — {label} invalidation still open: "
+                    f"[bold]`mes flip --reason \"…\"`[/bold] or "
+                    f"[bold]`mes skip --rule {rule_id} --reason \"<why no flip>\"`[/bold]"
+                )
+            else:
+                console.print(
+                    f"[bold yellow]LOG A CHECK NOW[/bold yellow] — {label} "
+                    f"retest still open: [bold]`mes check`[/bold] or "
+                    f"[bold]`mes skip --rule {rule_id} --reason \"<why>\"`[/bold]"
+                )
         if tally["missed"]:
             console.print(f"[bold red]MISSED CHECKS TODAY: {tally['missed']}[/bold red]")
+        # Quiet-copilot block: open invalidation forces flip/skip before auto-check.
+        if open_invalidation:
+            console.print(
+                "[bold red]Copilot not quiet — invalidation open; "
+                "acknowledge with `mes flip` or `mes skip` before auto-check resumes.[/bold red]"
+            )
         # Radar's three rules (should_auto_check, radar.py:289-308) with the
         # eligibility state swapped: flat instead of SetupState.READY.
-        if auto_check:
+        if auto_check and not open_invalidation:
             entered = prev_state != "flat"
             cooled = last_fired is None or (
                 (stamp - last_fired).total_seconds() >= auto_check_cooldown * 60
             )
             if entered or cooled:
-                frame = journal.active_frame(stamp_date) or {}
                 hypothesis = str(frame.get("new_frame") or frame.get("hypothesis", ""))
                 # Print while the Live runs: Rich routes console prints above
                 # the live region, so the checklist/verdict stay in scrollback
@@ -1244,6 +1376,47 @@ def copilot(
     console.print("[dim]Copilot stopped.[/dim]")
 
 
+@mes_app.command("rules")
+def rules_cmd(
+    blank: bool = typer.Option(
+        False, "--blank", help="Acknowledge a no-rules / blank-day session (process ready).",
+    ),
+    reason: str = typer.Option(
+        "", "--reason", help="Why there are no machine-checkable rules (required with --blank).",
+    ),
+    date: str | None = typer.Option(None, "--date", help="Reviewed-on date stamp (defaults to today)."),
+    journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
+):
+    """Standing-rules hygiene: status, or blank-day acknowledgement.
+
+    After a review that prescribed no rules, the next session stays NOT READY
+    until ``mes rules --blank --reason …`` (or a later review that emits rules).
+    """
+    cfg = load_mes_config()
+    journal = _trade_journal(cfg, journal_dir)
+    session_date = date or _market_now(cfg).strftime("%Y-%m-%d")
+    if blank:
+        if not reason.strip():
+            console.print("[red]--reason is required with --blank.[/red]")
+            raise typer.Exit(code=1)
+        journal.ack_blank_standing_rules(reviewed_on=session_date, reason=reason.strip())
+        console.print(
+            f"[green]Blank-day rules ack saved for {session_date}.[/green] "
+            "Next session is process-ready (no machine-checkable rules)."
+        )
+        return
+    readiness = journal.standing_rules_readiness(session_date)
+    style = "green" if readiness["ready"] else "red"
+    console.print(
+        f"[{style}]Standing rules: {readiness['status']}"
+        f" (ready={readiness['ready']}, active={readiness['active_count']})[/{style}]"
+    )
+    if readiness["banner"]:
+        console.print(f"[bold red]{readiness['banner']}[/bold red]")
+    if readiness.get("reviewed_on"):
+        console.print(f"[dim]reviewed_on={readiness['reviewed_on']}[/dim]")
+
+
 @mes_app.command("skip")
 def skip(
     reason: str = typer.Option(..., "--reason", help="Why this trigger is consciously skipped."),
@@ -1252,11 +1425,12 @@ def skip(
     date: str | None = typer.Option(None, "--date", help="Trade date (defaults to today)."),
     journal_dir: Path | None = typer.Option(None, "--journal-dir", hidden=True),
 ):
-    """Acknowledge a standing-rule trigger without logging a check.
+    """Acknowledge a standing-rule or invalidation trigger without the required action.
 
-    An honest skip is a scored pass: it resolves the open fire so `mes review`
-    does not tally it as MISSED. Without --rule the most recent open fire is
-    skipped.
+    For level retests, an honest skip resolves the open fire so `mes review`
+    does not tally it as MISSED. For invalidation fires, skip records an
+    explicit no-flip reason (same command path). Without --rule the most
+    recent open fire is skipped.
     """
     cfg = load_mes_config()
     journal = _trade_journal(cfg, journal_dir)

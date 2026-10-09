@@ -21,13 +21,25 @@ $ADD, $TICK, $VOLD, today's session VWAP, and the opening range **do not exist y
 def create_mes_morning_agent(llm):
     structured_llm = bind_structured(llm, MorningHypothesis, "MES Morning Agent")
 
-    def run(*, market_context: str, past_context: str = "", rth_started: bool = False) -> str:
+    def run(
+        *,
+        market_context: str,
+        past_context: str = "",
+        rth_started: bool = False,
+        on_hypothesis=None,
+    ) -> str:
         task = _morning_task_instructions(rth_started=rth_started)
         prompt = f"""You are a futures desk strategist preparing the morning plan for /MES (Micro E-mini S&P 500). SPY is your directional reference: it trades the same underlying index with cleaner internals, so read SPY for direction and express the trade in /MES.
 
 {task}
 
 A hypothesis is only useful if it can be wrong. State plainly what price action would invalidate it, so that later in the session you can tell the difference between a plan that is working and one that has already failed.
+
+When the invalidation is a chart-watchable level break, also fill `machine_clauses`
+(zero to three): kind `invalidation` with a level from
+vwap/orb_top/orb_bottom/pdh/pdl/prior_close/prior_vah/prior_val/poc/onh/onl and
+`break_side` above|below. Use kind `key_level` for levels that matter but are
+not frame kills. Leave `machine_clauses` empty when nothing is machine-checkable.
 
 ---
 
@@ -52,6 +64,7 @@ Weigh these lessons against today's context. They describe recurring mistakes, n
             prompt,
             render_morning_hypothesis,
             "MES Morning Agent",
+            on_model=on_hypothesis,
         )
 
     return run
