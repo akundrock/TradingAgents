@@ -230,7 +230,43 @@ def test_enter_prints_and_journals_resolved_target(tmp_path, patched_snapshot):
 
 @pytest.mark.unit
 def test_close_after_ladder_fill_books_manual_exit_price(tmp_path, patched_snapshot):
-    """A persisted ladder fill must not override the user's actual exit price."""
+    """Open remainder at --price adds to banked partials (not full-size recompute)."""
+    from tradingagents.mes.management import OpenTrade
+
+    journal = MesJournal({"mes_journal_dir": str(tmp_path)})
+    trade = OpenTrade(
+        side="long", contracts=2, remaining=2,
+        entry=100.0, stop=98.0, initial_stop=98.0, target=102.0,
+        entry_time=datetime(2026, 3, 30, 10, 0), initial_risk_points=2.0,
+    )
+    journal.append_trade_opened(trade, entry_context={"score": 5, "tier": "marginal"})
+    # Ladder banked a partial; one contract still open.
+    journal.append_trade_adjusted(
+        "2026-03-30",
+        note="partial: scaled 1 @ +1.00R",
+        as_of="2026-03-30T10:45",
+        ladder_fired={"breakeven": "2026-03-30T10:30", "partial": "2026-03-30T10:45"},
+        remaining=1,
+        realized_r=0.5,
+    )
+
+    closed = _invoke(
+        "close", "--price", "101.50", "--reason", "manual",
+        "--journal-dir", str(tmp_path),
+    )
+    assert closed.exit_code == 0, closed.output
+    # booked = 0.5 + 1 * ((101.50 - 100) / 2) = 0.5 + 0.75 = 1.25
+    closed_records = [
+        e for e in journal.load_day("2026-03-30") if e["kind"] == "trade_closed"
+    ]
+    assert len(closed_records) == 1
+    assert closed_records[0]["realized_r"] == pytest.approx(1.25)
+    assert "1.25" in closed.output or "overrides" in closed.output.lower()
+
+
+@pytest.mark.unit
+def test_close_when_flat_keeps_banked_r_not_zero_at_entry(tmp_path, patched_snapshot):
+    """remaining==0 + close at entry must keep ladder-banked R, not wipe to 0.00."""
     from tradingagents.mes.management import OpenTrade
 
     journal = MesJournal({"mes_journal_dir": str(tmp_path)})
@@ -240,25 +276,25 @@ def test_close_after_ladder_fill_books_manual_exit_price(tmp_path, patched_snaps
         entry_time=datetime(2026, 3, 30, 10, 0), initial_risk_points=2.0,
     )
     journal.append_trade_opened(trade, entry_context={"score": 5, "tier": "marginal"})
-    # The ladder inferred a target fill and journaled its terminal state.
     journal.append_trade_adjusted(
         "2026-03-30",
-        note="target: target filled at 102.00",
+        note="time_stop: time stop filled",
         as_of="2026-03-30T10:45",
-        ladder_fired={"target": "2026-03-30T10:45"},
+        ladder_fired={"time_stop": "2026-03-30T10:45"},
         remaining=0,
-        realized_r=1.0,
+        realized_r=0.17,
     )
 
     closed = _invoke(
-        "close", "--price", "101.50", "--reason", "manual",
+        "close", "--price", "100.00", "--reason", "eod",
         "--journal-dir", str(tmp_path),
     )
     assert closed.exit_code == 0, closed.output
-    # The manual exit price is the broker-side truth: +0.75R, not the fill's 1.0R.
     closed_records = [
         e for e in journal.load_day("2026-03-30") if e["kind"] == "trade_closed"
     ]
     assert len(closed_records) == 1
-    assert closed_records[0]["realized_r"] == pytest.approx(0.75)
-    assert "manual" in closed.output.lower() or "replaces" in closed.output.lower()
+    assert closed_records[0]["realized_r"] == pytest.approx(0.17)
+    assert closed_records[0]["exit_price"] == pytest.approx(100.0)
+    assert "+0.17R" in closed.output
+    assert "banked" in closed.output.lower()
