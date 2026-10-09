@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta
 
 import pytest
@@ -71,6 +73,7 @@ def _tick(journal, stamp, **overrides):
         manager=None, manager_every=0.0, alert=False, no_log=False,
         auto_check=False, auto_check_cooldown=5.0,
         prev_state=None, last_fired=None, last_manager=None, seen=set(), live=None,
+        manager_job=None,
     )
     kwargs.update(overrides)
     return mes_cli._copilot_tick(**kwargs)
@@ -287,6 +290,106 @@ class _StubLive:
 
     def start(self):
         self.calls.append("start")
+
+
+@pytest.mark.unit
+def test_manager_does_not_block_live_mgmt_panel(tmp_path, patched_snapshot, capsys):
+    """Live tick paints the mgmt panel even while manager LLM is still running."""
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    _enter(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[dict] = []
+
+    def slow_manager(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        assert release.wait(timeout=2.0), "test release timed out"
+        return "Slow advisory text"
+
+    live = _StubLive()
+    job: dict = {}
+    t0 = datetime(2026, 3, 30, 11, 0)
+    try:
+        t_start = time.monotonic()
+        _tick(
+            journal, t0, manager=slow_manager, manager_every=5.0,
+            live=live, manager_job=job,
+        )
+        elapsed = time.monotonic() - t_start
+        assert elapsed < 0.5, f"tick blocked on manager ({elapsed:.2f}s)"
+        assert started.wait(timeout=1.0)
+        assert len(live.panels) >= 1
+        # Outer Panel title is the copilot managing chrome — never advisory-only.
+        assert "managing" in str(getattr(live.panels[0], "title", "")).lower()
+        assert "Slow advisory" not in capsys.readouterr().out
+        release.set()
+        if job.get("future") is not None:
+            job["future"].result(timeout=1.0)
+        # Next tick drains the finished future via console.print (not Live replace).
+        _tick(
+            journal, t0 + timedelta(minutes=1), manager=slow_manager, manager_every=5.0,
+            live=live, manager_job=job, last_manager=t0,
+        )
+        out = capsys.readouterr().out
+        assert "Slow advisory" in out
+        assert "Manager Advisory" in out
+        for upd in live.panels:
+            assert "Slow advisory" not in str(getattr(upd, "renderable", upd))
+    finally:
+        release.set()
+
+
+@pytest.mark.unit
+def test_manager_in_flight_skips_overlap_and_tick_still_updates(
+    tmp_path, patched_snapshot, monkeypatch, capsys,
+):
+    """A second tick while manager is in flight still updates the mgmt panel."""
+    journal = mes_cli._trade_journal(mes_cli.load_mes_config(), tmp_path)
+    _enter(tmp_path, target="110.00")
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[dict] = []
+
+    def slow_manager(**kwargs):
+        calls.append(kwargs)
+        started.set()
+        assert release.wait(timeout=2.0)
+        return "Still thinking"
+
+    live = _StubLive()
+    job: dict = {}
+    try:
+        t0 = datetime(2026, 3, 30, 11, 0)
+        _tick(
+            journal, t0, manager=slow_manager, manager_every=5.0,
+            live=live, manager_job=job,
+        )
+        assert started.wait(timeout=1.0)
+        assert len(calls) == 1
+        n_panels = len(live.panels)
+
+        # Ladder event on tick 2 while manager still running — must not wait on LLM.
+        snap = snap_at(97.0, high=97.75, low=97.0, as_of=datetime(2026, 3, 30, 11, 1))
+        monkeypatch.setattr(mes_cli, "_load_snapshot", lambda *a, **k: snap)
+        seen: set[str] = set()
+        t_start = time.monotonic()
+        _tick(
+            journal, datetime(2026, 3, 30, 11, 1),
+            manager=slow_manager, manager_every=0.01,  # would re-fire if not in-flight
+            live=live, manager_job=job, last_manager=None, seen=seen,
+        )
+        assert time.monotonic() - t_start < 0.5
+        assert len(calls) == 1  # overlap skip
+        assert len(live.panels) > n_panels
+        assert "mes trade close" in capsys.readouterr().out
+        # Ladder state persisted with remaining / realized_r (mirror trade-status).
+        adjusted = [e for e in journal.load_day("2026-03-30") if e["kind"] == "trade_adjusted"]
+        assert adjusted
+        assert adjusted[-1]["remaining"] is not None
+        assert adjusted[-1]["realized_r"] is not None
+    finally:
+        release.set()
 
 
 @pytest.mark.unit

@@ -15,8 +15,10 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import typer
@@ -91,6 +93,52 @@ from tradingagents.agents.schemas import describe_level
 from tradingagents.mes.rules import RuleHit, evaluate_standing_rules
 
 console = Console()
+
+# Single worker so manager LLM calls never pile up; the Live tick loop only
+# schedules when the prior future has finished (overlap skip).
+_MANAGER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mes-manager")
+
+
+def _drain_manager_job(job: dict[str, Any] | None) -> None:
+    """Print a finished background manager advisory on the main thread."""
+    if not job:
+        return
+    fut: Future | None = job.get("future")
+    if fut is None or not fut.done():
+        return
+    job["future"] = None
+    try:
+        advisory = fut.result()
+    except Exception as exc:
+        console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
+        return
+    if advisory:
+        console.print(Panel(Markdown(str(advisory)), title="Manager Advisory", border_style="dim"))
+
+
+def _schedule_manager_job(
+    job: dict[str, Any],
+    manager,
+    *,
+    mgmt_summary: str,
+    market_context: str,
+    current_price: float,
+) -> bool:
+    """Run ``manager`` on a worker thread. Returns False if a call is in flight."""
+    fut: Future | None = job.get("future")
+    if fut is not None and not fut.done():
+        return False
+
+    def _call() -> str:
+        return manager(
+            mgmt_summary=mgmt_summary,
+            market_context=market_context,
+            current_price=current_price,
+        )
+
+    job["future"] = _MANAGER_EXECUTOR.submit(_call)
+    return True
+
 
 mes_app = typer.Typer(
     name="mes",
@@ -1070,12 +1118,17 @@ def _copilot_tick(
     prev_state=None, last_fired=None, last_manager=None,
     last_check: str | None = None,
     seen: set[str] | None = None, live=None,
+    manager_job: dict[str, Any] | None = None,
 ) -> tuple[str, object, object, object | None, datetime | None, datetime | None, str | None]:
     """One copilot tick.
 
     Returns (mode, snapshot, payload, prev_state, last_fired, last_manager,
     last_check) — ``last_check`` is the one-line summary of the most recent
     auto-fired check for the radar panel's persistent summary row.
+
+    When ``live`` is set, manager LLM calls run on a background thread so the
+    Rich Live loop keeps ticking; pass a shared ``manager_job`` dict to track
+    the in-flight future across ticks.
     """
     if seen is None:
         seen = set()
@@ -1213,10 +1266,15 @@ def _copilot_tick(
         seen.add(key)
         last_new_event = event.name
         if not no_log:
+            # Mirror trade-status watch: carry ladder state so find_open_trade
+            # replays remaining / realized_r / fired markers across ticks.
             journal.append_trade_adjusted(
                 stamp_date, stop=updated.stop,
                 note=f"{event.name}: {event.detail}",
                 as_of=event.as_of.isoformat(timespec="minutes"),
+                ladder_fired=dict(updated.fired),
+                remaining=updated.remaining,
+                realized_r=updated.realized_r,
             )
     if last_new_event is not None and mgmt.recommendation == "CLOSED":
         # Terminal tick: alert + close hint once per tick, not once per ladder event.
@@ -1227,35 +1285,48 @@ def _copilot_tick(
             f"--price {snapshot.mes.close:.2f} "
             f"--reason {_CLOSE_REASONS.get(last_new_event, 'manual')}"
         )
-    # Advisory LLM text never mutates state (same rule as trade watch, cli/mes.py:1184-1185).
-    if manager is not None and manager_every > 0 and (
-        last_manager is None
-        or (stamp - last_manager).total_seconds() >= manager_every * 60
-    ):
-        try:
-            advisory = manager(
-                mgmt_summary=(
-                    f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
-                    f"{mgmt.r_now:+.2f}R | stop {mgmt.stop:.2f} | "
-                    f"next: {mgmt.next_event or 'closed'}"
-                ),
-                market_context=render_market_context(snapshot),
-                current_price=snapshot.mes.close,
-            )
-        except Exception as exc:
-            console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
-        else:
-            panel = Panel(Markdown(advisory), title="Manager Advisory", border_style="dim")
-            if live is not None:
-                live.update(Panel(Markdown(advisory), title="Manager Advisory",
-                                  border_style="dim"))
-            else:
-                console.print(panel)
-        last_manager = stamp
+    # Paint the management panel before any manager work so the Live loop never
+    # freezes on an LLM call or briefly replaces the ladder with advisory-only.
     if live is not None:
         live.update(Panel(_render_mgmt_panel(updated, mgmt, snapshot.mes.close),
                           title=f"MES Copilot — managing   {stamp:%H:%M:%S}",
                           border_style="green"))
+    # Advisory LLM text never mutates state. Under Live, run it off-thread and
+    # console.print when done so radar/ladder ticks keep flowing.
+    _drain_manager_job(manager_job)
+    if manager is not None and manager_every > 0 and (
+        last_manager is None
+        or (stamp - last_manager).total_seconds() >= manager_every * 60
+    ):
+        mgmt_summary = (
+            f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
+            f"{mgmt.r_now:+.2f}R | stop {mgmt.stop:.2f} | "
+            f"next: {mgmt.next_event or 'closed'}"
+        )
+        market_context = render_market_context(snapshot)
+        if live is not None:
+            job = manager_job if manager_job is not None else {}
+            if _schedule_manager_job(
+                job, manager,
+                mgmt_summary=mgmt_summary,
+                market_context=market_context,
+                current_price=snapshot.mes.close,
+            ):
+                last_manager = stamp
+            # Instant stubs finish before we return; drain so same-tick tests see output.
+            _drain_manager_job(job)
+        else:
+            try:
+                advisory = manager(
+                    mgmt_summary=mgmt_summary,
+                    market_context=market_context,
+                    current_price=snapshot.mes.close,
+                )
+            except Exception as exc:
+                console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
+            else:
+                console.print(Panel(Markdown(advisory), title="Manager Advisory", border_style="dim"))
+            last_manager = stamp
     return "managing", snapshot, (updated, mgmt), "managing", last_fired, last_manager, last_check
 
 
@@ -1353,6 +1424,7 @@ def copilot(
         return
     # ---- Watch loop with Rich Live ----
     last_check: str | None = None
+    manager_job: dict[str, Any] = {}
     with Live(console=console, refresh_per_second=1, screen=False) as live:
         while True:
             stamp = _market_now(cfg)
@@ -1365,7 +1437,7 @@ def copilot(
                     auto_check=auto_check, auto_check_cooldown=auto_check_cooldown,
                     prev_state=prev_state, last_fired=last_fired,
                     last_manager=last_manager, last_check=last_check,
-                    seen=seen, live=live,
+                    seen=seen, live=live, manager_job=manager_job,
                 )
             except Exception as exc:
                 live.update(Panel(f"[red]Tick error:[/red] {exc}", border_style="red"))
@@ -1373,6 +1445,7 @@ def copilot(
                 time.sleep(interval)
             except KeyboardInterrupt:
                 break
+    _drain_manager_job(manager_job)
     console.print("[dim]Copilot stopped.[/dim]")
 
 
@@ -1715,9 +1788,11 @@ def trade_status(
         console.print(_render_mgmt_panel(updated, report, snapshot.mes.close))
         return
 
-    # Watch loop (same skeleton as radar).
+    # Watch loop (same skeleton as radar). Manager runs off-thread so Live
+    # keeps refreshing the ladder while the LLM works.
     with Live(console=console, refresh_per_second=1, screen=False) as live:
         seen: set[str] = set()
+        manager_job: dict[str, Any] = {}
         while True:
             stamp = _market_now(cfg)
             try:
@@ -1726,6 +1801,7 @@ def trade_status(
                     live.update(Panel("[yellow]No open trade.[/yellow]", title="MES Trade Manager"))
                 else:
                     snapshot, updated, report = shot
+                    # Paint first — never block the panel on manager latency.
                     live.update(_render_mgmt_panel(updated, report, snapshot.mes.close))
                     # Persist each ladder event exactly once; advisory LLM text
                     # below never mutates state. The event timestamp is the
@@ -1748,27 +1824,26 @@ def trade_status(
                         )
                         if alert and event.name in {"stopped_out", "target", "time_stop"}:
                             _fire_alert(f"Trade ladder: {event.name.replace('_', ' ')}")
+                    _drain_manager_job(manager_job)
                     if manager is not None:
-                        try:
-                            advisory = manager(
-                                mgmt_summary=(
-                                    f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
-                                    f"{report.r_now:+.2f}R | stop {report.stop:.2f} | "
-                                    f"next: {report.next_event or 'closed'}"
-                                ),
-                                market_context=render_market_context(snapshot),
-                                current_price=snapshot.mes.close,
-                            )
-                            live.update(Panel(Markdown(advisory), title="Manager Advisory",
-                                              border_style="dim"))
-                        except Exception as exc:
-                            console.print(f"[yellow]Manager call failed:[/yellow] {exc}")
+                        _schedule_manager_job(
+                            manager_job, manager,
+                            mgmt_summary=(
+                                f"{updated.side} {updated.contracts} @ {updated.entry:.2f} | "
+                                f"{report.r_now:+.2f}R | stop {report.stop:.2f} | "
+                                f"next: {report.next_event or 'closed'}"
+                            ),
+                            market_context=render_market_context(snapshot),
+                            current_price=snapshot.mes.close,
+                        )
+                        _drain_manager_job(manager_job)
             except Exception as exc:
                 live.update(Panel(f"[red]Snapshot failed:[/red] {exc}", title="MES Trade Manager"))
             try:
                 time.sleep(watch)
             except KeyboardInterrupt:
                 break
+        _drain_manager_job(manager_job)
 
 
 @trade_app.command("close")
@@ -1791,28 +1866,30 @@ def trade_close(
         console.print("[yellow]No open trade for this date.[/yellow]")
         raise typer.Exit(code=1)
 
+    # Book from journal state before evaluate_management so a ladder that
+    # already zeroed remaining cannot be wiped by contracts * R(--price).
+    pre_realized = trade.realized_r
+    pre_remaining = trade.remaining
     snapshot = _load_snapshot(stamp, cfg, mes_csv, spy_csv)
     result = evaluate(snapshot, trade.side)
     updated, report = evaluate_management(snapshot, result, trade, cfg)
-    if updated.remaining > 0:
-        updated.realized_r = round(
-            updated.realized_r + updated.remaining * _r_of(price, updated), 4
-        )
-        updated.remaining = 0
+    ladder_banked = updated.realized_r
+    if pre_remaining > 0:
+        booked = round(pre_realized + pre_remaining * _r_of(price, trade), 4)
     else:
-        # The ladder already inferred a full exit (target/stop/time-stop fill
-        # detected from bar history). The user's --price is the broker-side
-        # truth for the final leg: re-realize the whole position at the stated
-        # exit instead of the ladder's bar-open estimate. When both agree the
-        # numbers are identical; when they differ, the manual fill wins.
-        ladder_r = updated.realized_r
-        updated.realized_r = round(updated.contracts * _r_of(price, updated), 4)
-        if abs(updated.realized_r - ladder_r) > 1e-9:
-            console.print(
-                f"[yellow]Manual exit overrides the ladder-inferred fill: "
-                f"{updated.realized_r:+.2f}R at {price:.2f} "
-                f"(ladder had banked {ladder_r:+.2f}R).[/yellow]"
-            )
+        # Already flat in the journal — keep banked R; still record --price.
+        booked = round(pre_realized, 4)
+    updated.realized_r = booked
+    updated.remaining = 0
+    # Warn when the naive full-size entry→exit R differs from what we booked
+    # (partials already banked, or flat-with-banked close at ~entry).
+    naive_full_r = round(trade.contracts * _r_of(price, trade), 4)
+    if abs(booked - naive_full_r) > 1e-9:
+        console.print(
+            f"[yellow]Manual exit overrides the ladder-inferred fill: "
+            f"{booked:+.2f}R at {price:.2f} "
+            f"(ladder had banked {ladder_banked:+.2f}R).[/yellow]"
+        )
 
     journal.append_trade_closed(updated, exit_price=price, reason=reason, as_of=stamp)
     console.print(
