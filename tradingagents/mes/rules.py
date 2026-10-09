@@ -5,9 +5,9 @@ session review ("log a check at the ORB-top retest"), serialized as a plain
 dict (the JSON boundary for ``standing_rules.json`` and journal records).
 
 :func:`evaluate_standing_rules` resolves each rule's watched level against the
-current snapshot/checklist and returns the rules whose retest condition holds
-right now. It is stateless: per-session fire dedup lives in the CLI tick
-(:mod:`cli.mes`), fire/skip accounting in :mod:`tradingagents.mes.journal`.
+current snapshot/checklist and returns the rules whose condition holds right
+now. It is stateless: per-session fire dedup lives in the CLI tick
+(:mod:`cli.mes`), fire/skip/flip accounting in :mod:`tradingagents.mes.journal`.
 """
 
 from __future__ import annotations
@@ -20,20 +20,22 @@ from .snapshot import MesSnapshot
 
 @dataclass(frozen=True)
 class RuleHit:
-    """A standing rule whose retest condition holds on this bar."""
+    """A standing rule whose trigger condition holds on this bar."""
 
     rule_id: str
-    """Trigger level id, e.g. ``orb_top`` (also the per-session dedup key)."""
+    """Dedup key: level id for retests (e.g. ``orb_top``), ``inv_*`` for invalidation."""
     level: str
     """Human label, e.g. ``ORB high`` — shared with the radar level tape."""
     level_price: float
     distance: float
     """Signed points: ``price - level`` (positive = price above the level)."""
     tolerance: float
-    """The rule's retest band, echoed in the banner (``±{tolerance:g} pts``)."""
+    """The rule's band, echoed in the banner (``±{tolerance:g} pts``)."""
     confirmation: str
     note: str
     """Coach's one-line reason, shown verbatim in the banner."""
+    kind: str = "level_retest"
+    """``level_retest`` or ``invalidation`` — drives banner copy and resolution."""
 
 
 _LEVEL_RESOLVERS = {
@@ -46,6 +48,7 @@ _LEVEL_RESOLVERS = {
     "prior_vah": lambda s, r: s.prior_mes.vah if s.prior_mes else None,
     "prior_val": lambda s, r: s.prior_mes.val if s.prior_mes else None,
     "prior_poc": lambda s, r: s.prior_mes.poc if s.prior_mes else None,
+    "poc": lambda s, r: s.prior_mes.poc if s.prior_mes else None,
     "onh": lambda s, r: s.overnight_mes[0] if s.overnight_mes else None,
     "onl": lambda s, r: s.overnight_mes[1] if s.overnight_mes else None,
 }
@@ -67,6 +70,78 @@ def _confirmation_ok(confirmation: str, snapshot: MesSnapshot) -> bool:
     return False  # unknown confirmation strings never fire
 
 
+def _level_retest_hit(
+    *,
+    trigger: dict,
+    rule: dict,
+    price: float,
+    level_price: float,
+    snapshot: MesSnapshot,
+    describe_level,
+) -> RuleHit | None:
+    distance = round(price - level_price, 2)
+    tolerance = float(trigger.get("tolerance_points") or 2.0)
+    if abs(distance) > tolerance:
+        return None
+    confirmation = trigger.get("confirmation") or "none"
+    if not _confirmation_ok(confirmation, snapshot):
+        return None
+    return RuleHit(
+        rule_id=trigger["level"],
+        level=describe_level(trigger["level"]),
+        level_price=float(level_price),
+        distance=distance,
+        tolerance=tolerance,
+        confirmation=confirmation,
+        note=str(rule.get("note") or ""),
+        kind="level_retest",
+    )
+
+
+def _invalidation_hit(
+    *,
+    trigger: dict,
+    rule: dict,
+    price: float,
+    level_price: float,
+    snapshot: MesSnapshot,
+    describe_level,
+) -> RuleHit | None:
+    """Fire when price is on the invalidating side of the watched level.
+
+    ``break_side`` ``below`` means the frame dies when price is at/under the
+    level (within ``tolerance_points`` above still counts as broken through);
+    ``above`` is the mirror. First-slice Option C — persistence predicates
+    (consecutive closes / dwell) stay backlog.
+    """
+    distance = round(price - level_price, 2)
+    tolerance = float(trigger.get("tolerance_points") or 2.0)
+    break_side = str(trigger.get("break_side") or "below")
+    if break_side == "below":
+        # Price at or below level+tolerance has broken / is breaking down through.
+        if price > level_price + tolerance:
+            return None
+    elif break_side == "above":
+        if price < level_price - tolerance:
+            return None
+    else:
+        return None
+    confirmation = trigger.get("confirmation") or "none"
+    if not _confirmation_ok(confirmation, snapshot):
+        return None
+    rule_id = str(trigger.get("id") or f"inv_{trigger.get('level', 'x')}")
+    return RuleHit(
+        rule_id=rule_id,
+        level=describe_level(trigger["level"]),
+        level_price=float(level_price),
+        distance=distance,
+        tolerance=tolerance,
+        confirmation=confirmation,
+        note=str(rule.get("note") or ""),
+        kind="invalidation",
+    )
+
+
 def evaluate_standing_rules(
     snapshot: MesSnapshot,
     result: ChecklistResult,
@@ -86,7 +161,8 @@ def evaluate_standing_rules(
     price = result.last_price
     for rule in rules:
         trigger = rule.get("trigger") or {}
-        if trigger.get("kind") != "level_retest":
+        kind = trigger.get("kind")
+        if kind not in ("level_retest", "invalidation"):
             continue
         resolver = _LEVEL_RESOLVERS.get(trigger.get("level"))
         if resolver is None:
@@ -94,20 +170,16 @@ def evaluate_standing_rules(
         level_price = resolver(snapshot, result)
         if not level_price or level_price <= 0:
             continue
-        distance = round(price - level_price, 2)
-        tolerance = float(trigger.get("tolerance_points") or 2.0)
-        if abs(distance) > tolerance:
-            continue
-        confirmation = trigger.get("confirmation") or "none"
-        if not _confirmation_ok(confirmation, snapshot):
-            continue
-        hits.append(RuleHit(
-            rule_id=trigger["level"],
-            level=describe_level(trigger["level"]),
-            level_price=float(level_price),
-            distance=distance,
-            tolerance=tolerance,
-            confirmation=confirmation,
-            note=str(rule.get("note") or ""),
-        ))
+        if kind == "level_retest":
+            hit = _level_retest_hit(
+                trigger=trigger, rule=rule, price=price, level_price=level_price,
+                snapshot=snapshot, describe_level=describe_level,
+            )
+        else:
+            hit = _invalidation_hit(
+                trigger=trigger, rule=rule, price=price, level_price=level_price,
+                snapshot=snapshot, describe_level=describe_level,
+            )
+        if hit is not None:
+            hits.append(hit)
     return hits

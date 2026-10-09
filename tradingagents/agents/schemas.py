@@ -489,6 +489,16 @@ class MorningHypothesis(BaseModel):
             return v.lower()
         return v
 
+    machine_clauses: list["MachineClause"] = Field(
+        default_factory=list,
+        description=(
+            "Zero to three machine-readable frame clauses the copilot can watch: "
+            "invalidation breaks (level + break_side) and key levels. Prefer the "
+            "same level vocabulary as standing rules (vwap, orb_top, …). Omit when "
+            "the invalidation cannot be expressed as a level break."
+        ),
+    )
+
     narrative: str = Field(
         description=(
             "Full morning plan covering, in order: "
@@ -507,16 +517,24 @@ class MorningHypothesis(BaseModel):
 
 def render_morning_hypothesis(hypothesis: MorningHypothesis) -> str:
     """Render a MorningHypothesis to the markdown the CLI displays and logs."""
-    return "\n".join([
+    parts = [
         f"**Day Type**: {hypothesis.day_type.value}",
         f"**Bias**: {hypothesis.bias.value}",
         f"**Thesis**: {hypothesis.one_sentence_thesis}",
         f"**Key Levels**: {hypothesis.key_levels}",
         f"**Invalidation**: {hypothesis.invalidation}",
         f"**Confidence**: {hypothesis.confidence.capitalize()}",
-        "",
-        hypothesis.narrative,
-    ])
+    ]
+    if hypothesis.machine_clauses:
+        parts.append("**Frame Clauses**:")
+        for index, clause in enumerate(hypothesis.machine_clauses, start=1):
+            side = f" break {clause.break_side}" if clause.break_side else ""
+            note = f" — {clause.note}" if clause.note else ""
+            parts.append(
+                f"{index}. [{clause.kind}] {clause.level.value}{side}{note}"
+            )
+    parts.extend(["", hypothesis.narrative])
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -703,20 +721,62 @@ class LevelRetestTrigger(BaseModel):
     )
 
 
-# Leaf fields of LevelRetestTrigger, used to lift a flattened trigger back
-# into a nested object when a weak provider emits them at the rule level.
-_TRIGGER_FIELDS = ("kind", "level", "confirmation", "tolerance_points")
+class InvalidationTrigger(BaseModel):
+    """Option C: machine-detected frame kill — required action is a re-read."""
+
+    kind: Literal["invalidation"] = "invalidation"
+    id: str = Field(
+        description="Stable per-session dedup key, e.g. inv_1.",
+        min_length=1,
+        max_length=32,
+    )
+    level: RuleLevel = Field(description="Structural level whose breach kills the frame.")
+    break_side: Literal["above", "below"] = Field(
+        description="Fire when price is on this side of the level (frame invalidation).",
+    )
+    confirmation: Confirmation = Field(
+        default=Confirmation.NONE,
+        description="Optional confirmation at the breach; same vocabulary as retests.",
+    )
+    tolerance_points: float = Field(
+        default=2.0,
+        ge=0.25,
+        le=10.0,
+        description="Points of slack around the level before the breach counts.",
+    )
+
+
+class MachineClause(BaseModel):
+    """Structured morning-frame clause consumed by copilot / review (Option D thin)."""
+
+    kind: Literal["invalidation", "key_level"] = "invalidation"
+    id: str = Field(default="", description="Optional stable id; defaults to inv_N at save time.")
+    level: RuleLevel = Field(description="Level vocabulary shared with standing rules.")
+    break_side: Literal["above", "below"] | None = Field(
+        default=None,
+        description="Required for kind=invalidation; omit for key_level display clauses.",
+    )
+    note: str = Field(default="", description="One-line why / what the clause means.")
+    tolerance_points: float = Field(default=2.0, ge=0.25, le=10.0)
+
+
+# Leaf fields of triggers, used to lift a flattened trigger back into a nested
+# object when a weak provider emits them at the rule level.
+_TRIGGER_FIELDS = (
+    "kind", "level", "confirmation", "tolerance_points", "id", "break_side",
+)
 
 
 class StandingRule(BaseModel):
     """A machine-checkable discipline prescription for the next session.
 
-    ``requirement`` fixes the observable: when the trigger fires, the trader
-    must either log a gatekeeper check or acknowledge with ``mes skip --reason``.
+    ``requirement`` fixes the observable: ``log_check_or_skip`` for level
+    retests; ``flip_or_skip`` for invalidation (re-read via ``mes flip`` or
+    explicit no-flip ``mes skip``).
     """
 
-    trigger: LevelRetestTrigger
-    requirement: Literal["log_check_or_skip"] = "log_check_or_skip"
+    trigger: LevelRetestTrigger | InvalidationTrigger
+    requirement: Literal["log_check_or_skip", "flip_or_skip"] = "log_check_or_skip"
     note: str = Field(default="", description="One-line 'why' shown in the radar banner.")
     expires_on: str | None = Field(
         default=None,
@@ -751,6 +811,16 @@ class StandingRule(BaseModel):
                 data["trigger"] = {**lifted, **trigger}
             elif trigger is None or "trigger" not in data:
                 data["trigger"] = lifted
+        # Default requirement from trigger kind when the model omitted it.
+        trig = data.get("trigger")
+        if isinstance(trig, dict) and trig.get("kind") == "invalidation":
+            data.setdefault("requirement", "flip_or_skip")
+            if not trig.get("id"):
+                level = trig.get("level") or "x"
+                trig = {**trig, "id": f"inv_{level}"}
+                data["trigger"] = trig
+        elif getattr(trig, "kind", None) == "invalidation":
+            data.setdefault("requirement", "flip_or_skip")
         return data
 
 
@@ -771,7 +841,10 @@ _LEVEL_LABELS: dict[RuleLevel, str] = {
 
 def describe_level(level: RuleLevel | str) -> str:
     """Human label for a rule level, shared with the radar banner."""
-    return _LEVEL_LABELS.get(RuleLevel(level), str(level))
+    try:
+        return _LEVEL_LABELS.get(RuleLevel(level), str(level))
+    except ValueError:
+        return str(level)
 
 
 def describe_standing_rule(rule: StandingRule) -> str:
@@ -780,6 +853,15 @@ def describe_standing_rule(rule: StandingRule) -> str:
     if rule.trigger.confirmation is Confirmation.ADD_VOLD_ALIGNED:
         confirmation = " with $ADD/$VOLD aligned"
     note = f" — {rule.note}" if rule.note else ""
+    if isinstance(rule.trigger, InvalidationTrigger) or (
+        getattr(rule.trigger, "kind", None) == "invalidation"
+    ):
+        side = getattr(rule.trigger, "break_side", "below")
+        return (
+            f"Invalidation: {describe_level(rule.trigger.level)} break {side} "
+            f"(±{rule.trigger.tolerance_points:g} pts{confirmation}) "
+            f"→ run `mes flip` or `mes skip`{note}"
+        )
     return (
         f"{describe_level(rule.trigger.level)} retest "
         f"(±{rule.trigger.tolerance_points:g} pts{confirmation}) "
@@ -834,10 +916,10 @@ class SessionReview(BaseModel):
         default_factory=list,
         description=(
             "Zero to three machine-checkable rules for the NEXT session, "
-            "prescribed from this review's discipline findings. Only chart-"
-            "watchable level retests qualify (kind=level_retest); each note is "
-            "one concrete sentence. Omit when the improvement is not "
-            "chart-watchable."
+            "prescribed from this review's discipline findings. Chart-watchable "
+            "level retests (kind=level_retest) and frame invalidations "
+            "(kind=invalidation with id + break_side) qualify; each note is one "
+            "concrete sentence. Omit when the improvement is not chart-watchable."
         ),
     )
     narrative: str = Field(
@@ -875,3 +957,7 @@ def render_session_review(review: SessionReview) -> str:
         parts.append("")
     parts.append(review.narrative)
     return "\n".join(parts)
+
+
+# MachineClause is defined after MorningHypothesis; rebuild so the forward ref resolves.
+MorningHypothesis.model_rebuild()

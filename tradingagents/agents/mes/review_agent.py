@@ -103,12 +103,15 @@ what_failed and let it pull the discipline grade down."""
 
 **Prescribing standing rules (machine-checked tomorrow):**
 If your discipline findings include a chart-watchable miss — hesitation at a
-level, an un-watched retest — prescribe it in `standing_rules` so the copilot
-will prompt a check at that level tomorrow. Rules must be retests of one of:
-vwap, orb_top, orb_bottom, pdh, pdl, prior_close, prior_vah, prior_val,
-poc, onh, onl. Zero to three rules; only ones you still believe in.
-Omit `standing_rules` (leave it empty) when the improvement is not a
-chart watch — do not force it.
+level, an un-watched retest, or a missed frame kill — prescribe it in
+`standing_rules` so the copilot will prompt tomorrow. Allowed kinds:
+- `level_retest` — retest of vwap, orb_top, orb_bottom, pdh, pdl, prior_close,
+  prior_vah, prior_val, poc, onh, onl (requirement: log_check_or_skip).
+- `invalidation` — frame-kill breach with `id` (inv_1, …), `level`, and
+  `break_side` above|below (requirement: flip_or_skip).
+Zero to three rules; only ones you still believe in. Omit `standing_rules`
+(leave it empty) when the improvement is not a chart watch — do not force it.
+An empty list means the next session needs an explicit blank-day ack.
 
 Emit each rule in exactly this nested shape — the trigger fields MUST sit
 inside the `trigger` object, never at the rule level:
@@ -117,12 +120,20 @@ inside the `trigger` object, never at the rule level:
   {"trigger": {"kind": "level_retest", "level": "vwap",
                "confirmation": "add_vold_aligned",
                "tolerance_points": 2},
-   "note": "One-line why, shown in the radar banner."}]}
+   "note": "One-line why, shown in the radar banner."},
+  {"trigger": {"kind": "invalidation", "id": "inv_1", "level": "vwap",
+               "break_side": "below", "tolerance_points": 2},
+   "requirement": "flip_or_skip",
+   "note": "Bull frame dies below VWAP."}]}
 
 `level` is one of the levels listed above; `confirmation` is "none" or
 "add_vold_aligned"; `tolerance_points` is between 0.25 and 10. Omit
 `expires_on` — the pipeline stamps the next session's date for you. A rule
-whose trigger fields are flattened to the rule level is invalid — nest them."""
+whose trigger fields are flattened to the rule level is invalid — nest them.
+
+When the hypothesis includes a **Structured frame (machine)** block, grade
+day_type/bias/clause hits and flip timeliness against those fields, not only
+the prose narrative."""
 
         prompt += get_language_instruction()
 

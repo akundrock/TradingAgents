@@ -44,17 +44,21 @@ def _resolve_fires(
     fires: list[dict],
     checks: list[dict],
     skips: list[dict],
+    flips: list[dict] | None = None,
     *,
     resolve_as_of: datetime | None = None,
 ) -> list[dict]:
-    """Return each fire annotated with an outcome: checked / skipped / missed / open.
+    """Return each fire annotated with an outcome: checked / skipped / flipped / missed / open.
 
-    A fire is resolved by the earliest record at or after its ``as_of``: any
-    ``check`` record, or a same-``rule_id`` ``rule_skip`` record. Fires still
-    unresolved past ``resolve_as_of`` by more than the grace window count as
-    ``missed``; without ``resolve_as_of`` everything unresolved stays ``open``.
+    Level-retest fires resolve via the earliest ``check`` or same-``rule_id``
+    ``rule_skip`` at or after ``as_of``. Invalidation fires resolve via a
+    ``flip`` or same-``rule_id`` skip (never a check — the required action is
+    a re-read). Fires still unresolved past ``resolve_as_of`` by more than the
+    grace window count as ``missed``; without ``resolve_as_of`` everything
+    unresolved stays ``open``.
     """
     check_times = [t for t in (_iso(record.get("as_of")) for record in checks) if t]
+    flip_times = [t for t in (_iso(record.get("as_of")) for record in (flips or [])) if t]
     skips_by_rule: dict[str, list[datetime]] = {}
     for skip in skips:
         skip_time = _iso(skip.get("as_of"))
@@ -65,20 +69,32 @@ def _resolve_fires(
     for fire in fires:
         fired_at = _iso(fire.get("as_of"))
         outcome = "open"
+        trigger_kind = str(fire.get("trigger_kind") or "level_retest")
         if fired_at is not None:
-            next_check = min((t for t in check_times if t >= fired_at), default=None)
             next_skip = min(
                 (t for t in skips_by_rule.get(str(fire.get("rule_id")), []) if t >= fired_at),
                 default=None,
             )
-            if next_check is not None and (next_skip is None or next_check <= next_skip):
-                outcome = "checked"
-            elif next_skip is not None:
-                outcome = "skipped"
-            elif resolve_as_of is not None and (
-                (resolve_as_of - fired_at).total_seconds() > _MISSED_GRACE_SECONDS
-            ):
-                outcome = "missed"
+            if trigger_kind == "invalidation":
+                next_flip = min((t for t in flip_times if t >= fired_at), default=None)
+                if next_flip is not None and (next_skip is None or next_flip <= next_skip):
+                    outcome = "flipped"
+                elif next_skip is not None:
+                    outcome = "skipped"
+                elif resolve_as_of is not None and (
+                    (resolve_as_of - fired_at).total_seconds() > _MISSED_GRACE_SECONDS
+                ):
+                    outcome = "missed"
+            else:
+                next_check = min((t for t in check_times if t >= fired_at), default=None)
+                if next_check is not None and (next_skip is None or next_check <= next_skip):
+                    outcome = "checked"
+                elif next_skip is not None:
+                    outcome = "skipped"
+                elif resolve_as_of is not None and (
+                    (resolve_as_of - fired_at).total_seconds() > _MISSED_GRACE_SECONDS
+                ):
+                    outcome = "missed"
         resolved.append({**fire, "outcome": outcome})
     return resolved
 
@@ -249,17 +265,24 @@ class MesJournal:
         date: str,
         hypothesis_markdown: str,
         market_context: str = "",
+        day_type: str = "",
+        bias: str = "",
+        machine_clauses: list[dict] | None = None,
     ) -> None:
-        self._append(
-            date,
-            {
-                "kind": "hypothesis",
-                "logged_at": datetime.now().isoformat(),
-                "session_date": date,
-                "hypothesis": hypothesis_markdown,
-                "market_context": market_context,
-            },
-        )
+        record: dict[str, Any] = {
+            "kind": "hypothesis",
+            "logged_at": datetime.now().isoformat(),
+            "session_date": date,
+            "hypothesis": hypothesis_markdown,
+            "market_context": market_context,
+        }
+        if day_type:
+            record["day_type"] = day_type
+        if bias:
+            record["bias"] = bias
+        if machine_clauses:
+            record["machine_clauses"] = list(machine_clauses)
+        self._append(date, record)
 
     def append_flip(
         self,
@@ -295,13 +318,28 @@ class MesJournal:
 
     _RULES_FILE = "standing_rules.json"
 
-    def save_standing_rules(self, rules: list[dict], *, reviewed_on: str = "") -> None:
+    def save_standing_rules(
+        self,
+        rules: list[dict],
+        *,
+        reviewed_on: str = "",
+        blank_day_ack: bool = False,
+        blank_day_reason: str = "",
+    ) -> None:
         """Persist the latest review's standing rules, superseding earlier sets.
 
         Atomic write (tmp file + rename) so a mid-write crash cannot leave a
-        truncated rule set behind.
+        truncated rule set behind. ``blank_day_ack`` marks an explicit
+        "no rules today" acknowledgement so the next session can start ready
+        without machine-checkable prescriptions.
         """
-        payload = {"version": 1, "reviewed_on": reviewed_on, "rules": list(rules)}
+        payload = {
+            "version": 1,
+            "reviewed_on": reviewed_on,
+            "rules": list(rules),
+            "blank_day_ack": bool(blank_day_ack),
+            "blank_day_reason": blank_day_reason or "",
+        }
         path = self._dir / self._RULES_FILE
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,17 +349,27 @@ class MesJournal:
         except OSError as exc:
             logger.warning("MES standing rules write failed for %s: %s", path, exc)
 
-    def active_standing_rules(self, session_date: str) -> list[dict]:
-        """Rules still live for ``session_date`` (expired ones are filtered out)."""
+    def ack_blank_standing_rules(self, *, reviewed_on: str, reason: str = "") -> None:
+        """Explicit no-rules / blank-day ack — next session is process-ready."""
+        self.save_standing_rules(
+            [], reviewed_on=reviewed_on, blank_day_ack=True, blank_day_reason=reason,
+        )
+
+    def _load_standing_rules_payload(self) -> dict | None:
         path = self._dir / self._RULES_FILE
         if not path.exists():
-            return []
+            return None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("MES standing rules read failed for %s: %s", path, exc)
-            return []
-        if not isinstance(payload, dict):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def active_standing_rules(self, session_date: str) -> list[dict]:
+        """Rules still live for ``session_date`` (expired ones are filtered out)."""
+        payload = self._load_standing_rules_payload()
+        if payload is None:
             return []
         return [
             rule
@@ -330,9 +378,110 @@ class MesJournal:
             and (rule.get("expires_on") is None or str(rule.get("expires_on")) >= session_date)
         ]
 
+    def standing_rules_readiness(self, session_date: str) -> dict[str, Any]:
+        """Session-start hygiene for standing rules.
+
+        Returns a dict with ``ready`` (bool), ``status``
+        (``ready`` / ``missing`` / ``expired`` / ``needs_ack``), ``banner``
+        (loud copilot line when not ready), and metadata for panels/tests.
+        """
+        payload = self._load_standing_rules_payload()
+        if payload is None:
+            return {
+                "ready": False,
+                "status": "missing",
+                "banner": "RULES EXPIRED / NONE — standing_rules.json missing; "
+                          "run `mes review` or `mes rules blank --reason …`",
+                "active_count": 0,
+                "reviewed_on": "",
+                "blank_day_ack": False,
+            }
+        active = self.active_standing_rules(session_date)
+        reviewed_on = str(payload.get("reviewed_on") or "")
+        blank_ack = bool(payload.get("blank_day_ack"))
+        raw_rules = [r for r in (payload.get("rules") or []) if isinstance(r, dict)]
+        if active:
+            return {
+                "ready": True,
+                "status": "ready",
+                "banner": "",
+                "active_count": len(active),
+                "reviewed_on": reviewed_on,
+                "blank_day_ack": False,
+            }
+        if blank_ack and not raw_rules:
+            return {
+                "ready": True,
+                "status": "ready",
+                "banner": "",
+                "active_count": 0,
+                "reviewed_on": reviewed_on,
+                "blank_day_ack": True,
+            }
+        if raw_rules:
+            return {
+                "ready": False,
+                "status": "expired",
+                "banner": "RULES EXPIRED / NONE — all standing rules past expires; "
+                          "run `mes review` or `mes rules blank --reason …`",
+                "active_count": 0,
+                "reviewed_on": reviewed_on,
+                "blank_day_ack": blank_ack,
+            }
+        return {
+            "ready": False,
+            "status": "needs_ack",
+            "banner": "RULES EXPIRED / NONE — review left no rules; "
+                      "ack with `mes rules blank --reason …` before the session",
+            "active_count": 0,
+            "reviewed_on": reviewed_on,
+            "blank_day_ack": False,
+        }
+
+    def frame_machine_clauses(self, date: str) -> list[dict]:
+        """Machine clauses from the active frame (morning hypothesis or flip)."""
+        frame = self.active_frame(date) or {}
+        clauses = frame.get("machine_clauses") or []
+        return [c for c in clauses if isinstance(c, dict)]
+
+    def rules_for_session(self, session_date: str) -> list[dict]:
+        """Standing rules plus invalidation clauses seeded from today's frame."""
+        rules = list(self.active_standing_rules(session_date))
+        seen_ids = {
+            str((r.get("trigger") or {}).get("id") or (r.get("trigger") or {}).get("level") or "")
+            for r in rules
+        }
+        for index, clause in enumerate(self.frame_machine_clauses(session_date), start=1):
+            kind = str(clause.get("kind") or "invalidation")
+            if kind != "invalidation":
+                continue
+            clause_id = str(clause.get("id") or f"inv_{index}")
+            if clause_id in seen_ids:
+                continue
+            level = clause.get("level")
+            if not level:
+                continue
+            break_side = clause.get("break_side") or "below"
+            rules.append({
+                "trigger": {
+                    "kind": "invalidation",
+                    "id": clause_id,
+                    "level": level,
+                    "break_side": break_side,
+                    "confirmation": clause.get("confirmation") or "none",
+                    "tolerance_points": float(clause.get("tolerance_points") or 2.0),
+                },
+                "requirement": "flip_or_skip",
+                "note": str(clause.get("note") or ""),
+                "expires_on": None,
+            })
+            seen_ids.add(clause_id)
+        return rules
+
     def append_rule_fired(
         self, date: str, *, rule_id: str, level: str, confirmation: str,
         tolerance: float, last_price: float, distance: float, as_of: datetime,
+        trigger_kind: str = "level_retest",
     ) -> None:
         self._append(date, {
             "kind": "rule_fired",
@@ -345,6 +494,7 @@ class MesJournal:
             "tolerance": _num(tolerance),
             "last_price": _num(last_price),
             "distance": _num(distance),
+            "trigger_kind": trigger_kind,
         })
 
     def append_rule_skip(
@@ -421,21 +571,27 @@ class MesJournal:
         """Fire accounting for one session.
 
         Returns ``{"triggered": int, "checked": int, "skipped": int,
-        "missed": int, "open": list[dict], "detail": list[dict]}`` — every
-        unresolved fire sits in ``open`` until ``resolve_as_of`` pushes it past
-        the missed grace (trigger bar + one bar).
+        "flipped": int, "missed": int, "open": list[dict], "detail": list[dict]}``
+        — every unresolved fire sits in ``open`` until ``resolve_as_of`` pushes
+        it past the missed grace (trigger bar + one bar).
         """
         fires = self.load_rule_fires(date)
         checks = self.load_checks(date)
         skips = self.load_rule_skips(date)
-        resolved = _resolve_fires(fires, checks, skips, resolve_as_of=resolve_as_of)
-        by_outcome: dict[str, int] = {"checked": 0, "skipped": 0, "missed": 0, "open": 0}
+        flips = self.load_flips(date)
+        resolved = _resolve_fires(
+            fires, checks, skips, flips, resolve_as_of=resolve_as_of,
+        )
+        by_outcome: dict[str, int] = {
+            "checked": 0, "skipped": 0, "flipped": 0, "missed": 0, "open": 0,
+        }
         for fire in resolved:
             by_outcome[fire["outcome"]] = by_outcome.get(fire["outcome"], 0) + 1
         return {
             "triggered": len(fires),
             "checked": by_outcome.get("checked", 0),
             "skipped": by_outcome.get("skipped", 0),
+            "flipped": by_outcome.get("flipped", 0),
             "missed": by_outcome.get("missed", 0),
             "open": [f for f in resolved if f["outcome"] == "open"],
             "detail": resolved,
@@ -448,7 +604,8 @@ class MesJournal:
             return f"No standing-rule triggers recorded for {date}."
         lines = [
             f"{tally['triggered']} triggered / {tally['checked']} checked / "
-            f"{tally['skipped']} skipped / {tally['missed']} MISSED",
+            f"{tally['skipped']} skipped / {tally.get('flipped', 0)} flipped / "
+            f"{tally['missed']} MISSED",
             "",
             "| Rule | Fired | Outcome |",
             "| --- | --- | --- |",
